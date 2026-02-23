@@ -44,7 +44,8 @@ template <typename T> constexpr usz count_f32() {
   inline f32 name(f32 x) { return func(x); }
 
 SC_W(sin, __builtin_sinf)
-SC_W(cos, __builtin_cosf) SC_W(tan, __builtin_tanf) SC_W(asin, __builtin_asinf)
+SC_W(cos, __builtin_cosf)
+SC_W(tan, __builtin_tanf) SC_W(asin, __builtin_asinf)
     SC_W(acos, __builtin_acosf) SC_W(atan, __builtin_atanf)
         SC_W(sinh, __builtin_sinhf) SC_W(cosh, __builtin_coshf)
             SC_W(tanh, __builtin_tanhf) SC_W(asinh, __builtin_asinhf)
@@ -74,6 +75,7 @@ inline f32 pow(f32 b, f32 e) { return __builtin_powf(b, e); }
 inline f32 inverse(f32 x) { return 1.0f / x; }
 inline f32 relu(f32 x) { return max(0.0f, x); }
 inline f32 sigmoid(f32 x) { return 1.0f / (1.0f + __builtin_expf(-x)); }
+inline f32 rsqrt(f32 x) { return 1.0f / __builtin_sqrtf(x); }
 
 // --- Generic Automatic Struct/Vector Overloads ---
 #define MATH_FUNC(name)                                                        \
@@ -87,12 +89,13 @@ inline f32 sigmoid(f32 x) { return 1.0f / (1.0f + __builtin_expf(-x)); }
   }
 
 MATH_FUNC(sin)
-MATH_FUNC(cos) MATH_FUNC(tan) MATH_FUNC(asin) MATH_FUNC(acos) MATH_FUNC(atan)
-    MATH_FUNC(sinh) MATH_FUNC(cosh) MATH_FUNC(tanh) MATH_FUNC(asinh)
-        MATH_FUNC(acosh) MATH_FUNC(atanh) MATH_FUNC(exp) MATH_FUNC(log)
-            MATH_FUNC(log10) MATH_FUNC(log2) MATH_FUNC(sqrt) MATH_FUNC(sqr)
-                MATH_FUNC(abs) MATH_FUNC(sgn) MATH_FUNC(inverse) MATH_FUNC(relu)
-                    MATH_FUNC(sigmoid)
+MATH_FUNC(cos)
+MATH_FUNC(tan) MATH_FUNC(asin) MATH_FUNC(acos) MATH_FUNC(atan) MATH_FUNC(sinh)
+    MATH_FUNC(cosh) MATH_FUNC(tanh) MATH_FUNC(asinh) MATH_FUNC(acosh)
+        MATH_FUNC(atanh) MATH_FUNC(exp) MATH_FUNC(log) MATH_FUNC(log10)
+            MATH_FUNC(log2) MATH_FUNC(sqrt) MATH_FUNC(sqr) MATH_FUNC(abs)
+                MATH_FUNC(sgn) MATH_FUNC(inverse) MATH_FUNC(relu)
+                    MATH_FUNC(sigmoid) MATH_FUNC(rsqrt)
 
     // --- Reductions ---
     // POD Reduction (only for types that are not Arrays)
@@ -146,14 +149,18 @@ template <typename T> f32 std(const Array<T> &a) {
   template <typename T> Array<T> name(const Array<T> &a) {                     \
     Array<T> res;                                                              \
     res.allocate(a.size());                                                    \
-    for (usz i = 0; i < a.size(); ++i)                                         \
-      res[i] = Xi::Math::name(a[i]);                                           \
+    T *pr = res.data();                                                        \
+    const T *pa = a.data();                                                    \
+    usz n = a.size();                                                          \
+    _Pragma("omp simd") for (usz i = 0; i < n; ++i) pr[i] =                    \
+        Xi::Math::name(pa[i]);                                                 \
     return res;                                                                \
   }
 
 TS_W(sin)
-TS_W(cos) TS_W(tan) TS_W(asin) TS_W(acos) TS_W(atan) TS_W(exp) TS_W(log)
-    TS_W(sqrt) TS_W(sqr) TS_W(abs) TS_W(relu) TS_W(sigmoid)
+TS_W(cos)
+TS_W(tan) TS_W(asin) TS_W(acos) TS_W(atan) TS_W(exp) TS_W(log) TS_W(sqrt)
+    TS_W(sqr) TS_W(abs) TS_W(relu) TS_W(sigmoid) TS_W(rsqrt)
 
         template <typename Arr>
         Arr softmax(const Arr &a) {
@@ -275,12 +282,34 @@ inline Matrix4 perspective(f32 fov, f32 ar, f32 n, f32 f) {
   return r;
 }
 
+template <typename Arr>
+Arr matmul(const Arr &a, const Arr &b, usz M, usz N, usz P) {
+  Arr res;
+  res.allocate(M * P);
+  for (usz i = 0; i < M * P; ++i)
+    res[i] = 0;
+  // Optimized loop order: i, k, j for linear memory access (Cache Locality)
+  for (usz i = 0; i < M; ++i) {
+    for (usz k = 0; k < N; ++k) {
+      f32 aik = (f32)a[i * N + k];
+      _Pragma("omp simd") for (usz j = 0; j < P; ++j) {
+        res[i * P + j] += aik * (f32)b[k * P + j];
+      }
+    }
+  }
+  return res;
+}
+
 inline Matrix4 multiply(const Matrix4 &a, const Matrix4 &b) {
   Matrix4 r = {{{0}}};
-  for (int i = 0; i < 4; ++i)
-    for (int j = 0; j < 4; ++j)
-      for (int k = 0; k < 4; ++k)
-        r.m[i][j] += a.m[i][k] * b.m[k][j];
+  for (int i = 0; i < 4; ++i) {
+    for (int k = 0; k < 4; ++k) {
+      f32 aik = a.m[i][k];
+      _Pragma("omp simd") for (int j = 0; j < 4; ++j) {
+        r.m[i][j] += aik * b.m[k][j];
+      }
+    }
+  }
   return r;
 }
 } // namespace Math
