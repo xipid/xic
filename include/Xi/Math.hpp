@@ -8,6 +8,7 @@ namespace Xi {
 // Forward declarations
 template <typename T> class Array;
 
+// --- Simple POD Structs ---
 struct Vector2 {
   f32 x, y;
 };
@@ -17,31 +18,27 @@ struct Vector3 {
 struct Vector4 {
   f32 x, y, z, w;
 };
-
 struct Matrix4 {
   f32 m[4][4];
-
-  static inline Matrix4 identity();
-  static inline Matrix4 translate(f32 x, f32 y, f32 z);
-  static inline Matrix4 rotateX(f32 rad);
-  static inline Matrix4 rotateY(f32 rad);
-  static inline Matrix4 rotateZ(f32 rad);
-  static inline Matrix4 lookAt(Vector3 eye, Vector3 center, Vector3 up);
-  static inline Matrix4 perspective(f32 fov, f32 ar, f32 n, f32 f);
-  static inline Matrix4 ortho(f32 l, f32 r, f32 b, f32 t, f32 n, f32 f);
-  static inline Matrix4 transpose(const Matrix4 &in);
-  static inline Matrix4 multiply(const Matrix4 &a, const Matrix4 &b);
-  static inline Matrix4 inverse(const Matrix4 &m);
-  static inline f32 det(const Matrix4 &m);
-
-  inline Matrix4 operator*(const Matrix4 &other) const {
-    return multiply(*this, other);
-  }
 };
 
 using Tensor = Array<f32>;
 
 namespace Math {
+// --- Helper for Automatic Struct Support ---
+// Treat any POD struct as a contiguous array of f32 for element-wise ops
+template <typename T> inline f32 *as_f32(T &v) {
+  return reinterpret_cast<f32 *>(&v);
+}
+
+template <typename T> inline const f32 *as_f32(const T &v) {
+  return reinterpret_cast<const f32 *>(&v);
+}
+
+template <typename T> constexpr usz count_f32() {
+  return sizeof(T) / sizeof(f32);
+}
+
 // --- Scalar Base Functions ---
 #define SC_W(name, func)                                                       \
   inline f32 name(f32 x) { return func(x); }
@@ -56,9 +53,10 @@ SC_W(cos, __builtin_cosf) SC_W(tan, __builtin_tanf) SC_W(asin, __builtin_asinf)
                         SC_W(log10, __builtin_log10f)
                             SC_W(log2, __builtin_log2f)
                                 SC_W(sqrt, __builtin_sqrtf) inline f32
-    sqr(f32 x) {
-  return x * x;
+    atan2(f32 y, f32 x) {
+  return __builtin_atan2f(y, x);
 }
+inline f32 sqr(f32 x) { return x * x; }
 inline i32 floor(f32 x) { return (i32)__builtin_floorf(x); }
 inline i32 ceil(f32 x) { return (i32)__builtin_ceilf(x); }
 inline i32 round(f32 x) { return (i32)__builtin_roundf(x); }
@@ -77,123 +75,70 @@ inline f32 inverse(f32 x) { return 1.0f / x; }
 inline f32 relu(f32 x) { return max(0.0f, x); }
 inline f32 sigmoid(f32 x) { return 1.0f / (1.0f + __builtin_expf(-x)); }
 
-// --- Vector Overloads ---
-#define VC_W(name)                                                             \
-  inline Vector2 name(Vector2 v) {                                             \
-    return {Xi::Math::name(v.x), Xi::Math::name(v.y)};                         \
-  }                                                                            \
-  inline Vector3 name(Vector3 v) {                                             \
-    return {Xi::Math::name(v.x), Xi::Math::name(v.y), Xi::Math::name(v.z)};    \
-  }                                                                            \
-  inline Vector4 name(Vector4 v) {                                             \
-    return {Xi::Math::name(v.x), Xi::Math::name(v.y), Xi::Math::name(v.z),     \
-            Xi::Math::name(v.w)};                                              \
+// --- Generic Automatic Struct/Vector Overloads ---
+#define MATH_FUNC(name)                                                        \
+  template <typename T> inline T name(const T &v) {                            \
+    T res = v;                                                                 \
+    f32 *pr = reinterpret_cast<f32 *>(&res);                                   \
+    const f32 *pv = reinterpret_cast<const f32 *>(&v);                         \
+    for (usz i = 0; i < sizeof(T) / sizeof(f32); ++i)                          \
+      pr[i] = Xi::Math::name(pv[i]);                                           \
+    return res;                                                                \
   }
 
-VC_W(sin)
-VC_W(cos) VC_W(tan) VC_W(asin) VC_W(acos) VC_W(atan) VC_W(sinh) VC_W(cosh)
-    VC_W(tanh) VC_W(asinh) VC_W(acosh) VC_W(atanh) VC_W(exp) VC_W(log)
-        VC_W(log10) VC_W(log2) VC_W(sqrt) VC_W(sqr) VC_W(abs) VC_W(sgn)
-            VC_W(inverse) VC_W(relu) VC_W(sigmoid)
+MATH_FUNC(sin)
+MATH_FUNC(cos) MATH_FUNC(tan) MATH_FUNC(asin) MATH_FUNC(acos) MATH_FUNC(atan)
+    MATH_FUNC(sinh) MATH_FUNC(cosh) MATH_FUNC(tanh) MATH_FUNC(asinh)
+        MATH_FUNC(acosh) MATH_FUNC(atanh) MATH_FUNC(exp) MATH_FUNC(log)
+            MATH_FUNC(log10) MATH_FUNC(log2) MATH_FUNC(sqrt) MATH_FUNC(sqr)
+                MATH_FUNC(abs) MATH_FUNC(sgn) MATH_FUNC(inverse) MATH_FUNC(relu)
+                    MATH_FUNC(sigmoid)
 
-                inline Vector2 floor(Vector2 v, int i) {
-  return {(f32)floor(v.x, i), (f32)floor(v.y, i)};
-}
-inline Vector3 floor(Vector3 v, int i) {
-  return {(f32)floor(v.x, i), (f32)floor(v.y, i), (f32)floor(v.z, i)};
-}
-inline Vector4 floor(Vector4 v, int i) {
-  return {(f32)floor(v.x, i), (f32)floor(v.y, i), (f32)floor(v.z, i),
-          (f32)floor(v.w, i)};
+    // --- Reductions ---
+    // POD Reduction (only for types that are not Arrays)
+    template <typename T>
+    inline f32 sum(const T &v) {
+  const f32 *p = reinterpret_cast<const f32 *>(&v);
+  f32 s = 0;
+  for (usz i = 0; i < sizeof(T) / sizeof(f32); ++i)
+    s += p[i];
+  return s;
 }
 
-// --- Tensor Reduction Kernels ---
-inline f32 sum(Vector2 v) { return v.x + v.y; }
-inline f32 sum(Vector3 v) { return v.x + v.y + v.z; }
-inline f32 sum(Vector4 v) { return v.x + v.y + v.z + v.w; }
-inline f32 mean(Vector2 v) { return sum(v) / 2.0f; }
-inline f32 mean(Vector3 v) { return sum(v) / 3.0f; }
-inline f32 mean(Vector4 v) { return sum(v) / 4.0f; }
+template <typename T> inline f32 mean(const T &v) {
+  return sum(v) / (f32)(sizeof(T) / sizeof(f32));
+}
 
-template <typename Arr>
-auto sum(const Arr &a) ->
-    typename RemoveRef<decltype(const_cast<Arr &>(a)[0])>::Type {
-  typename RemoveRef<decltype(const_cast<Arr &>(a)[0])>::Type res = 0;
+// Array Reductions (overloads for Array and InlineArray)
+template <typename T> f32 sum(const Array<T> &a) {
+  f32 res = 0;
   for (usz i = 0; i < a.size(); ++i)
-    res += a[i];
+    res += (f32)a[i];
   return res;
 }
 
-template <typename Arr>
-auto mean(const Arr &a) ->
-    typename RemoveRef<decltype(const_cast<Arr &>(a)[0])>::Type {
+template <typename T> f32 mean(const Array<T> &a) {
   usz n = a.size();
   if (n == 0)
     return 0;
   return sum(a) / (f32)n;
 }
 
-template <typename Arr>
-auto var(const Arr &a) ->
-    typename RemoveRef<decltype(const_cast<Arr &>(a)[0])>::Type {
+template <typename T> f32 var(const Array<T> &a) {
   usz n = a.size();
   if (n < 2)
     return 0;
-  auto m = mean(a);
-  auto res = (decltype(m))0;
+  f32 m = mean(a);
+  f32 res = 0;
   for (usz i = 0; i < n; ++i) {
-    auto d = a[i] - m;
+    f32 d = (f32)a[i] - m;
     res += d * d;
   }
   return res / (f32)n;
 }
 
-template <typename Arr>
-auto std(const Arr &a) ->
-    typename RemoveRef<decltype(const_cast<Arr &>(a)[0])>::Type {
+template <typename T> f32 std(const Array<T> &a) {
   return Xi::Math::sqrt(var(a));
-}
-
-template <typename Arr>
-auto min(const Arr &a) ->
-    typename RemoveRef<decltype(const_cast<Arr &>(a)[0])>::Type {
-  if (a.size() == 0)
-    return 0;
-  auto m = a[0];
-  for (usz i = 1; i < a.size(); ++i)
-    if (a[i] < m)
-      m = a[i];
-  return m;
-}
-
-template <typename Arr>
-auto max(const Arr &a) ->
-    typename RemoveRef<decltype(const_cast<Arr &>(a)[0])>::Type {
-  if (a.size() == 0)
-    return 0;
-  auto m = a[0];
-  for (usz i = 1; i < a.size(); ++i)
-    if (a[i] > m)
-      m = a[i];
-  return m;
-}
-
-template <typename Arr> f32 norm(const Arr &a, f32 p = 2.0f) {
-  f32 res = 0;
-  usz n = a.size();
-  if (p == 1.0f) {
-    for (usz i = 0; i < n; ++i)
-      res += Xi::Math::abs(a[i]);
-  } else if (p == 2.0f) {
-    for (usz i = 0; i < n; ++i)
-      res += a[i] * a[i];
-    res = Xi::Math::sqrt(res);
-  } else {
-    for (usz i = 0; i < n; ++i)
-      res += Xi::Math::pow(Xi::Math::abs(a[i]), p);
-    res = Xi::Math::pow(res, 1.0f / p);
-  }
-  return res;
 }
 
 // --- Tensor (Element-wise) ---
@@ -207,51 +152,30 @@ template <typename Arr> f32 norm(const Arr &a, f32 p = 2.0f) {
   }
 
 TS_W(sin)
-TS_W(cos) TS_W(tan) TS_W(asin) TS_W(acos) TS_W(atan) TS_W(sinh) TS_W(cosh)
-    TS_W(tanh) TS_W(asinh) TS_W(acosh) TS_W(atanh) TS_W(exp) TS_W(log)
-        TS_W(log10) TS_W(log2) TS_W(sqrt) TS_W(sqr) TS_W(abs) TS_W(sgn)
-            TS_W(inverse) TS_W(relu) TS_W(sigmoid)
+TS_W(cos) TS_W(tan) TS_W(asin) TS_W(acos) TS_W(atan) TS_W(exp) TS_W(log)
+    TS_W(sqrt) TS_W(sqr) TS_W(abs) TS_W(relu) TS_W(sigmoid)
 
-                template <typename Arr>
-                Arr softmax(const Arr &a) {
+        template <typename Arr>
+        Arr softmax(const Arr &a) {
   Arr res = a;
   usz n = a.size();
   if (n == 0)
     return res;
-  auto m = max(a);
+  f32 m = -1e30f;
+  for (usz i = 0; i < n; ++i)
+    if ((f32)a[i] > m)
+      m = (f32)a[i];
   f32 s = 0;
   for (usz i = 0; i < n; ++i) {
-    res[i] = Xi::Math::exp(a[i] - m);
-    s += res[i];
+    res[i] = Xi::Math::exp((f32)a[i] - m);
+    s += (f32)res[i];
   }
   for (usz i = 0; i < n; ++i)
     res[i] /= s;
   return res;
 }
 
-// --- Tensor Join ---
-template <typename T>
-Array<T> concatT(const Array<Array<T>> &arrays, u32 axis = 0) {
-  usz total = 0;
-  for (usz i = 0; i < arrays.size(); ++i)
-    total += arrays[i].size();
-  Array<T> res;
-  res.allocate(total);
-  usz offset = 0;
-  for (usz i = 0; i < arrays.size(); ++i) {
-    for (usz j = 0; j < arrays[i].size(); ++j)
-      res[offset++] = arrays[i][j];
-  }
-  return res;
-}
-
-template <typename T>
-Array<T> stackT(const Array<Array<T>> &arrays, u32 axis = 0) {
-  // For 1D into 2D (flat), same as concat. Semantic differs in multi-dim.
-  return concatT(arrays, axis);
-}
-
-// --- Linear Algebra ---
+// --- Matrix/Vector Linear Algebra ---
 inline f32 dot(Vector3 a, Vector3 b) {
   return a.x * b.x + a.y * b.y + a.z * b.z;
 }
@@ -260,123 +184,61 @@ template <typename Arr> f32 dot(const Arr &a, const Arr &b) {
   f32 res = 0;
   usz n = a.size() < b.size() ? a.size() : b.size();
   for (usz i = 0; i < n; ++i)
-    res += a[i] * b[i];
+    res += (f32)a[i] * (f32)b[i];
   return res;
 }
 
-template <typename Arr>
-Arr matmul(const Arr &a, const Arr &b, usz M, usz N, usz P) {
-  Arr res;
-  res.allocate(M * P);
-  for (usz i = 0; i < M; ++i) {
-    for (usz j = 0; j < P; ++j) {
-      f32 s = 0;
-      for (usz k = 0; k < N; ++k)
-        s += a[i * N + k] * b[k * P + j];
-      res[i * P + j] = s;
-    }
-  }
-  return res;
-}
-
-// Matrix4 specialized functions in Math
-inline Matrix4 inverse(const Matrix4 &m) { return Matrix4::inverse(m); }
-inline f32 det(const Matrix4 &m) { return Matrix4::det(m); }
-
-// --- Transformation Wrappers ---
-inline Matrix4 identity() { return Matrix4::identity(); }
-inline Matrix4 translate(f32 x, f32 y, f32 z) {
-  return Matrix4::translate(x, y, z);
-}
-inline Matrix4 rotateX(f32 rad) { return Matrix4::rotateX(rad); }
-inline Matrix4 rotateY(f32 rad) { return Matrix4::rotateY(rad); }
-inline Matrix4 rotateZ(f32 rad) { return Matrix4::rotateZ(rad); }
-inline Matrix4 lookAt(Vector3 eye, Vector3 center, Vector3 up) {
-  return Matrix4::lookAt(eye, center, up);
-}
-inline Matrix4 perspective(f32 fov, f32 ar, f32 n, f32 f) {
-  return Matrix4::perspective(fov, ar, n, f);
-}
-inline Matrix4 orthographic(f32 l, f32 r, f32 b, f32 t, f32 n, f32 f) {
-  return Matrix4::ortho(l, r, b, t, n, f);
-}
-inline Matrix4 ortho(f32 l, f32 r, f32 b, f32 t, f32 n, f32 f) {
-  return Matrix4::ortho(l, r, b, t, n, f);
-}
-} // namespace Math
-
-// --- Matrix4 Implementation ---
-inline Matrix4 Matrix4::identity() {
-  Matrix4 r = {0};
+// --- Matrix Transformations (Free Functions) ---
+inline Matrix4 identity() {
+  Matrix4 r = {{{0}}};
   r.m[0][0] = 1;
   r.m[1][1] = 1;
   r.m[2][2] = 1;
   r.m[3][3] = 1;
   return r;
 }
-inline Matrix4 Matrix4::translate(f32 x, f32 y, f32 z) {
+
+inline Matrix4 translate(f32 x, f32 y, f32 z) {
   Matrix4 r = identity();
   r.m[3][0] = x;
   r.m[3][1] = y;
   r.m[3][2] = z;
   return r;
 }
-inline Matrix4 Matrix4::rotateX(f32 rad) {
+
+inline Matrix4 rotateX(f32 rad) {
   Matrix4 r = identity();
-  f32 c = Math::cos(rad), s = Math::sin(rad);
+  f32 c = cos(rad), s = sin(rad);
   r.m[1][1] = c;
   r.m[1][2] = s;
   r.m[2][1] = -s;
   r.m[2][2] = c;
   return r;
 }
-inline Matrix4 Matrix4::rotateY(f32 rad) {
+
+inline Matrix4 rotateY(f32 rad) {
   Matrix4 r = identity();
-  f32 c = Math::cos(rad), s = Math::sin(rad);
+  f32 c = cos(rad), s = sin(rad);
   r.m[0][0] = c;
   r.m[0][2] = -s;
   r.m[2][0] = s;
   r.m[2][2] = c;
   return r;
 }
-inline Matrix4 Matrix4::rotateZ(f32 rad) {
+
+inline Matrix4 rotateZ(f32 rad) {
   Matrix4 r = identity();
-  f32 c = Math::cos(rad), s = Math::sin(rad);
+  f32 c = cos(rad), s = sin(rad);
   r.m[0][0] = c;
   r.m[0][1] = s;
   r.m[1][0] = -s;
   r.m[1][1] = c;
   return r;
 }
-inline Matrix4 Matrix4::transpose(const Matrix4 &in) {
-  Matrix4 out;
-  for (int r = 0; r < 4; ++r)
-    for (int c = 0; c < 4; ++c)
-      out.m[r][c] = in.m[c][r];
-  return out;
-}
-inline Matrix4 Matrix4::multiply(const Matrix4 &a, const Matrix4 &b) {
-  Matrix4 r = {0};
-  for (int i = 0; i < 4; ++i)
-    for (int j = 0; j < 4; ++j)
-      for (int k = 0; k < 4; ++k)
-        r.m[i][j] += a.m[i][k] * b.m[k][j];
-  return r;
-}
-inline f32 Matrix4::det(const Matrix4 &m) {
-  // Simplified 4x4 determinant
-  f32 res = 0;
-  // ... recursive or closed form ...
-  // We'll provide a basic implementation for now
-  return m.m[0][0] * m.m[1][1] * m.m[2][2] * m.m[3][3]; // Placeholder
-}
-inline Matrix4 Matrix4::inverse(const Matrix4 &m) {
-  // Placeholder for matrix inverse
-  return m;
-}
-inline Matrix4 Matrix4::lookAt(Vector3 eye, Vector3 center, Vector3 up) {
+
+inline Matrix4 lookAt(Vector3 eye, Vector3 center, Vector3 up) {
   auto norm = [](Vector3 v) {
-    f32 l = Math::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    f32 l = Xi::Math::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
     return (l == 0) ? Vector3{0, 0, 0} : Vector3{v.x / l, v.y / l, v.z / l};
   };
   auto cross = [](Vector3 a, Vector3 b) {
@@ -396,14 +258,15 @@ inline Matrix4 Matrix4::lookAt(Vector3 eye, Vector3 center, Vector3 up) {
   r.m[0][2] = -f.x;
   r.m[1][2] = -f.y;
   r.m[2][2] = -f.z;
-  r.m[3][0] = -Math::dot(s, eye);
-  r.m[3][1] = -Math::dot(u, eye);
-  r.m[3][2] = Math::dot(f, eye);
+  r.m[3][0] = -dot(s, eye);
+  r.m[3][1] = -dot(u, eye);
+  r.m[3][2] = dot(f, eye);
   return r;
 }
-inline Matrix4 Matrix4::perspective(f32 fov, f32 ar, f32 n, f32 f) {
-  f32 thf = Math::tan(fov / 2.0f);
-  Matrix4 r = {0};
+
+inline Matrix4 perspective(f32 fov, f32 ar, f32 n, f32 f) {
+  f32 thf = tan(fov / 2.0f);
+  Matrix4 r = {{{0}}};
   r.m[0][0] = 1.0f / (ar * thf);
   r.m[1][1] = 1.0f / thf;
   r.m[2][2] = -(f + n) / (f - n);
@@ -411,16 +274,16 @@ inline Matrix4 Matrix4::perspective(f32 fov, f32 ar, f32 n, f32 f) {
   r.m[3][2] = -(2.0f * f * n) / (f - n);
   return r;
 }
-inline Matrix4 Matrix4::ortho(f32 l, f32 r, f32 b, f32 t, f32 n, f32 f) {
-  Matrix4 res = identity();
-  res.m[0][0] = 2.0f / (r - l);
-  res.m[1][1] = 2.0f / (t - b);
-  res.m[2][2] = -2.0f / (f - n);
-  res.m[3][0] = -(r + l) / (r - l);
-  res.m[3][1] = -(t + b) / (t - b);
-  res.m[3][2] = -(f + n) / (f - n);
-  return res;
+
+inline Matrix4 multiply(const Matrix4 &a, const Matrix4 &b) {
+  Matrix4 r = {{{0}}};
+  for (int i = 0; i < 4; ++i)
+    for (int j = 0; j < 4; ++j)
+      for (int k = 0; k < 4; ++k)
+        r.m[i][j] += a.m[i][k] * b.m[k][j];
+  return r;
 }
+} // namespace Math
 
 // --- Vector Operators ---
 inline Vector2 operator+(Vector2 a, Vector2 b) {
@@ -430,7 +293,6 @@ inline Vector2 operator-(Vector2 a, Vector2 b) {
   return {a.x - b.x, a.y - b.y};
 }
 inline Vector2 operator*(Vector2 a, f32 s) { return {a.x * s, a.y * s}; }
-inline Vector2 operator/(Vector2 a, f32 s) { return {a.x / s, a.y / s}; }
 inline Vector3 operator+(Vector3 a, Vector3 b) {
   return {a.x + b.x, a.y + b.y, a.z + b.z};
 }
@@ -439,9 +301,6 @@ inline Vector3 operator-(Vector3 a, Vector3 b) {
 }
 inline Vector3 operator*(Vector3 a, f32 s) {
   return {a.x * s, a.y * s, a.z * s};
-}
-inline Vector3 operator/(Vector3 a, f32 s) {
-  return {a.x / s, a.y / s, a.z / s};
 }
 inline Vector4 operator+(Vector4 a, Vector4 b) {
   return {a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w};
@@ -452,8 +311,10 @@ inline Vector4 operator-(Vector4 a, Vector4 b) {
 inline Vector4 operator*(Vector4 a, f32 s) {
   return {a.x * s, a.y * s, a.z * s, a.w * s};
 }
-inline Vector4 operator/(Vector4 a, f32 s) {
-  return {a.x / s, a.y / s, a.z / s, a.w / s};
+
+// Matrix Operator
+inline Matrix4 operator*(const Matrix4 &a, const Matrix4 &b) {
+  return Math::multiply(a, b);
 }
 } // namespace Xi
 
