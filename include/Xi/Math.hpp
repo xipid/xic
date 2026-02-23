@@ -45,15 +45,15 @@ template <typename T> constexpr usz count_f32() {
 
 SC_W(sin, __builtin_sinf)
 SC_W(cos, __builtin_cosf)
-SC_W(tan, __builtin_tanf) SC_W(asin, __builtin_asinf)
-    SC_W(acos, __builtin_acosf) SC_W(atan, __builtin_atanf)
-        SC_W(sinh, __builtin_sinhf) SC_W(cosh, __builtin_coshf)
-            SC_W(tanh, __builtin_tanhf) SC_W(asinh, __builtin_asinhf)
-                SC_W(acosh, __builtin_acoshf) SC_W(atanh, __builtin_atanhf)
-                    SC_W(exp, __builtin_expf) SC_W(log, __builtin_logf)
-                        SC_W(log10, __builtin_log10f)
-                            SC_W(log2, __builtin_log2f)
-                                SC_W(sqrt, __builtin_sqrtf) inline f32
+SC_W(tan, __builtin_tanf)
+SC_W(asin, __builtin_asinf) SC_W(acos, __builtin_acosf)
+    SC_W(atan, __builtin_atanf) SC_W(sinh, __builtin_sinhf)
+        SC_W(cosh, __builtin_coshf) SC_W(tanh, __builtin_tanhf)
+            SC_W(asinh, __builtin_asinhf) SC_W(acosh, __builtin_acoshf)
+                SC_W(atanh, __builtin_atanhf) SC_W(exp, __builtin_expf)
+                    SC_W(log, __builtin_logf) SC_W(log10, __builtin_log10f)
+                        SC_W(log2, __builtin_log2f)
+                            SC_W(sqrt, __builtin_sqrtf) inline f32
     atan2(f32 y, f32 x) {
   return __builtin_atan2f(y, x);
 }
@@ -90,12 +90,13 @@ inline f32 rsqrt(f32 x) { return 1.0f / __builtin_sqrtf(x); }
 
 MATH_FUNC(sin)
 MATH_FUNC(cos)
-MATH_FUNC(tan) MATH_FUNC(asin) MATH_FUNC(acos) MATH_FUNC(atan) MATH_FUNC(sinh)
-    MATH_FUNC(cosh) MATH_FUNC(tanh) MATH_FUNC(asinh) MATH_FUNC(acosh)
-        MATH_FUNC(atanh) MATH_FUNC(exp) MATH_FUNC(log) MATH_FUNC(log10)
-            MATH_FUNC(log2) MATH_FUNC(sqrt) MATH_FUNC(sqr) MATH_FUNC(abs)
-                MATH_FUNC(sgn) MATH_FUNC(inverse) MATH_FUNC(relu)
-                    MATH_FUNC(sigmoid) MATH_FUNC(rsqrt)
+MATH_FUNC(tan)
+MATH_FUNC(asin) MATH_FUNC(acos) MATH_FUNC(atan) MATH_FUNC(sinh) MATH_FUNC(cosh)
+    MATH_FUNC(tanh) MATH_FUNC(asinh) MATH_FUNC(acosh) MATH_FUNC(atanh)
+        MATH_FUNC(exp) MATH_FUNC(log) MATH_FUNC(log10) MATH_FUNC(log2)
+            MATH_FUNC(sqrt) MATH_FUNC(sqr) MATH_FUNC(abs) MATH_FUNC(sgn)
+                MATH_FUNC(inverse) MATH_FUNC(relu) MATH_FUNC(sigmoid)
+                    MATH_FUNC(rsqrt)
 
     // --- Reductions ---
     // POD Reduction (only for types that are not Arrays)
@@ -115,8 +116,12 @@ template <typename T> inline f32 mean(const T &v) {
 // Array Reductions (overloads for Array and InlineArray)
 template <typename T> f32 sum(const Array<T> &a) {
   f32 res = 0;
-  for (usz i = 0; i < a.size(); ++i)
-    res += (f32)a[i];
+  usz n = a.size();
+  usz members = sizeof(T) / sizeof(f32);
+  for (usz i = 0; i < n; ++i) {
+    const f32 *p = reinterpret_cast<const f32 *>(&a[i]);
+    _Pragma("omp simd") for (usz k = 0; k < members; ++k) res += p[k];
+  }
   return res;
 }
 
@@ -124,20 +129,31 @@ template <typename T> f32 mean(const Array<T> &a) {
   usz n = a.size();
   if (n == 0)
     return 0;
-  return sum(a) / (f32)n;
+  usz total_scalars = n * (sizeof(T) / sizeof(f32));
+  return sum(a) / (f32)total_scalars;
 }
 
 template <typename T> f32 var(const Array<T> &a) {
   usz n = a.size();
-  if (n < 2)
+  usz members = sizeof(T) / sizeof(f32);
+  usz total_scalars = n * members;
+  if (total_scalars < 2)
     return 0;
-  f32 m = mean(a);
-  f32 res = 0;
+
+  f32 s = 0;
+  f32 s2 = 0;
   for (usz i = 0; i < n; ++i) {
-    f32 d = (f32)a[i] - m;
-    res += d * d;
+    const f32 *p = reinterpret_cast<const f32 *>(&a[i]);
+    _Pragma("omp simd") for (usz k = 0; k < members; ++k) {
+      f32 x = p[k];
+      s += x;
+      s2 += x * x;
+    }
   }
-  return res / (f32)n;
+
+  f32 inv_n = 1.0f / (f32)total_scalars;
+  f32 m = s * inv_n;
+  return (s2 * inv_n) - (m * m);
 }
 
 template <typename T> f32 std(const Array<T> &a) {
@@ -159,8 +175,9 @@ template <typename T> f32 std(const Array<T> &a) {
 
 TS_W(sin)
 TS_W(cos)
-TS_W(tan) TS_W(asin) TS_W(acos) TS_W(atan) TS_W(exp) TS_W(log) TS_W(sqrt)
-    TS_W(sqr) TS_W(abs) TS_W(relu) TS_W(sigmoid) TS_W(rsqrt)
+TS_W(tan)
+TS_W(asin) TS_W(acos) TS_W(atan) TS_W(exp) TS_W(log) TS_W(sqrt) TS_W(sqr)
+    TS_W(abs) TS_W(relu) TS_W(sigmoid) TS_W(rsqrt)
 
         template <typename Arr>
         Arr softmax(const Arr &a) {
