@@ -46,14 +46,14 @@ template <typename T> constexpr usz count_f32() {
 SC_W(sin, __builtin_sinf)
 SC_W(cos, __builtin_cosf)
 SC_W(tan, __builtin_tanf)
-SC_W(asin, __builtin_asinf) SC_W(acos, __builtin_acosf)
-    SC_W(atan, __builtin_atanf) SC_W(sinh, __builtin_sinhf)
-        SC_W(cosh, __builtin_coshf) SC_W(tanh, __builtin_tanhf)
-            SC_W(asinh, __builtin_asinhf) SC_W(acosh, __builtin_acoshf)
-                SC_W(atanh, __builtin_atanhf) SC_W(exp, __builtin_expf)
-                    SC_W(log, __builtin_logf) SC_W(log10, __builtin_log10f)
-                        SC_W(log2, __builtin_log2f)
-                            SC_W(sqrt, __builtin_sqrtf) inline f32
+SC_W(asin, __builtin_asinf)
+SC_W(acos, __builtin_acosf) SC_W(atan, __builtin_atanf)
+    SC_W(sinh, __builtin_sinhf) SC_W(cosh, __builtin_coshf)
+        SC_W(tanh, __builtin_tanhf) SC_W(asinh, __builtin_asinhf)
+            SC_W(acosh, __builtin_acoshf) SC_W(atanh, __builtin_atanhf)
+                SC_W(exp, __builtin_expf) SC_W(log, __builtin_logf)
+                    SC_W(log10, __builtin_log10f) SC_W(log2, __builtin_log2f)
+                        SC_W(sqrt, __builtin_sqrtf) inline f32
     atan2(f32 y, f32 x) {
   return __builtin_atan2f(y, x);
 }
@@ -91,12 +91,12 @@ inline f32 rsqrt(f32 x) { return 1.0f / __builtin_sqrtf(x); }
 MATH_FUNC(sin)
 MATH_FUNC(cos)
 MATH_FUNC(tan)
-MATH_FUNC(asin) MATH_FUNC(acos) MATH_FUNC(atan) MATH_FUNC(sinh) MATH_FUNC(cosh)
-    MATH_FUNC(tanh) MATH_FUNC(asinh) MATH_FUNC(acosh) MATH_FUNC(atanh)
-        MATH_FUNC(exp) MATH_FUNC(log) MATH_FUNC(log10) MATH_FUNC(log2)
-            MATH_FUNC(sqrt) MATH_FUNC(sqr) MATH_FUNC(abs) MATH_FUNC(sgn)
-                MATH_FUNC(inverse) MATH_FUNC(relu) MATH_FUNC(sigmoid)
-                    MATH_FUNC(rsqrt)
+MATH_FUNC(asin)
+MATH_FUNC(acos) MATH_FUNC(atan) MATH_FUNC(sinh) MATH_FUNC(cosh) MATH_FUNC(tanh)
+    MATH_FUNC(asinh) MATH_FUNC(acosh) MATH_FUNC(atanh) MATH_FUNC(exp)
+        MATH_FUNC(log) MATH_FUNC(log10) MATH_FUNC(log2) MATH_FUNC(sqrt)
+            MATH_FUNC(sqr) MATH_FUNC(abs) MATH_FUNC(sgn) MATH_FUNC(inverse)
+                MATH_FUNC(relu) MATH_FUNC(sigmoid) MATH_FUNC(rsqrt)
 
     // --- Reductions ---
     // POD Reduction (only for types that are not Arrays)
@@ -176,8 +176,9 @@ template <typename T> f32 std(const Array<T> &a) {
 TS_W(sin)
 TS_W(cos)
 TS_W(tan)
-TS_W(asin) TS_W(acos) TS_W(atan) TS_W(exp) TS_W(log) TS_W(sqrt) TS_W(sqr)
-    TS_W(abs) TS_W(relu) TS_W(sigmoid) TS_W(rsqrt)
+TS_W(asin)
+TS_W(acos) TS_W(atan) TS_W(exp) TS_W(log) TS_W(sqrt) TS_W(sqr) TS_W(abs)
+    TS_W(relu) TS_W(sigmoid) TS_W(rsqrt)
 
         template <typename Arr>
         Arr softmax(const Arr &a) {
@@ -328,6 +329,69 @@ inline Matrix4 multiply(const Matrix4 &a, const Matrix4 &b) {
     }
   }
   return r;
+}
+
+inline f32 det(const Matrix4 &m) {
+  f32 a = m.m[0][0], b = m.m[0][1], c = m.m[0][2], d = m.m[0][3];
+  f32 e = m.m[1][0], f = m.m[1][1], g = m.m[1][2], h = m.m[1][3];
+  f32 i = m.m[2][0], j = m.m[2][1], k = m.m[2][2], l = m.m[2][3];
+  f32 n = m.m[3][0], o = m.m[3][1], p = m.m[3][2], q = m.m[3][3];
+
+  return a * (f * (k * q - l * p) - g * (j * q - l * o) + h * (j * p - k * o)) -
+         b * (e * (k * q - l * p) - g * (i * q - l * n) + h * (i * p - k * n)) +
+         c * (e * (j * q - l * o) - f * (i * q - l * n) + h * (i * o - j * n)) -
+         d * (e * (j * p - k * o) - f * (i * p - k * n) + g * (i * o - j * n));
+}
+
+inline Matrix4 inverse(const Matrix4 &m) {
+  f32 d = det(m);
+  if (Xi::Math::abs(d) < 1e-8f)
+    return identity();
+  f32 invDet = 1.0f / d;
+
+  f32 a = m.m[0][0], b = m.m[0][1], c = m.m[0][2], d_ = m.m[0][3];
+  f32 e = m.m[1][0], f = m.m[1][1], g = m.m[1][2], h = m.m[1][3];
+  f32 i = m.m[2][0], j = m.m[2][1], k = m.m[2][2], l = m.m[2][3];
+  f32 n = m.m[3][0], o = m.m[3][1], p = m.m[3][2], q = m.m[3][3];
+
+  Matrix4 res;
+  res.m[0][0] = invDet * (f * (k * q - l * p) - g * (j * q - l * o) +
+                          h * (j * p - k * o));
+  res.m[1][0] = -invDet * (e * (k * q - l * p) - g * (i * q - l * n) +
+                           h * (i * p - k * n));
+  res.m[2][0] = invDet * (e * (j * q - l * o) - f * (i * q - l * n) +
+                          h * (i * o - j * n));
+  res.m[3][0] = -invDet * (e * (j * p - k * o) - f * (i * p - k * n) +
+                           g * (i * o - j * n));
+
+  res.m[0][1] = -invDet * (b * (k * q - l * p) - c * (j * q - l * o) +
+                           d_ * (j * p - k * o));
+  res.m[1][1] = invDet * (a * (k * q - l * p) - c * (i * q - l * n) +
+                          d_ * (i * p - k * n));
+  res.m[2][1] = -invDet * (a * (j * q - l * o) - b * (i * q - l * n) +
+                           d_ * (i * o - j * n));
+  res.m[3][1] = invDet * (a * (j * p - k * o) - b * (i * p - k * n) +
+                          c * (i * o - j * n));
+
+  res.m[0][2] = invDet * (b * (g * q - h * p) - c * (f * q - h * o) +
+                          d_ * (f * p - g * o));
+  res.m[1][2] = -invDet * (a * (g * q - h * p) - c * (e * q - h * n) +
+                           d_ * (e * p - g * n));
+  res.m[2][2] = invDet * (a * (f * q - h * o) - b * (e * q - h * n) +
+                          d_ * (e * o - f * n));
+  res.m[3][2] = -invDet * (a * (f * p - g * o) - b * (e * p - g * n) +
+                           c * (e * o - f * n));
+
+  res.m[0][3] = -invDet * (b * (g * l - h * k) - c * (f * l - h * j) +
+                           d_ * (f * k - g * j));
+  res.m[1][3] = invDet * (a * (g * l - h * k) - c * (e * l - h * i) +
+                          d_ * (e * k - g * i));
+  res.m[2][3] = -invDet * (a * (f * l - h * j) - b * (e * l - h * i) +
+                           d_ * (e * j - f * i));
+  res.m[3][3] = invDet * (a * (f * k - g * j) - b * (e * k - g * i) +
+                          c * (e * j - f * i));
+
+  return res;
 }
 } // namespace Math
 
