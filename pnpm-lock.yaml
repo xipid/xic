@@ -10,10 +10,6 @@ overrides:
 importers:
 
   .:
-    dependencies:
-      fictif:
-        specifier: link:../../../.local/share/pnpm/global/5/node_modules/fictif
-        version: link:../../../.local/share/pnpm/global/5/node_modules/fictif
     devDependencies:
       '@fontsource/montserrat':
         specifier: ^5.2.8
@@ -33,6 +29,9 @@ importers:
       '@vitejs/plugin-vue':
         specifier: ^6.0.4
         version: 6.0.4(vite@7.3.1(jiti@2.6.1)(lightningcss@1.30.2))(vue@3.5.28)
+      fictif:
+        specifier: link:../../../.local/share/pnpm/global/5/node_modules/fictif
+        version: link:../../../.local/share/pnpm/global/5/node_modules/fictif
       markdown-it:
         specifier: ^14.1.1
         version: 14.1.1

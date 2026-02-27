@@ -63,6 +63,18 @@ public:
     return true;
   }
 
+  bool reserve(usz len) {
+    if (fragments.size() == 0) {
+      InlineArray<T> chunk;
+      if (!chunk.reserve(len))
+        return false;
+      chunk.offset = 0;
+      fragments.push(Xi::Move(chunk));
+      return true;
+    }
+    return fragments.data()[fragments.size() - 1].reserve(len);
+  }
+
   /**
    * @brief Flatten all fragments into a single contiguous array.
    * @return Pointer to the beginning of the contiguous data.

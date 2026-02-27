@@ -192,6 +192,14 @@ public:
     return find(needle, start);
   }
 
+  long long indexOf(char needle, usz start = 0) const {
+    for (usz i = start; i < size(); i++) {
+      if (operator[](i) == (u8)needle)
+        return (long long)i;
+    }
+    return -1;
+  }
+
   bool includes(const char *needle, usz start = 0) const {
     return find(needle, start) != -1;
   }
@@ -539,7 +547,7 @@ public:
     append_raw(const_cast<String &>(s).data(), s.size());
   }
 
-  String unshiftVarString() {
+  String shiftVarString() {
     auto res = peekVarLong();
     if (res.error)
       return String();
@@ -557,16 +565,6 @@ public:
     for (long long i = 0; i < res.value; i++)
       shift();
 
-    return result;
-  }
-
-  String shiftVarString() {
-    long long lengthToRead = shiftVarLong();
-    if (lengthToRead < 0 || (usz)lengthToRead > size())
-      return String();
-    String result = begin(0, (usz)lengthToRead);
-    for (long long i = 0; i < lengthToRead; i++)
-      shift();
     return result;
   }
 
