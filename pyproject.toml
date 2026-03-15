@@ -14,7 +14,8 @@ authors = [
 ]
 keywords = ["cpp", "esp32", "mesh", "rho", "crypto", "monocypher", "IoT", "UDP", "P2P", "game-networking"]
 dependencies = [
-    "cppyy"
+    "cppyy",
+    "nanobind"
 ]
 
 [project.urls]

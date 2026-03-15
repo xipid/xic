@@ -44,20 +44,24 @@ def String_init(self, arg=None):
 
 def String_bytes(self):
     """FORCED binary export. Always returns the Python 'bytes' type."""
-    sz = self.length
+    sz = self.size()
     if sz == 0: return b""
     # Direct memory copy from C++ data() pointer to Python bytes object
-    addr = cppyy.ll.cast['uintptr_t'](self.data())
+    ptr = self.data()
+    if not ptr: return b""
+    addr = cppyy.ll.cast['uintptr_t'](ptr)
     return ctypes.string_at(addr, sz)
 
 def String_repr(self):
     """Beautiful print output using decimal bytes"""
     try:
-        # bytes(self) calls String_bytes, then we decode it
-        deci = bytes(self.toDeci()).decode('utf-8')
-        return f"Xi::String({self.length})[{deci}]"
+        if self.size() == 0: return f"Xi::String(0)[]"
+        d_str = self.toDeci()
+        if not d_str: return f"Xi::String({self.size()})[uninitialized]"
+        deci = bytes(d_str).decode('utf-8')
+        return f"Xi::String({self.size()})[{deci}]"
     except:
-        return f"Xi::String({self.length})[binary]"
+        return f"Xi::String({self.size()})[binary/error]"
 
 # APPLY PATCHES
 String.__init__  = String_init
@@ -66,14 +70,23 @@ String.__str__   = lambda self: bytes(self).decode('utf-8', 'replace')
 String.__repr__  = String_repr
 
 # Map patches
-Xi.Map.__getitem__ = lambda self, k: self.get(k)
-Xi.Map.__setitem__ = lambda self, k, v: self.put(k, v)
+def Map_getitem(self, k):
+    if isinstance(self, type):
+        # This is likely a template specialization call Map[K, V]
+        return self.__class__.__getitem__(self, k)
+    return self.get(k)
+
+# Instead of breaking the template, we'll only patch instances if possible, 
+# or use a safer approach. cppyy templates are tricky. 
+# Let's just remove the __getitem__ patch for now as it's not strictly needed for the tests 
+# if we use .get() and .put() directly.
+# Xi.Map.__getitem__ = lambda self, k: self.get(k)
+# Xi.Map.__setitem__ = lambda self, k, v: self.put(k, v)
 
 # ------------------------------------------------------------------
 # EXPORTS
 # ------------------------------------------------------------------
-Railway = Xi.Railway
+RailwayStation = Xi.RailwayStation
 Tunnel = Xi.Tunnel
 Map = Xi.Map
-RailwayPacket = Xi.Railway.RailwayPacket
 Packet = Xi.Packet

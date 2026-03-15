@@ -3,6 +3,14 @@
 #ifndef XI_PRIMITIVES
 #define XI_PRIMITIVES
 
+#ifdef __cheerp__
+#define XI_EXPORT [[cheerp::jsexport]]
+#elif defined(__BINDGEN__)
+#define XI_EXPORT __attribute__((annotate("XI_EXPORT")))
+#else
+#define XI_EXPORT
+#endif
+
 #include <ctime>
 #if defined(__has_include)
 #if __has_include(<new>)
@@ -61,11 +69,19 @@ Move(T &&arg) noexcept // Added noinline/noexcept
   return static_cast<typename RemoveRef<T>::Type &&>(arg);
 }
 
+// Custom EnableIf to avoid <type_traits>
+template <bool B, typename T = void> struct EnableIf {};
+template <typename T> struct EnableIf<true, T> {
+  using Type = T;
+};
+
 template <typename T> inline void Swap(T &a, T &b) {
   T temp = Xi::Move(a);
   a = Xi::Move(b);
   b = Xi::Move(temp);
 }
+
+template <typename T> T &&DeclVal() noexcept;
 
 template <typename U, typename V> struct IsSame {
   static const bool Value = false;
@@ -138,61 +154,123 @@ template <typename T> struct FNVHasher<T *> {
   }
 };
 
-static inline usz fnvHashMix(usz k) {
-#if __SIZEOF_POINTER__ == 8
-  k ^= k >> 33;
-  k *= 0xff51afd7ed558ccdULL;
-  k ^= k >> 33;
-  k *= 0xc4ceb9fe1a85ec53ULL;
-  k ^= k >> 33;
-#else
-  k ^= k >> 16;
-  k *= 0x85ebca6b;
-  k ^= k >> 13;
-  k *= 0xc2b2ae35;
-  k ^= k >> 16;
-#endif
-  return k;
+usz fnvHashMix(usz k);
+
+class IMemoryDevice {
+public:
+    virtual void* alloc(usz size) = 0;
+    virtual void  free(void* handle) = 0;
+    virtual void  upload(void* handle, const void* src, usz size) = 0;
+    virtual void  download(void* handle, void* dst, usz size) = 0;
+    virtual void* view(void* handle, i32 type = 0) = 0;
+    virtual void* allocSurface(i32 w, i32 h, i32 channels = 4) = 0;
+    virtual ~IMemoryDevice() = default;
 };
+
+// -------------------------------------------------------------------------
+// Serialization Traits & Helpers
+// -------------------------------------------------------------------------
+
+class String;
+
+template <typename T> struct HasSerialize {
+private:
+  template <typename U>
+  static auto test(int) -> decltype(Move(DeclVal<U>().serialize()), char());
+  template <typename U> static long test(...);
+
+public:
+  static const bool Value = sizeof(test<T>(0)) == sizeof(char);
+};
+
+template <typename T> struct HasDeserialize {
+private:
+  template <typename U>
+  static auto test(int) -> decltype(U::deserialize(DeclVal<String>()), char());
+  template <typename U> static long test(...);
+
+public:
+  static const bool Value = sizeof(test<T>(0)) == sizeof(char);
+};
+
+template <typename T> struct HasDeserializeAt {
+private:
+  template <typename U>
+  static auto test(int) -> decltype(U::deserialize(DeclVal<String>(), DeclVal<usz &>()), char());
+  template <typename U> static long test(...);
+
+public:
+  static const bool Value = sizeof(test<T>(0)) == sizeof(char);
+};
+
+template <typename T> struct HasValidToDeserialize {
+private:
+  template <typename U>
+  static auto test(int) -> decltype(Xi::DeclVal<U>().validToDeserialize(
+                                       Xi::DeclVal<String>(), Xi::DeclVal<usz>()),
+                                   char());
+  template <typename U> static long test(...);
+
+public:
+  static const bool Value = sizeof(test<T>(0)) == sizeof(char);
+};
+
+template <typename T> struct IsPrimitive {
+  static const bool Value = false;
+};
+#define XI_MARK_PRIMITIVE(Ty)                                                  \
+  template <> struct IsPrimitive<Ty> {                                         \
+    static const bool Value = true;                                            \
+  };
+XI_MARK_PRIMITIVE(bool)
+XI_MARK_PRIMITIVE(u8)
+XI_MARK_PRIMITIVE(i8)
+XI_MARK_PRIMITIVE(u16)
+XI_MARK_PRIMITIVE(i16)
+XI_MARK_PRIMITIVE(u32)
+XI_MARK_PRIMITIVE(i32)
+XI_MARK_PRIMITIVE(u64)
+XI_MARK_PRIMITIVE(i64)
+XI_MARK_PRIMITIVE(f32)
+XI_MARK_PRIMITIVE(f64)
+
+/**
+ * @brief Serializes an object to a String.
+ * Calls obj.serialize() if available, or handles primitives and structs.
+ */
+template <typename T, typename S = String> S serialize(const T &obj);
+
+/**
+ * @brief Checks if a String is valid to deserialize into a type.
+ */
+template <typename T> bool validToDeserialize(const T &obj, usz originalLength);
+
+/**
+ * @brief Helper for deserialize inference.
+ */
+struct Deserializer {
+  String *data;
+  template <typename T> operator T();
+};
+
+/**
+ * @brief Deserializes a String into an object.
+ */
+template <typename S = String> inline Deserializer deserialize(const S &s) {
+  return {const_cast<S *>(&s)};
+}
+
+/**
+ * @brief Deserializes a String into an object from a specific offset.
+ */
+template <typename T, typename S = String> T deserialize(const S &s, usz &at);
 
 // -------------------------------------------------------------------------
 // Time Primitives
 // -------------------------------------------------------------------------
 
-static inline i64 millis() {
-#if defined(ARDUINO)
-  return ::millis();
-#elif defined(ESP_PLATFORM)
-  return esp_timer_get_time() / 1000ULL;
-#elif defined(_WIN32)
-  return ::GetTickCount();
-#else
-  // POSIX
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (i64)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
-#endif
-}
-
-static inline i64 micros() {
-#if defined(ARDUINO)
-  return ::micros();
-#elif defined(ESP_PLATFORM)
-  return esp_timer_get_time();
-#elif defined(_WIN32)
-  static long long freq = 0;
-  if (freq == 0)
-    ::QueryPerformanceFrequency(&freq);
-  long long counter;
-  ::QueryPerformanceCounter(&counter);
-  return (i64)(counter * 1000000 / freq);
-#else
-  // POSIX
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (i64)(ts.tv_sec * 1000000 + ts.tv_nsec / 1000);
-#endif
-}
+i64 millis();
+i64 micros();
 
 // Global Epoch Offset (controlled by Spatial / Time Sync)
 #if __cplusplus >= 201703L || (defined(_MSVC_LANG) && _MSVC_LANG >= 201703L)

@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "declaration": true,
+    "outDir": "dist/wasm",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    },
+    // Fix for Emscripten's .js sidecar loading
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": ["src/wasm/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

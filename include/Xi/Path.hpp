@@ -256,7 +256,7 @@ inline Hostname::Hostname(const NumericalHostname &nhn) {
   }
 }
 
-class Path {
+class XI_EXPORT Path {
 private:
   String _protocol;
   Hostname _hostname;

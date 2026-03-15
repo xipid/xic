@@ -8,9 +8,9 @@ namespace Xi {
 
 template <typename T> class Func;
 
-template <typename R, typename... Args> class Func<R(Args...)> {
+template <typename R, typename... Args> class XI_EXPORT Func<R(Args...)> {
 private:
-  static constexpr usz SBO_Size = 32;
+  static constexpr usz SBO_Size = 128;
 
   struct VTable {
     R (*invoke)(void *, Args...);

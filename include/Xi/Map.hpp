@@ -52,7 +52,7 @@ template <typename K, typename V> struct MapEntry {
 // Map
 // High-Performance Robin Hood Hash Table
 // -----------------------------------------------------------------------------
-template <typename K, typename V> class Map {
+template <typename K, typename V> class XI_EXPORT Map {
 private:
   InlineArray<MapEntry<K, V>>
       buckets; // Using InlineArray instead of ArrayFragment
@@ -398,55 +398,50 @@ public:
   }
 
   // --- Serialization ---
-
-  void serialize(Xi::String &s) const {
+  template <typename S = String> S serialize() const {
+    S s;
     s.pushVarLong((long long)count);
 
     // Gather keys and sort them to guarantee deterministic serialization order
-    InlineArray<K> keys;
+    InlineArray<K> keys_arr;
     for (auto &kv : *this) {
-      keys.push(kv.key);
+      keys_arr.push(kv.key);
     }
-    for (usz i = 0; i < keys.size(); ++i) {
-      for (usz j = i + 1; j < keys.size(); ++j) {
-        if (keys[j] < keys[i]) {
-          K tmp = keys[i];
-          keys[i] = keys[j];
-          keys[j] = tmp;
+    for (usz i = 0; i < keys_arr.size(); ++i) {
+      for (usz j = i + 1; j < keys_arr.size(); ++j) {
+        if (keys_arr[j] < keys_arr[i]) {
+          K tmp = keys_arr[i];
+          keys_arr[i] = keys_arr[j];
+          keys_arr[j] = tmp;
         }
       }
     }
 
-    for (usz i = 0; i < keys.size(); ++i) {
-      s.pushVarLong((long long)keys[i]);
-      s.pushVarString(*get(keys[i]));
+    for (usz i = 0; i < keys_arr.size(); ++i) {
+      const K &k = keys_arr[i];
+      s += Xi::serialize<K>(k);
+      s += Xi::serialize<V>(*get(k));
     }
+    return s;
   }
 
-  static Map<K, V> deserialize(const Xi::String &s, usz &at) {
+  template <typename S = String> static Map<K, V> deserialize(const S &s) {
+    usz at = 0;
+    return deserialize(s, at);
+  }
+
+  template <typename S = String>
+  static Map<K, V> deserialize(const S &s, usz &at) {
     Map<K, V> m;
     auto countRes = s.peekVarLong(at);
     if (countRes.error)
       return m;
     at += countRes.bytes;
 
-    for (u64 i = 0; i < (u64)countRes.value; ++i) {
-      auto keyRes = s.peekVarLong(at);
-      if (keyRes.error)
-        break;
-      at += keyRes.bytes;
-
-      auto valSizeRes = s.peekVarLong(at);
-      if (valSizeRes.error)
-        break;
-      at += valSizeRes.bytes;
-
-      if (at + (usz)valSizeRes.value <= s.size()) {
-        m.put((K)keyRes.value, s.begin(at, at + (usz)valSizeRes.value));
-        at += (usz)valSizeRes.value;
-      } else {
-        break;
-      }
+    for (usz i = 0; i < (usz)countRes.value; ++i) {
+      K key = Xi::deserialize<K, S>(s, at);
+      V val = Xi::deserialize<V, S>(s, at);
+      m.put(Xi::Move(key), Xi::Move(val));
     }
     return m;
   }

@@ -143,7 +143,7 @@ public:
     p.channel = 0;
     p.important = true;
     p.payload.pushVarLong(10);
-    data.serialize(p.payload);
+    p.payload += data.serialize();
     push(p);
   }
   void announce(Xi::Map<u64, Xi::String> data) {
@@ -151,7 +151,7 @@ public:
     p.channel = 0;
     p.important = true;
     p.payload.pushVarLong(11);
-    data.serialize(p.payload);
+    p.payload += data.serialize();
     push(p);
   }
   void ready(Xi::Map<u8, Xi::String> data) {
@@ -159,7 +159,7 @@ public:
     p.channel = 0;
     p.important = true;
     p.payload.pushVarLong(12);
-    data.serialize(p.payload);
+    p.payload += data.serialize();
     push(p);
   }
   void disconnect(Xi::Map<u64, Xi::String> reason) {
@@ -167,7 +167,7 @@ public:
     p.channel = 0;
     p.important = true;
     p.payload.pushVarLong(1000); // 100 was shared with handshake
-    reason.serialize(p.payload);
+    p.payload += reason.serialize();
     push(p);
   }
 
@@ -179,7 +179,7 @@ public:
       ephemeralKeypair = Xi::generateKeyPair();
     Xi::String req;
     Xi::String serializedMeta;
-    meta.serialize(serializedMeta);
+    serializedMeta += meta.serialize();
 
     if (isSecure && key.length() == 32) {
       Xi::String theirHash = Xi::hash(theirEpheKey, 8),
@@ -357,7 +357,8 @@ public:
         if (switchRequestListener.isValid())
           switchRequestListener();
       } else if (type == 12) {
-        otherMeta = Xi::Map<u8, Xi::String>::deserialize(p.payload, pAt);
+        if (pAt < p.payload.length())
+          otherMeta = Xi::Map<u8, Xi::String>::deserialize(p.payload, pAt);
         if (!switchReady) {
           switchReady = true;
           if (readyListener.isValid())
@@ -371,7 +372,6 @@ public:
     }
   }
   void parse(const Xi::String &bundle) {
-    lastSeen = Xi::millis();
     if (isAsleep)
       isAsleep = false;
     usz at = 0;
@@ -412,12 +412,15 @@ public:
     if (plain.length() == 0)
       return;
     // Success! Update nonce tracker.
+    lastSeen = Xi::millis();
     if (isWindowed)
       pretendReceived(bID);
     else
       lastReceivedNonce = bID;
 
     usz pAt = 0;
+    if (pAt >= plain.length())
+      return; // Safety
     u8 hb = plain[pAt++];
     bool padded = (hb >> 2) & 1, single = (hb >> 3) & 1;
     Xi::String content;
@@ -431,8 +434,11 @@ public:
         content = plain.substring(pAt, pAt + (usz)pLen);
       else
         return;
-    } else
+    } else {
+      if (pAt > plain.length())
+        return; // Should not happen
       content = plain.substring(pAt, plain.length());
+    }
     if (single)
       parsePacket(content);
     else {
@@ -597,7 +603,7 @@ public:
   void removeInflight(u64 id) {
     for (usz i = 0; i < inflightBundles.size(); ++i)
       if (inflightBundles[i].id == id) {
-        inflightBundles.remove(i);
+        inflightBundles.splice(i, 1);
         if (resendPosition > i)
           resendPosition--;
         return;

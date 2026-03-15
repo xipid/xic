@@ -145,7 +145,7 @@ public:
   void removeStation(RailwayStation &otherStation) {
     for (usz i = 0; i < parentStations.size(); ++i) {
       if (parentStations[i] == &otherStation) {
-        parentStations.remove(i);
+        parentStations.splice(i, 1);
         break;
       }
     }
@@ -190,7 +190,7 @@ public:
 
     if (delta.size() > 0) {
       header |= 2;
-      delta.serialize(metaBlob);
+      metaBlob += delta.serialize();
     }
 
     Xi::String boxedData;
@@ -306,7 +306,7 @@ public:
     // Collision avoidance update
     for (usz i = 0; i < availableRails.size(); ++i) {
       if (availableRails[i] == cartRail) {
-        availableRails.remove(i);
+        availableRails.splice(i, 1);
         availableRails.push((u64)Xi::millis() + 1337);
         break;
       }

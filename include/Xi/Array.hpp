@@ -13,11 +13,84 @@ namespace Xi {
  *
  * @tparam T Element type.
  */
-template <typename T> class Array {
+template <typename T> class XI_EXPORT Array {
 public:
   InlineArray<InlineArray<T>> fragments;
+  usz *_dims;
+  u8 _rank;
 
-  Array() {}
+  Array() : _dims(nullptr), _rank(1) {}
+
+  ~Array() {
+    if (_dims) {
+      delete[] _dims;
+      _dims = nullptr;
+    }
+  }
+
+  Array(const Array &other)
+      : fragments(other.fragments), _dims(nullptr), _rank(other._rank) {
+    if (other._dims) {
+      _dims = new usz[_rank];
+      for (u8 i = 0; i < _rank; i++)
+        _dims[i] = other._dims[i];
+    }
+  }
+
+  Array(Array &&other) noexcept
+      : fragments(Xi::Move(other.fragments)), _dims(other._dims),
+        _rank(other._rank) {
+    other._dims = nullptr;
+    other._rank = 1;
+  }
+
+  Array &operator=(const Array &other) {
+    if (this == &other)
+      return *this;
+    fragments = other.fragments;
+    if (_dims) {
+      delete[] _dims;
+      _dims = nullptr;
+    }
+    _rank = other._rank;
+    if (other._dims) {
+      _dims = new usz[_rank];
+      for (u8 i = 0; i < _rank; i++)
+        _dims[i] = other._dims[i];
+    }
+    return *this;
+  }
+
+  Array &operator=(Array &&other) noexcept {
+    if (this == &other)
+      return *this;
+    fragments = Xi::Move(other.fragments);
+    if (_dims) {
+      delete[] _dims;
+      _dims = nullptr;
+    }
+    _dims = other._dims;
+    _rank = other._rank;
+    other._dims = nullptr;
+    other._rank = 1;
+    return *this;
+  }
+
+  Array &shape(u8 rank, const usz *d) {
+    if (_dims) {
+      delete[] _dims;
+      _dims = nullptr;
+    }
+    _rank = (rank > 0 ? rank : 1);
+    if (d && _rank > 1) {
+      _dims = new usz[_rank];
+      for (u8 i = 0; i < _rank; i++)
+        _dims[i] = d[i];
+    }
+    return *this;
+  }
+
+  u8 rank() const { return _rank; }
 
   // -------------------------------------------------------------------------
   // Management
@@ -61,6 +134,18 @@ public:
       fragments.push(Xi::Move(chunk));
     }
     return true;
+  }
+
+  /**
+   * @brief Clear existing data and replace with data from pointer.
+   * @param vals Pointer to source data.
+   * @param count Number of elements.
+   */
+  void set(const T *vals, usz count) {
+    allocate(0); // Clear all fragments
+    if (count > 0 && vals) {
+      pushEach(vals, count);
+    }
   }
 
   bool reserve(usz len) {
@@ -319,9 +404,78 @@ public:
     return -1;
   }
 
-  void remove(usz index) { splice(index, 1); }
-
   void clear() { fragments = InlineArray<InlineArray<T>>(); }
+
+  // --- Serialization ---
+  /**
+   * @brief Intelligently serializes the sparse array with dimension support.
+   */
+  template <typename S = String> S serialize() const {
+    S s;
+    if (_rank <= 1) {
+      s.pushVarLong((long long)size() + 1);
+    } else {
+      s.pushVarLong(0); // Marker
+      s.pushVarLong((long long)_rank);
+      for (u8 i = 0; i < _rank; ++i) {
+        s.pushVarLong((long long)(_dims ? _dims[i] : size()));
+      }
+      s.pushVarLong(0); // Offset (0 for standard Array)
+    }
+    for (usz i = 0; i < size(); ++i) {
+      s += Xi::serialize<T>((*this)[i]);
+    }
+    return s;
+  }
+
+  template <typename S = String> static Array<T> deserialize(const S &s) {
+    usz at = 0;
+    return deserialize(s, at);
+  }
+
+  template <typename S = String>
+  static Array<T> deserialize(const S &s, usz &at) {
+    Array<T> res;
+    auto headerRes = s.peekVarLong(at);
+    if (headerRes.error)
+      return res;
+    at += headerRes.bytes;
+
+    if (headerRes.value > 0) {
+      usz size = (usz)(headerRes.value - 1);
+      res.allocate(size);
+      for (usz i = 0; i < size; ++i) {
+        res[i] = Xi::deserialize<T, S>(s, at);
+      }
+    } else {
+      auto rankRes = s.peekVarLong(at);
+      if (rankRes.error)
+        return res;
+      at += rankRes.bytes;
+
+      u8 rank = (u8)rankRes.value;
+      res._rank = rank;
+      res._dims = new usz[rank];
+      usz total = 1;
+      for (u8 i = 0; i < rank; i++) {
+        auto d = s.peekVarLong(at);
+        at += d.bytes;
+        res._dims[i] = (usz)d.value;
+        total *= (usz)d.value;
+      }
+
+      auto offsetRes = s.peekVarLong(at);
+      if (offsetRes.error)
+        return res;
+      at += offsetRes.bytes;
+
+      res.allocate(total);
+      for (usz i = 0; i < total; ++i) {
+        res[i] = Xi::deserialize<T, S>(s, at);
+      }
+    }
+    return res;
+  }
 
   // -------------------------------------------------------------------------
   // Iterators
@@ -368,6 +522,107 @@ public:
 
   ConstIterator begin() const { return ConstIterator(this, 0); }
   ConstIterator end() const { return ConstIterator(this, size()); }
+
+  // -------------------------------------------------------------------------
+  // Device Transfer
+  // -------------------------------------------------------------------------
+
+  /**
+   * @brief Returns a multidimensional view of the array.
+   */
+  template <int Rank> struct ViewProxy {
+    Array<T> *arr;
+    const usz *strides;
+    usz accumulated;
+
+    template <int R = Rank, typename Xi::EnableIf<(R > 1), int>::Type = 0>
+    ViewProxy<Rank - 1> operator[](usz i) const {
+      return ViewProxy<Rank - 1>{arr, strides + 1,
+                                 accumulated + i * strides[0]};
+    }
+
+    template <int R = Rank, typename Xi::EnableIf<(R == 1), int>::Type = 0>
+    T &operator[](usz i) const {
+      return (*arr)[accumulated + i * strides[0]];
+    }
+  };
+
+  template <int Rank> struct ViewContainer {
+    Array<T> *arr;
+    usz dims[Rank];
+    usz strides[Rank];
+
+    auto operator[](usz i) {
+      if constexpr (Rank > 1) {
+        return ViewProxy<Rank - 1>{arr, strides + 1, i * strides[0]};
+      } else {
+        return (*arr)[i * strides[0]];
+      }
+    }
+  };
+
+  template <typename... Args>
+  auto view(Args... args) -> ViewContainer<sizeof...(Args)> {
+    constexpr int Rank = sizeof...(Args);
+    ViewContainer<Rank> v;
+    v.arr = this;
+    usz d[] = {(usz)args...};
+    usz current = 1;
+    for (int i = Rank - 1; i >= 0; --i) {
+      v.dims[i] = d[i];
+      v.strides[i] = current;
+      current *= d[i];
+    }
+    return v;
+  }
+
+  /**
+   * @brief Get the device-specific view of this array's data.
+   * Works if the array consists of a single fragment on a device.
+   */
+  void *deviceView(i32 type = 0) const {
+    if (fragments.size() != 1)
+      return nullptr;
+    return fragments[0].deviceView(type);
+  }
+
+  /**
+   * @brief Copy all fragments to CPU. Each fragment downloads individually.
+   */
+  Array<T> to() const {
+    Array<T> res;
+    for (usz i = 0; i < fragments.size(); ++i) {
+      res.fragments.push(fragments.data()[i].to());
+    }
+    if (_dims) {
+      res._dims = new usz[_rank];
+      for (u8 i = 0; i < _rank; i++)
+        res._dims[i] = _dims[i];
+    }
+    res._rank = _rank;
+    return res;
+  }
+
+  /**
+   * @brief Move each individual fragment to the target device.
+   * Maintains fragmentation on the device.
+   */
+  Array<T> to(IMemoryDevice *dev) const {
+    if (!dev)
+      return to();
+
+    Array<T> res;
+    for (usz i = 0; i < fragments.size(); ++i) {
+      res.fragments.push(fragments.data()[i].to(dev));
+    }
+    if (_dims) {
+      res._dims = new usz[_rank];
+      for (u8 i = 0; i < _rank; i++)
+        res._dims[i] = _dims[i];
+    }
+    res._rank = _rank;
+    return res;
+  }
 };
 
 // -------------------------------------------------------------------------

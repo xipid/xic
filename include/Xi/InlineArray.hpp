@@ -11,11 +11,7 @@
 
 namespace Xi {
 
-// Custom EnableIf to avoid <type_traits>
-template <bool B, typename T = void> struct EnableIf {};
-template <typename T> struct EnableIf<true, T> {
-  using Type = T;
-};
+// -------------------------------------------------------------------------
 
 /**
  * @brief A high-performance, ref-counted, contiguous dynamic array.
@@ -25,7 +21,7 @@ template <typename T> struct EnableIf<true, T> {
  *
  * @tparam T Element type.
  */
-template <typename T> class InlineArray {
+template <typename T> class XI_EXPORT InlineArray {
 public:
   // -------------------------------------------------------------------------
   // Control Block
@@ -35,6 +31,9 @@ public:
     usz capacity;
     usz _length; // Used _length of the allocated memory (not necessarily the
                  // slice)
+
+    IMemoryDevice *device = nullptr; ///< null = CPU (zero tax)
+    void *deviceHandle = nullptr;    ///< opaque device-side handle
 
     T *get_data() {
       usz header = sizeof(Block);
@@ -62,15 +61,50 @@ public:
       b->useCount = 1;
       b->capacity = cap;
       b->_length = 0;
+      b->device = nullptr;
+      b->deviceHandle = nullptr;
+      return b;
+    }
+
+    /// Allocate a device-only block (no CPU payload)
+    static Block *allocateDevice(IMemoryDevice *dev, usz size) {
+      // Minimal block: just the header, no payload space needed
+      usz total = sizeof(Block) + alignof(T);
+      u8 *raw = (u8 *)::operator new(total);
+      Block *b = (Block *)raw;
+      b->useCount = 1;
+      b->capacity = 0; // No CPU capacity
+      b->_length = size / sizeof(T);
+      b->device = dev;
+      b->deviceHandle = dev->alloc(size);
+      return b;
+    }
+
+    /// Wrap an existing device allocation (Block doesn't alloc, only frees)
+    static Block *wrapDevice(IMemoryDevice *dev, void *handle, usz count) {
+      usz total = sizeof(Block) + alignof(T);
+      u8 *raw = (u8 *)::operator new(total);
+      Block *b = (Block *)raw;
+      b->useCount = 1;
+      b->capacity = 0;
+      b->_length = count;
+      b->device = dev;
+      b->deviceHandle = handle;
       return b;
     }
 
     static void destroy(Block *b) {
       if (!b)
         return;
-      T *ptr = b->get_data();
-      for (usz i = 0; i < b->_length; ++i) {
-        ptr[i].~T();
+      if (b->device && b->deviceHandle) {
+        b->device->free(b->deviceHandle);
+        b->deviceHandle = nullptr;
+      }
+      if (!b->device) {
+        T *ptr = b->get_data();
+        for (usz i = 0; i < b->_length; ++i) {
+          ptr[i].~T();
+        }
       }
       ::operator delete(b);
     }
@@ -78,8 +112,10 @@ public:
 
   Block *block;
   T *_data;    ///< Pointer to start of this slice
-  usz _length; ///< Length of this slice (renamed from _length for compat)
-  usz offset;  ///< Global start index of this array
+  usz _length; ///< Length of this slice
+  usz offset;  ///< Global start index
+  usz *_dims;  ///< Multi-dimensional dimensions if rank > 1
+  u8 _rank;    ///< Rank of the array (default 1)
 
   // -------------------------------------------------------------------------
   // Constructors / Destructor
@@ -88,33 +124,58 @@ public:
   /**
    * @brief Default constructor. Creates an empty array.
    */
-  InlineArray() : block(nullptr), _data(nullptr), _length(0), offset(0) {}
+  InlineArray()
+      : block(nullptr), _data(nullptr), _length(0), offset(0), _dims(nullptr),
+        _rank(1) {}
 
-  ~InlineArray() { destroy(); }
+  ~InlineArray() {
+    destroy();
+    if (_dims) {
+      delete[] _dims;
+      _dims = nullptr;
+    }
+  }
 
   InlineArray(const InlineArray &other)
       : block(other.block), _data(other._data), _length(other._length),
-        offset(other.offset) {
+        offset(other.offset), _dims(nullptr), _rank(other._rank) {
+    if (other._dims) {
+      _dims = new usz[_rank];
+      for (u8 i = 0; i < _rank; i++)
+        _dims[i] = other._dims[i];
+    }
     retain();
   }
 
   InlineArray(InlineArray &&other) noexcept
       : block(other.block), _data(other._data), _length(other._length),
-        offset(other.offset) {
+        offset(other.offset), _dims(other._dims), _rank(other._rank) {
     other.block = nullptr;
     other._data = nullptr;
     other._length = 0;
     other.offset = 0;
+    other._dims = nullptr;
+    other._rank = 1;
   }
 
   InlineArray &operator=(const InlineArray &other) {
     if (this == &other)
       return *this;
     destroy();
+    if (_dims) {
+      delete[] _dims;
+      _dims = nullptr;
+    }
     block = other.block;
     _data = other._data;
     _length = other._length;
     offset = other.offset;
+    _rank = other._rank;
+    if (other._dims) {
+      _dims = new usz[_rank];
+      for (u8 i = 0; i < _rank; i++)
+        _dims[i] = other._dims[i];
+    }
     retain();
     return *this;
   }
@@ -123,16 +184,40 @@ public:
     if (this == &other)
       return *this;
     destroy();
+    if (_dims) {
+      delete[] _dims;
+      _dims = nullptr;
+    }
     block = other.block;
     _data = other._data;
     _length = other._length;
     offset = other.offset;
+    _dims = other._dims;
+    _rank = other._rank;
     other.block = nullptr;
     other._data = nullptr;
     other._length = 0;
     other.offset = 0;
+    other._dims = nullptr;
+    other._rank = 1;
     return *this;
   }
+
+  InlineArray &shape(u8 rank, const usz *d) {
+    if (_dims) {
+      delete[] _dims;
+      _dims = nullptr;
+    }
+    _rank = (rank > 0 ? rank : 1);
+    if (d && _rank > 1) {
+      _dims = new usz[_rank];
+      for (u8 i = 0; i < _rank; i++)
+        _dims[i] = d[i];
+    }
+    return *this;
+  }
+
+  u8 rank() const { return _rank; }
 
   /**
    * @brief Increments the reference count of the underlying block.
@@ -378,6 +463,18 @@ public:
       push(vals[i]);
   }
 
+  /**
+   * @brief Replace all contents with data from pointer.
+   * @param vals Pointer to source data.
+   * @param count Number of elements.
+   */
+  void set(const T *vals, usz count) {
+    destroy();
+    if (count > 0 && vals) {
+      pushEach(vals, count);
+    }
+  }
+
   T pop() {
     if (_length == 0)
       return T();
@@ -531,8 +628,6 @@ public:
     return copy;
   }
 
-  // ... (ViewProxy and ViewContainer omitted for brevity as they weren't
-  // changed, but I'll keep the ones from step 85)
   template <int Rank> struct ViewProxy {
     T *data_ptr;
     const usz *strides_ptr;
@@ -551,7 +646,22 @@ public:
 
   template <int Rank> struct ViewContainer {
     InlineArray<T> *arr;
+    usz dims[Rank];
     usz strides[Rank];
+
+    template <typename S = String> S serialize() const {
+      S s;
+      s.pushVarLong(0); // Marker
+      s.pushVarLong((long long)Rank);
+      for (int i = 0; i < Rank; ++i) {
+        s.pushVarLong((long long)dims[i]);
+      }
+      s.pushVarLong((long long)arr->offset);
+      for (usz i = 0; i < arr->size(); ++i) {
+        s += Xi::serialize<T>((*arr)[i]);
+      }
+      return s;
+    }
 
     auto operator[](usz i)
         -> decltype(arr->operator[](i * strides[0])) { // Simplified
@@ -568,13 +678,198 @@ public:
     constexpr int Rank = sizeof...(Args);
     ViewContainer<Rank> v;
     v.arr = this;
-    usz dims[] = {(usz)args...};
+    usz d[] = {(usz)args...};
     usz current = 1;
     for (int i = Rank - 1; i >= 0; --i) {
+      v.dims[i] = d[i];
       v.strides[i] = current;
-      current *= dims[i];
+      current *= d[i];
     }
     return v;
+  }
+
+  // --- Serialization ---
+  /**
+   * @brief Intelligently serializes the array.
+   */
+  template <typename S = String> S serialize() const {
+    S s;
+    if (offset == 0 && _rank <= 1) {
+      s.pushVarLong((long long)size() + 1);
+    } else {
+      s.pushVarLong(0); // Marker
+      s.pushVarLong((long long)_rank);
+      for (u8 i = 0; i < _rank; ++i) {
+        s.pushVarLong((long long)(_dims ? _dims[i] : size()));
+      }
+      s.pushVarLong((long long)offset);
+    }
+    for (usz i = 0; i < size(); ++i) {
+      s += Xi::serialize<T>((*this)[i]);
+    }
+    return s;
+  }
+
+  template <typename S = String> static InlineArray<T> deserialize(const S &s) {
+    usz at = 0;
+    return deserialize(s, at);
+  }
+
+  template <typename S = String>
+  static InlineArray<T> deserialize(const S &s, usz &at) {
+    InlineArray<T> res;
+    auto headerRes = s.peekVarLong(at);
+    if (headerRes.error)
+      return res;
+    at += headerRes.bytes;
+
+    if (headerRes.value > 0) {
+      usz size = (usz)(headerRes.value - 1);
+      res.allocate(size);
+      for (usz i = 0; i < size; ++i) {
+        res[i] = Xi::deserialize<T, S>(s, at);
+      }
+    } else {
+      auto rankRes = s.peekVarLong(at);
+      if (rankRes.error)
+        return res;
+      at += rankRes.bytes;
+
+      u8 rank = (u8)rankRes.value;
+      res._rank = rank;
+      res._dims = new usz[rank];
+      usz total = 1;
+      for (u8 i = 0; i < rank; i++) {
+        auto d = s.peekVarLong(at);
+        at += d.bytes;
+        res._dims[i] = (usz)d.value;
+        total *= (usz)d.value;
+      }
+
+      auto offsetRes = s.peekVarLong(at);
+      if (offsetRes.error)
+        return res;
+      at += offsetRes.bytes;
+      res.allocate(total);
+      res.offset = (usz)offsetRes.value;
+      for (usz i = 0; i < total; ++i) {
+        res[i] = Xi::deserialize<T, S>(s, at);
+      }
+    }
+    return res;
+  }
+
+  // -------------------------------------------------------------------------
+  // Device Transfer
+  // -------------------------------------------------------------------------
+
+  /**
+   * @brief Returns which device this array lives on (nullptr = CPU).
+   */
+  IMemoryDevice *getDevice() const { return block ? block->device : nullptr; }
+
+  /**
+   * @brief Get the device-specific view of this array's data.
+   * For GPU: returns ITextureView* or similar. For CPU: returns nullptr.
+   * @param type View type (0 = default/SRV, 1 = RTV, 2 = DSV)
+   */
+  void *deviceView(i32 type = 0) const {
+    if (!block || !block->device)
+      return nullptr;
+    return block->device->view(block->deviceHandle, type);
+  }
+
+  /**
+   * @brief Wrap an existing device allocation into this array.
+   * Destroys current data and replaces with a device-resident block.
+   */
+  void wrapDevice(IMemoryDevice *dev, void *handle, usz count) {
+    destroy();
+    block = Block::wrapDevice(dev, handle, count);
+    _data = nullptr;
+    _length = count;
+    offset = 0;
+  }
+
+  /**
+   * @brief Copy data to CPU (local memory). No-op copy if already on CPU.
+   */
+  InlineArray<T> to() const {
+    if (!block)
+      return InlineArray<T>();
+
+    if (!block->device) {
+      // Already on CPU, but user requested a NEW copy.
+      InlineArray<T> res;
+      res.allocate(size());
+      if (_length > 0)
+        memcpy(res.data(), data(), _length * sizeof(T));
+      res.offset = offset;
+      res._rank = _rank;
+      if (_dims) {
+        res._dims = new usz[_rank];
+        for (u8 i = 0; i < _rank; i++)
+          res._dims[i] = _dims[i];
+      }
+      return res;
+    }
+
+    // Download from device → new CPU block
+    InlineArray<T> cpu;
+    usz count = block->_length;
+    if (count == 0)
+      return cpu;
+    cpu.allocate(count);
+    block->device->download(block->deviceHandle, cpu.data(), count * sizeof(T));
+    cpu.offset = offset;
+    cpu._rank = _rank;
+    if (_dims) {
+      cpu._dims = new usz[_rank];
+      for (u8 i = 0; i < _rank; i++)
+        cpu._dims[i] = _dims[i];
+    }
+    return cpu;
+  }
+
+  /**
+   * @brief Copy data to a target device. If already on that device, CoW copy.
+   * @param dev Target IMemoryDevice (nullptr = CPU).
+   */
+  InlineArray<T> to(IMemoryDevice *dev) const {
+    if (!dev)
+      return to(); // to(nullptr) == to CPU
+
+    if (block && block->device == dev) {
+      // Already on target device, but user requested a NEW copy.
+      // We download to CPU and upload to a NEW device allocation.
+      // (Optimized path: could do device-to-device copy, but this is safer for
+      // now)
+    }
+
+    // Ensure we have CPU data to upload
+    InlineArray<T> src = to(); // Download to CPU first if needed
+    usz count = src.size();
+    if (count == 0)
+      return InlineArray<T>();
+
+    usz byteSize = count * sizeof(T);
+
+    // Allocate device block and upload
+    InlineArray<T> result;
+    result.destroy();
+    result.block = Block::allocateDevice(dev, byteSize);
+    result._data = nullptr; // No CPU-accessible pointer
+    result._length = count;
+    result.offset = src.offset;
+    result._rank = src._rank;
+    if (src._dims) {
+      result._dims = new usz[src._rank];
+      for (u8 i = 0; i < src._rank; i++)
+        result._dims[i] = src._dims[i];
+    }
+
+    dev->upload(result.block->deviceHandle, src.data(), byteSize);
+    return result;
   }
 };
 
