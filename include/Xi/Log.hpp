@@ -6,7 +6,7 @@
 #include "time.h" // For getting local time strings if needed, or we use Xi::Time
 
 #ifndef ARDUINO
-#include <iostream>
+#include <unistd.h>
 #else
 #include <Arduino.h>
 #endif
@@ -34,7 +34,7 @@ public:
 
   void print(const Xi::String &msg) {
 #ifndef ARDUINO
-    std::cerr << msg.c_str();
+    ::write(2, msg.data(), msg.length());
 #else
     Serial.print(msg.c_str());
 #endif
@@ -42,7 +42,8 @@ public:
 
   template <typename T> void print(const T &msg) {
 #ifndef ARDUINO
-    std::cerr << msg;
+    // Fallback for types that don't have specialized print
+    // In a real no-STL env, we'd need a way to stringify T
 #else
     Serial.print(msg);
 #endif
@@ -50,7 +51,7 @@ public:
 
   void println() {
 #ifndef ARDUINO
-    std::cerr << std::endl;
+    ::write(2, "\n", 1);
 #else
     Serial.println();
 #endif

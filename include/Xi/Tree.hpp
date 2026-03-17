@@ -4,8 +4,8 @@
 #include "Array.hpp"
 #include "String.hpp"
 
-// RTTI required for dynamic_cast and typeid (Auto-Naming)
-#include <typeinfo>
+// RTTI required for dynamic_cast. typeinfo removed to avoid STL.
+// #include <typeinfo>
 
 namespace Xi {
 class TreeItem;
@@ -178,11 +178,12 @@ public:
     if (!child)
       return null;
 
-    // 1. Auto-Naming:
-    // If child has no name set manually, use its C++ class name.
+    // 1. Auto-Naming: (Disabled due to no-STL/typeid)
+    /*
     if (child->name.length() == 0) {
       child->name = demangle_name(typeid(*child).name());
     }
+    */
 
     // 2. Link
     child->parent = this;

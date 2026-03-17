@@ -208,10 +208,10 @@ def main():
     # 5. Main loop
     import math
 
-    lastTime = Xi.Time.millis()
+    lastTime = Xi.millis()
 
     while not win.shouldRelease:
-        now = Xi.Time.millis()
+        now = Xi.millis()
         dt = (now - lastTime) / 1000.0
         lastTime = now
 
@@ -239,7 +239,7 @@ def main():
         # Present
         win.update()
 
-        Xi.Time.sleep(int(1/60 * 1000) if hasattr(Xi.Time.sleep, 'argtypes') else 0)
+        Xi.Time.sleep(1/60.0)
 
         # Check ESC
         for i in range(win.devices.length()):

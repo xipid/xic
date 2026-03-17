@@ -33,7 +33,7 @@ public:
   static int parse_int(const char *&str, int len);
   static bool ch_eq(char a, char b);
 
-  static void syncPPS();
+  // static void syncPPS();
   static void syncClock(i64 now);
   static void syncClock();
 

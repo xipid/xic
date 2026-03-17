@@ -1,9 +1,7 @@
 #ifndef XI_GRAPHICS_HPP
 #define XI_GRAPHICS_HPP
 
-#include "Math.hpp"
 #include "Device.hpp"
-#include <vector>
 
 // CRITICAL: Undefine Linux system macros that collide with Diligent
 #ifdef MAP_TYPE
@@ -30,7 +28,7 @@ namespace Xi {
 struct GraphicsContext {
   Diligent::RefCntAutoPtr<Diligent::IRenderDevice> device;
   Diligent::RefCntAutoPtr<Diligent::IDeviceContext> ctx; // Immediate Context
-  std::vector<Diligent::RefCntAutoPtr<Diligent::IDeviceContext>> deferred;
+  Array<Diligent::RefCntAutoPtr<Diligent::IDeviceContext>> deferred;
   Diligent::RefCntAutoPtr<Diligent::IPipelineState> blitPSO;
 
   void init();

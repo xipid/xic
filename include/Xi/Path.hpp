@@ -7,15 +7,15 @@
 
 namespace Xi {
 
-class Hostname; // Forward declaration
+class Address; // Forward declaration
 
-class NumericalHostname : public Array<u64> {
+class NumericalAddress : public Array<u64> {
 public:
-  NumericalHostname() {}
-  NumericalHostname(const Hostname &hn);
+  NumericalAddress() {}
+  NumericalAddress(const Address &hn);
 };
 
-class Hostname : public Array<String> {
+class Address : public Array<String> {
 private:
   static bool strIsNumeric(const String &s) {
     if (s.isEmpty())
@@ -28,9 +28,9 @@ private:
   }
 
 public:
-  Hostname() {}
-  Hostname(const NumericalHostname &nhn);
-  Hostname(const String &hn) {
+  Address() {}
+  Address(const NumericalAddress &nhn);
+  Address(const String &hn) {
     if (hn.isEmpty())
       return;
 
@@ -92,8 +92,8 @@ public:
     return false;
   }
 
-  Hostname beforeNamed() const {
-    Hostname res;
+  Address beforeNamed() const {
+    Address res;
     for (usz i = 0; i < size(); i++) {
       if (!strIsNumeric((*this)[i]))
         break;
@@ -102,8 +102,8 @@ public:
     return res;
   }
 
-  Hostname named() const {
-    Hostname res;
+  Address named() const {
+    Address res;
     bool found = false;
     for (usz i = 0; i < size(); i++) {
       if (!found && !strIsNumeric((*this)[i]))
@@ -244,13 +244,13 @@ public:
   }
 };
 
-inline NumericalHostname::NumericalHostname(const Hostname &hn) {
+inline NumericalAddress::NumericalAddress(const Address &hn) {
   for (usz i = 0; i < hn.size(); i++) {
     push(parseLong(hn[i]));
   }
 }
 
-inline Hostname::Hostname(const NumericalHostname &nhn) {
+inline Address::Address(const NumericalAddress &nhn) {
   for (usz i = 0; i < nhn.size(); i++) {
     push(String(nhn[i]));
   }
@@ -259,7 +259,7 @@ inline Hostname::Hostname(const NumericalHostname &nhn) {
 class XI_EXPORT Path {
 private:
   String _protocol;
-  Hostname _hostname;
+  Address _address;
   Array<String> _segments;
   bool _isAbsolute; // Track if path is absolute (starts with /)
 
@@ -408,7 +408,7 @@ private:
         usz hostEnd = (pathSlash == -1) ? pathPart.size() : (usz)pathSlash;
 
         String auth = pathPart.substring(afterProto, hostEnd);
-        _hostname = Hostname(auth);
+        _address = Address(auth);
 
         pathStart = hostEnd;
       } else {
@@ -446,12 +446,12 @@ public:
   // -------------------------------------------------------------------------
 
   String protocol() const { return _protocol; }
-  Hostname &hostname() { return _hostname; }
-  const Hostname &hostname() const { return _hostname; }
+  Address &address() { return _address; }
+  const Address &address() const { return _address; }
 
-  u16 port() const { return _hostname.port(); }
+  u16 port() const { return _address.port(); }
 
-  String host() const { return _hostname.toString(true); }
+  String host() const { return _address.toString(true); }
 
   String basename() const {
     if (_segments.size() == 0)
@@ -468,21 +468,21 @@ public:
   // Methods
   // -------------------------------------------------------------------------
 
-  String toString(bool forwardSlash = true, bool protocolAndHostname = true,
+  String toString(bool forwardSlash = true, bool protocolAndAddress = true,
                   bool withQuery = true) const {
     String out;
 
-    if (protocolAndHostname && !_protocol.isEmpty()) {
+    if (protocolAndAddress && !_protocol.isEmpty()) {
       out += _protocol;
       out += "://";
-      out += _hostname.toString(true);
+      out += _address.toString(true);
     }
 
     const char *sep = forwardSlash ? "/" : "\\";
 
     // Logic for leading slash
     bool addLeadingSlash = false;
-    if (protocolAndHostname && !_protocol.isEmpty()) {
+    if (protocolAndAddress && !_protocol.isEmpty()) {
       // URL: add slash if we have path segments
       if (_segments.size() > 0)
         addLeadingSlash = true;
@@ -527,7 +527,7 @@ public:
 
   String relativeTo(const Path &parent) const {
     if (_protocol != parent._protocol ||
-        _hostname.toString(false) != parent._hostname.toString(false)) {
+        _address.toString(false) != parent._address.toString(false)) {
       return "";
     }
 

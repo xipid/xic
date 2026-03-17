@@ -11,7 +11,6 @@
 #define XI_EXPORT
 #endif
 
-#include <ctime>
 #if defined(__has_include)
 #if __has_include(<new>)
 #include <new>
@@ -158,13 +157,13 @@ usz fnvHashMix(usz k);
 
 class IMemoryDevice {
 public:
-    virtual void* alloc(usz size) = 0;
-    virtual void  free(void* handle) = 0;
-    virtual void  upload(void* handle, const void* src, usz size) = 0;
-    virtual void  download(void* handle, void* dst, usz size) = 0;
-    virtual void* view(void* handle, i32 type = 0) = 0;
-    virtual void* allocSurface(i32 w, i32 h, i32 channels = 4) = 0;
-    virtual ~IMemoryDevice() = default;
+  virtual void *alloc(usz size) = 0;
+  virtual void free(void *handle) = 0;
+  virtual void upload(void *handle, const void *src, usz size) = 0;
+  virtual void download(void *handle, void *dst, usz size) = 0;
+  virtual void *view(void *handle, i32 type = 0) = 0;
+  virtual void *allocSurface(i32 w, i32 h, i32 channels = 4) = 0;
+  virtual ~IMemoryDevice() = default;
 };
 
 // -------------------------------------------------------------------------
@@ -196,7 +195,8 @@ public:
 template <typename T> struct HasDeserializeAt {
 private:
   template <typename U>
-  static auto test(int) -> decltype(U::deserialize(DeclVal<String>(), DeclVal<usz &>()), char());
+  static auto test(int)
+      -> decltype(U::deserialize(DeclVal<String>(), DeclVal<usz &>()), char());
   template <typename U> static long test(...);
 
 public:
@@ -206,9 +206,10 @@ public:
 template <typename T> struct HasValidToDeserialize {
 private:
   template <typename U>
-  static auto test(int) -> decltype(Xi::DeclVal<U>().validToDeserialize(
-                                       Xi::DeclVal<String>(), Xi::DeclVal<usz>()),
-                                   char());
+  static auto test(int)
+      -> decltype(Xi::DeclVal<U>().validToDeserialize(Xi::DeclVal<String>(),
+                                                      Xi::DeclVal<usz>()),
+                  char());
   template <typename U> static long test(...);
 
 public:

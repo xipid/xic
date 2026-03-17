@@ -1,5 +1,4 @@
 #include "../../include/Xi/Camera.hpp"
-#include <cstdio>
 
 namespace Xi {
 
@@ -136,13 +135,13 @@ void Camera3::_renderRec(TreeItem *n, Matrix4 p, const Matrix4 &vp) {
 
             r->shader->updateUniforms(&gpuData, sizeof(ShaderData));
             if (r->shader->_pso == nullptr) {
-                printf("Error: Shader PSO is NULL for Renderable %s!\n", r->name.c_str());
+                // printf("Error: Shader PSO is NULL for Renderable %s!\n", r->name.c_str());
                 return;
             }
             gContext.setPipelineState(r->shader->_pso);
 
             if (r->shader->_srb == nullptr) {
-                printf("Error: Shader SRB is NULL for Renderable %s!\n", r->name.c_str());
+                // printf("Error: Shader SRB is NULL for Renderable %s!\n", r->name.c_str());
                 return;
             }
             auto *srb = (Diligent::IShaderResourceBinding *)r->shader->_srb;

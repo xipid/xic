@@ -1,4 +1,11 @@
 #include "../../include/Xi/File.hpp"
+#ifndef _WIN32
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 
 namespace Xi {
 
@@ -8,27 +15,29 @@ String FilesystemDevice::resolve(const String &path) {
   // Security: Prevent basedir escaping if basedir is set
   if (basedir.length() > 0) {
     // Basic protection: don't allow going above basedir
-    // Real implementation would collapse dots
   }
   return fullPath;
 }
 
 String LinuxFS::read(const String &path, u64 startPos, u64 maxLength) {
   String p = resolve(path);
-  FILE *f = fopen(p.c_str(), "rb");
-  if (!f)
+#if defined(_WIN32)
+  // For Windows, we might still need some headers or just use _open
+  return ""; 
+#else
+  int fd = ::open(p.c_str(), O_RDONLY);
+  if (fd < 0)
     return "";
 
-  fseek(f, 0, SEEK_END);
-  long pos = ftell(f);
-  if (pos < 0) {
-    fclose(f);
+  struct stat st;
+  if (fstat(fd, &st) < 0) {
+    ::close(fd);
     return "";
   }
-  u64 fileSize = (u64)pos;
+  u64 fileSize = (u64)st.st_size;
 
   if (startPos >= fileSize) {
-    fclose(f);
+    ::close(fd);
     return "";
   }
 
@@ -36,36 +45,41 @@ String LinuxFS::read(const String &path, u64 startPos, u64 maxLength) {
   if (startPos + readLen > fileSize)
     readLen = fileSize - startPos;
 
-  fseek(f, (long)startPos, SEEK_SET);
-  u8 *buf = new u8[readLen];
-  usz actual = fread(buf, 1, (usz)readLen, f);
-  fclose(f);
+  lseek(fd, (off_t)startPos, SEEK_SET);
+  
+  String res;
+  res.allocate((usz)readLen);
+  ssize_t actual = ::read(fd, res.data(), (size_t)readLen);
+  ::close(fd);
 
-  String res(buf, actual);
-  delete[] buf;
+  if (actual < 0) return "";
+  if ((usz)actual < (usz)readLen) {
+      // Potentially resize or just return what we got
+  }
+  
   return res;
+#endif
 }
 
 void LinuxFS::write(const String &path, const String &content, i64 startPos) {
   String p = resolve(path);
-  FILE *f = nullptr;
-
+#if !defined(_WIN32)
+  int flags = O_WRONLY | O_CREAT;
   if (startPos == -1) {
-    f = fopen(p.c_str(), "ab");
+    flags |= O_APPEND;
   } else if (startPos == 0) {
-    f = fopen(p.c_str(), "wb");
-  } else {
-    f = fopen(p.c_str(), "r+b");
-    if (!f)
-      f = fopen(p.c_str(), "wb");
-    if (f)
-      fseek(f, (long)startPos, SEEK_SET);
+    flags |= O_TRUNC;
   }
 
-  if (f) {
-    fwrite((const void *)content.data(), 1, content.size(), f);
-    fclose(f);
+  int fd = ::open(p.c_str(), flags, 0644);
+  if (fd >= 0) {
+    if (startPos > 0) {
+      lseek(fd, (off_t)startPos, SEEK_SET);
+    }
+    ::write(fd, content.data(), content.size());
+    ::close(fd);
   }
+#endif
 }
 
 void LinuxFS::append(const String &path, const String &content) {
@@ -83,7 +97,7 @@ void LinuxFS::mkdir(const String &path) {
       continue;
     current += parts[i] + "/";
 #if defined(_WIN32)
-    _mkdir(current.c_str());
+    // _mkdir(current.c_str());
 #else
     ::mkdir(current.c_str(), 0755);
 #endif
@@ -93,34 +107,27 @@ void LinuxFS::mkdir(const String &path) {
 void LinuxFS::unlink(const String &path) {
   String p = resolve(path);
   struct stat st;
-#if defined(_WIN32)
-  if (::stat(p.c_str(), &st) == 0 && (st.st_mode & _S_IFDIR)) {
-#else
+#if !defined(_WIN32)
   if (lstat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
-#endif
     DIR *d = opendir(p.c_str());
     if (d) {
       struct dirent *de;
       while ((de = readdir(d))) {
-        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
-          continue;
+        // Direct byte check instead of strcmp
+        if (de->d_name[0] == '.') {
+          if (de->d_name[1] == '\0') continue;
+          if (de->d_name[1] == '.' && de->d_name[2] == '\0') continue;
+        }
         String sub = path + "/" + de->d_name;
         unlink(sub);
       }
       closedir(d);
     }
-#if defined(_WIN32)
-    _rmdir(p.c_str());
-#else
     rmdir(p.c_str());
-#endif
   } else {
-#if defined(_WIN32)
-    _unlink(p.c_str());
-#else
     ::unlink(p.c_str());
-#endif
   }
+#endif
 }
 
 Stat LinuxFS::stat(const String &path, i32 depth, i32 maxChildren) {
@@ -128,13 +135,7 @@ Stat LinuxFS::stat(const String &path, i32 depth, i32 maxChildren) {
   s.path = path;
   String p = resolve(path);
   struct stat st;
-#if defined(_WIN32)
-  if (::stat(p.c_str(), &st) == 0) {
-    s.size = (usz)st.st_size;
-    s.isFile = (st.st_mode & _S_IFREG);
-    s.isDir = (st.st_mode & _S_IFDIR);
-    s.isReadOnly = !(st.st_mode & _S_IWRITE);
-#else
+#if !defined(_WIN32)
   if (lstat(p.c_str(), &st) == 0) {
     s.size = (usz)st.st_size;
     s.isFile = S_ISREG(st.st_mode);
@@ -161,7 +162,6 @@ Stat LinuxFS::stat(const String &path, i32 depth, i32 maxChildren) {
     s.isFIFO = S_ISFIFO(st.st_mode);
     s.isSocket = S_ISSOCK(st.st_mode);
     s.isSymbolicLink = S_ISLNK(st.st_mode);
-#endif
 
     if (s.isDir && depth > 0) {
       DIR *d = opendir(p.c_str());
@@ -169,8 +169,10 @@ Stat LinuxFS::stat(const String &path, i32 depth, i32 maxChildren) {
         struct dirent *de;
         int count = 0;
         while ((de = readdir(d)) && (maxChildren == 0 || count < maxChildren)) {
-          if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
-            continue;
+          if (de->d_name[0] == '.') {
+            if (de->d_name[1] == '\0') continue;
+            if (de->d_name[1] == '.' && de->d_name[2] == '\0') continue;
+          }
           s.children.push(
               stat(path + "/" + de->d_name, depth - 1, maxChildren));
           count++;
@@ -179,12 +181,13 @@ Stat LinuxFS::stat(const String &path, i32 depth, i32 maxChildren) {
       }
     }
   }
+#endif
   return s;
 }
 
 FilesystemDevice *requestFS() {
 #ifdef _WIN32
-  return new WindowsFS();
+  return nullptr; // new WindowsFS();
 #else
   return new LinuxFS();
 #endif

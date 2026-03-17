@@ -2,7 +2,6 @@
 #define XI_SHADER
 
 #include "Graphics.hpp"
-#include <cstdio>
 
 namespace Xi {
 
@@ -16,13 +15,7 @@ struct XI_EXPORT Shader {
   void create() {
     if (_pso)
       return;
-    printf("Xi: Shader::create() VS length: %d\n", (int)vertexSource.length());
     createShader(vertexSource.c_str(), pixelSource.c_str(), &_pso, &_srb, &_cb);
-    if (!_pso) {
-      printf("Error: Shader PSO creation FAILED!\n");
-    } else {
-      printf("Xi: Shader created. PSO: %p, SRB: %p, CB: %p\n", _pso, _srb, _cb);
-    }
   }
   void updateUniforms(const void *d, u32 s) {
     void *m = gContext.mapBuffer(_cb);

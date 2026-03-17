@@ -60,13 +60,13 @@ bool Time::ch_eq(char a, char b) {
   return a == b;
 }
 
-void Time::syncPPS() {
-  i64 m = Xi::micros();
-  i64 currentEpoch = m + Xi::systemStartMicros;
-  i64 nearestSecondMicros =
-      ((currentEpoch + 500000ULL) / 1000000ULL) * 1000000ULL;
-  Xi::systemStartMicros = nearestSecondMicros - m;
-}
+// void Time::syncPPS() {
+//   i64 m = Xi::micros();
+//   i64 currentEpoch = m + Xi::systemStartMicros;
+//   i64 nearestSecondMicros =
+//       ((currentEpoch + 500000ULL) / 1000000ULL) * 1000000ULL;
+//   Xi::systemStartMicros = nearestSecondMicros - m;
+// }
 
 void Time::syncClock(i64 now) { Xi::systemStartMicros = now - Xi::micros(); }
 

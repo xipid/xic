@@ -2,9 +2,9 @@
 #define XI_CAMERA_HPP
 
 #include "Func.hpp"
-#include "Graphics.hpp"
 #include "Mesh.hpp"
 #include "Shader.hpp"
+#include "Spatial.hpp"
 #include "Tree.hpp"
 
 namespace Xi {

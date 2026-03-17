@@ -75,6 +75,7 @@ FetchContent_Declare(
     DiligentEngine
     GIT_REPOSITORY https://github.com/DiligentGraphics/DiligentEngine
     GIT_TAG        master
+    GIT_SHALLOW    ON
 )
 FetchContent_MakeAvailable(DiligentEngine)
 
@@ -111,7 +112,7 @@ target_link_libraries(render_test PRIVATE ${LINK_LIBS})
 # For Python cppyy to be able to see all Diligent and Xi symbols, we need to force
 # the linker to include all symbols from the static libraries into the shared library.
 target_link_libraries(xi_render PRIVATE 
-    -Wl,--whole-archive
+    #-Wl,--whole-archive
     Xi::Xi
     Diligent-GraphicsEngineVk-static
     Diligent-GraphicsEngineOpenGL-static

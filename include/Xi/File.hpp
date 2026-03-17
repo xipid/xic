@@ -5,8 +5,6 @@
 #include "Device.hpp"
 #include "String.hpp"
 
-#include <cstdio>
-#include <cstring>
 #include <sys/stat.h>
 #include <sys/types.h>
 

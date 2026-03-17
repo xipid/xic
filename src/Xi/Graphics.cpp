@@ -1,5 +1,4 @@
 #include "../../include/Xi/Graphics.hpp"
-#include <vector>
 
 namespace Xi {
 
@@ -16,16 +15,14 @@ void GraphicsContext::init() {
   F->SetMessageCallback([](Diligent::DEBUG_MESSAGE_SEVERITY, const char *,
                            const char *, const char *, int) {});
 
-  CI.NumDeferredContexts = 1;
+  CI.NumDeferredContexts = 0;
 
-  std::vector<Diligent::IDeviceContext *> ppContexts(1 +
-                                                     CI.NumDeferredContexts);
+  Array<Diligent::IDeviceContext *> ppContexts;
+  ppContexts.allocate(1 + CI.NumDeferredContexts);
   F->CreateDeviceAndContextsVk(CI, &device, ppContexts.data());
 
   ctx = ppContexts[0];
-  for (u32 i = 1; i < (u32)ppContexts.size(); ++i)
-    deferred.push_back(
-        Diligent::RefCntAutoPtr<Diligent::IDeviceContext>(ppContexts[i]));
+  // No deferred contexts if NumDeferredContexts = 0
 
   Diligent::GraphicsPipelineStateCreateInfo PSOCreateInfo;
   PSOCreateInfo.PSODesc.Name = "Xi_Blit_PSO";
@@ -340,8 +337,9 @@ void GLFWDiligentRenderingDevice::download(void *handle, void *dst, usz size) {
 
   usz rowBytes = (usz)gs->w * 4;
   for (i32 row = 0; row < gs->h; ++row) {
-    memcpy((u8 *)dst + row * rowBytes,
-           (const u8 *)mapped.pData + row * mapped.Stride, rowBytes);
+    u8* dstRow = (u8 *)dst + row * rowBytes;
+    const u8* srcRow = (const u8 *)mapped.pData + row * mapped.Stride;
+    for (usz b = 0; b < rowBytes; ++b) dstRow[b] = srcRow[b];
   }
   gContext.ctx->UnmapTextureSubresource(pStaging, 0, 0);
 }

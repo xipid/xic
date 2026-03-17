@@ -3,8 +3,6 @@
 
 #include "Graphics.hpp"
 
-#include "Spatial.hpp"
-
 namespace Xi {
 #pragma pack(push, 1)
 struct XI_EXPORT Vertex {
