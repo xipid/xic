@@ -1,0 +1,18 @@
+{
+  "title": "XiC ✦ Core Framework",
+  "author": "Xi Professional",
+  "description": "Zero-exception C++ primitives, memory-deterministic structures, and high-performance hardware drivers.",
+  "language": "en",
+  "root": "./",
+  "plugins": [
+    "theme-default",
+    "search-pro",
+    "expandable-chapters",
+    "back-to-top-button"
+  ],
+  "pluginsConfig": {
+    "theme-default": {
+      "showLevel": true
+    }
+  }
+}

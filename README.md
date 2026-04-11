@@ -1,4 +1,4 @@
-# xic ✦ Xi Core
+# ✦ XiC
 
 ![C++](https://img.shields.io/badge/C++-17-blue?logo=cplusplus)
 ![Python](https://img.shields.io/badge/Python-3.8+-yellow?logo=python)
@@ -16,7 +16,6 @@ xic provides the building blocks for high-performance applications that need to 
 ## 📦 Key Components
 
 - **Collections**: High-performance `String` (COW), `Tree` (CSS queries), and `Array` (multi-dimensional views).
-- **Rho Protocol**: An identity-based mesh networking protocol designed for zero-config routing.
 - **LLT (Loss-less Transformation)**: High-performance encryption (Monocypher) and compression (ZSTD/LZ4).
 - **Execution**: Stackless cooperative `Routines` and high-level `Process` management.
 - **Hardware**: Standardized drivers for IMUs, GPS, and environmental sensors with built-in geodetic math.
@@ -27,12 +26,10 @@ xic provides the building blocks for high-performance applications that need to 
 
 ### C++ (Embedded/Native)
 ```cpp
-#include <Xi/String.hpp>
-#include <Rho/Tunnel.hpp>
+#include <Collection/String.hpp>
 
-Xi::String identity = "xi:node:42";
-Xi::Tunnel tunnel;
-tunnel.bind("0.0.0.0:4242");
+
+Collection::String identity = "xi:node:42";
 ```
 
 ### Python (cppyy-powered)
