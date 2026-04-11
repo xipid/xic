@@ -11,8 +11,10 @@
 #if PLATFORM_LINUX
 #undef GLFW_EXPOSE_NATIVE_X11
 #define GLFW_EXPOSE_NATIVE_X11
+#define Time X11Time
 #include <GLFW/glfw3native.h>
 #include <X11/Xlib.h>
+#undef Time
 #endif
 
 namespace Graphics {

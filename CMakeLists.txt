@@ -76,6 +76,7 @@ add_library(Xi
     ${XI_CORE_SOURCES} 
     ${XI_COLLECTION_SOURCES}
     ${XI_ENCODING_SOURCES}
+    ${GRAPHICS_SOURCES}
     #${XI_EXECUTION_SOURCES}
     ${XI_LLT_SOURCES}
     ${XI_RESOURCE_SOURCES}
@@ -86,51 +87,79 @@ if(XI_BUILD_HARDWARE)
     target_sources(Xi PRIVATE ${XI_HARDWARE_SOURCES})
 endif()
 
-# Graphics check (Reliant on Diligent presence)
+# Graphics: Auto-detect Diligent & GLFW (FetchContent or system)
 if(XI_BUILD_GRAPHICS)
-    # Search for a key Diligent header to verify presence
-    find_path(DILIGENT_CORE_INTERFACE_DIR NAMES CommandList.h 
-              PATH_SUFFIXES DiligentCore/Graphics/GraphicsEngine/interface 
-                            Graphics/GraphicsEngine/interface)
-    
-    if(DILIGENT_CORE_INTERFACE_DIR)
-        message(STATUS "Diligent Engine found at ${DILIGENT_CORE_INTERFACE_DIR}. Enabling Graphics.")
-        
-        # We assume GLFW is also needed and present if Diligent is used
-        find_package(glfw3 QUIET)
-        if(NOT glfw3_FOUND)
-            find_package(GLFW QUIET)
+    # Check if DiligentCore was already fetched (FetchContent)
+    if(TARGET Diligent-GraphicsEngineVk-static OR TARGET Diligent-GraphicsEngineOpenGL-static)
+        message(STATUS "Diligent Engine detected (FetchContent target). Enabling Graphics.")
+        set(XI_DILIGENT_FOUND TRUE)
+
+        # Auto-wire Diligent include directories from FetchContent source dir
+        if(DEFINED diligentcore_SOURCE_DIR)
+            target_include_directories(Xi PUBLIC ${diligentcore_SOURCE_DIR})
         endif()
 
+    else()
+        # Fallback: search for installed Diligent headers
+        find_path(DILIGENT_CORE_INTERFACE_DIR NAMES CommandList.h
+                  PATH_SUFFIXES DiligentCore/Graphics/GraphicsEngine/interface
+                                Graphics/GraphicsEngine/interface)
+        if(DILIGENT_CORE_INTERFACE_DIR)
+            message(STATUS "Diligent Engine found at ${DILIGENT_CORE_INTERFACE_DIR}. Enabling Graphics.")
+            set(XI_DILIGENT_FOUND TRUE)
+            get_filename_component(DILIGENT_CORE_ROOT "${DILIGENT_CORE_INTERFACE_DIR}/../../.." ABSOLUTE)
+            target_include_directories(Xi PUBLIC
+                ${DILIGENT_CORE_ROOT}
+                ${DILIGENT_CORE_ROOT}/Graphics/GraphicsEngine/interface
+                ${DILIGENT_CORE_ROOT}/Graphics/GraphicsEngineVulkan/interface
+                ${DILIGENT_CORE_ROOT}/Graphics/GraphicsEngineOpenGL/interface
+                ${DILIGENT_CORE_ROOT}/Common/interface
+                ${DILIGENT_CORE_ROOT}/Primitives/interface
+                ${DILIGENT_CORE_ROOT}/Platforms/interface
+                ${DILIGENT_CORE_ROOT}/Platforms/Linux/interface
+                ${DILIGENT_CORE_ROOT}/Platforms/Basic/interface
+            )
+        else()
+            message(WARNING "Diligent Engine not found. Skipping Graphics.")
+            set(XI_DILIGENT_FOUND FALSE)
+        endif()
+    endif()
+
+    if(XI_DILIGENT_FOUND)
         target_sources(Xi PRIVATE ${GRAPHICS_SOURCES})
         target_compile_definitions(Xi PUBLIC XI_GRAPHICS_ENABLED)
-        
+
+        # Platform definitions
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             target_compile_definitions(Xi PUBLIC PLATFORM_LINUX=1)
         elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
             target_compile_definitions(Xi PUBLIC PLATFORM_WIN32=1)
         endif()
 
-        # Add common Diligent include paths if found
-        # (This is a heuristic, usually Diligent defines these in its own CMake config)
-        get_filename_component(DILIGENT_CORE_ROOT "${DILIGENT_CORE_INTERFACE_DIR}/../../.." ABSOLUTE)
-        
-        target_include_directories(Xi PUBLIC
-            ${DILIGENT_CORE_INTERFACE_DIR}
-            ${DILIGENT_CORE_ROOT}/Graphics/GraphicsEngine/interface
-            ${DILIGENT_CORE_ROOT}/Graphics/GraphicsEngineVulkan/interface
-            ${DILIGENT_CORE_ROOT}/Graphics/GraphicsEngineOpenGL/interface
-            ${DILIGENT_CORE_ROOT}/Common/interface
-            ${DILIGENT_CORE_ROOT}/Primitives/interface
-            ${DILIGENT_CORE_ROOT}/Platforms/interface
-            ${DILIGENT_CORE_ROOT}/Platforms/Linux/interface
-        )
-        
-        if(glfw3_FOUND OR GLFW_FOUND)
-            target_link_libraries(Xi PUBLIC glfw)
+        # Vulkan support
+        if(TARGET Diligent-GraphicsEngineVk-static)
+            target_compile_definitions(Xi PUBLIC VULKAN_SUPPORTED=1)
+            target_link_libraries(Xi PUBLIC
+                Diligent-GraphicsEngineVk-static
+                Diligent-Common
+                Diligent-Primitives
+            )
         endif()
-    else()
-        message(WARNING "Diligent Engine not found (CommandList.h missing). Skipping Graphics part.")
+
+        # GLFW: auto-detect target (from FetchContent or system)
+        if(TARGET glfw)
+            message(STATUS "GLFW detected. Linking to Xi.")
+            target_link_libraries(Xi PUBLIC glfw)
+            # Ensure Xi can find glfw3native.h
+            if(DEFINED glfw_SOURCE_DIR)
+                target_include_directories(Xi PRIVATE ${glfw_SOURCE_DIR}/include)
+            endif()
+        else()
+            find_package(glfw3 QUIET)
+            if(glfw3_FOUND)
+                target_link_libraries(Xi PUBLIC glfw)
+            endif()
+        endif()
     endif()
 endif()
 

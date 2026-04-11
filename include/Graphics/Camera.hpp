@@ -104,7 +104,7 @@ public:
 
 private:
   void _ensureDepthBuffer(i32 w, i32 h);
-  static void _renderRec(TreeItem *n, Matrix4 p, const Matrix4 &vp);
+  static void _renderRec(TreeItem *ti, Matrix4 p, const Matrix4 &vp);
 };
 
 } // namespace Graphics

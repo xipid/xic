@@ -5,9 +5,16 @@
  */
 
 #include "../../include/Graphics/Graphics.hpp"
+#include "Graphics/GraphicsEngineVulkan/interface/EngineFactoryVk.h"
 
 using namespace Collection;
 using namespace Xi;
+
+namespace Diligent {
+// Forward declare the global factory function
+// Note: Diligent usually marks these with API_QUALIFIER
+IEngineFactoryVk *GetEngineFactoryVk();
+} // namespace Diligent
 
 namespace Graphics {
 

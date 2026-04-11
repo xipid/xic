@@ -32,6 +32,8 @@
 
 #if GLFW_AVAILABLE
 
+#define Time X11Time
+
 #if PLATFORM_LINUX
 #define GLFW_EXPOSE_NATIVE_X11
 #elif PLATFORM_WIN32
@@ -41,6 +43,8 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
+
+#undef Time
 
 /**
  * @namespace Graphics
@@ -126,6 +130,3 @@ XI_EXPORT Device *requestWindow();
 
 #endif // GLFW_AVAILABLE
 #endif // XI_GRAPHICS_WINDOW_HPP
-
-#endif // GLFW_AVAILABLE
-#endif // XI_WINDOW_HPP

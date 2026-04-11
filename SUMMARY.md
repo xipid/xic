@@ -1,6 +1,6 @@
 # Summary
 
-* [✦ Introduction](docs/1-Home/Introduction.md)
+* [✦ Home](README.md)
 * [📦 Getting Started](docs/1-Home/GettingStarted.md)
 
 ---

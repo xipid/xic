@@ -8,7 +8,6 @@
 #define XI_GRAPHICS_MESH_HPP
 
 #include <Graphics/Graphics.hpp>
-#include <XiN/Reflect.hpp>
 
 /**
  * @namespace Graphics
@@ -82,68 +81,6 @@ struct XI_EXPORT Mesh3 {
   }
 };
 
-/**
- * @struct MeshVertAcc
- * @brief Property accessor for mesh vertices (for reflection/scripts).
- */
-struct MeshVertAcc : public PropertyAccessor {
-  MeshVertAcc() { name = "vertices"; }
-  void *getPtr(void *obj) override { return &(((Mesh3 *)obj)->vertices); }
-  void pushFloatArray(void *obj, float *vals, usz count) override {
-    auto &arr = ((Mesh3 *)obj)->vertices;
-    usz numVerts = count / 16;
-    for (usz i = 0; i < numVerts; ++i) {
-      Vertex v;
-      float *b = vals + i * 16;
-      v.x = b[0];
-      v.y = b[1];
-      v.z = b[2];
-      v.u = b[3];
-      v.v = b[4];
-      v.nx = b[5];
-      v.ny = b[6];
-      v.nz = b[7];
-      v.j[0] = (u32)b[8];
-      v.j[1] = (u32)b[9];
-      v.j[2] = (u32)b[10];
-      v.j[3] = (u32)b[11];
-      v.w[0] = b[12];
-      v.w[1] = b[13];
-      v.w[2] = b[14];
-      v.w[3] = b[15];
-      arr.push(v);
-    }
-    ((Mesh3 *)obj)->dirty = true;
-  }
-};
-
-/**
- * @struct MeshIndAcc
- * @brief Property accessor for mesh indices (for reflection/scripts).
- */
-struct MeshIndAcc : public PropertyAccessor {
-  MeshIndAcc() { name = "indices"; }
-  void *getPtr(void *obj) override { return &(((Mesh3 *)obj)->indices); }
-  void pushUIntArray(void *obj, u32 *vals, usz count) override {
-    auto &arr = ((Mesh3 *)obj)->indices;
-    for (usz i = 0; i < count; ++i)
-      arr.push(vals[i]);
-    ((Mesh3 *)obj)->dirty = true;
-  }
-};
-
 } // namespace Graphics
 
-/**
- * Reflection setup for Mesh3.
- */
-template <> struct Reflect<Graphics::Mesh3> {
-  static void setup(TypeMeta *meta) {
-    meta->properties.push(new Graphics::MeshVertAcc());
-    meta->properties.push(new Graphics::MeshIndAcc());
-  }
-};
-
 #endif // XI_GRAPHICS_MESH_HPP
-
-#endif

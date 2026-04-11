@@ -122,11 +122,11 @@ void Camera3::_ensureDepthBuffer(i32 w, i32 h) {
   pDSV = pDepth->GetDefaultView(Diligent::TEXTURE_VIEW_DEPTH_STENCIL);
 }
 
-void Camera3::_renderRec(TreeItem *n, Matrix4 p, const Matrix4 &vp) {
-  if (!n)
+void Camera3::_renderRec(TreeItem *ti, Matrix4 p, const Matrix4 &vp) {
+  if (!ti)
     return;
 
-  Renderable3 *r = dynamic_cast<Renderable3 *>(n);
+  Renderable3 *r = dynamic_cast<Renderable3 *>(ti);
   Matrix4 world = p;
 
   if (r) {
@@ -176,8 +176,12 @@ void Camera3::_renderRec(TreeItem *n, Matrix4 p, const Matrix4 &vp) {
     }
   }
 
-  for (usz i = 0; i < n->children.size(); ++i)
-    _renderRec(n->children[i], world, vp);
+  // Recurse into children only if this node is a branch container
+  auto *n = dynamic_cast<Collection::TreeBranch *>(ti);
+  if (n) {
+    for (usz i = 0; i < n->size(); ++i)
+      _renderRec(n->operator[](i), world, vp);
+  }
 }
 
 } // namespace Graphics

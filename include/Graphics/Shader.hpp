@@ -141,5 +141,3 @@ private:
 } // namespace Graphics
 
 #endif // XI_GRAPHICS_SHADER_HPP
-
-#endif

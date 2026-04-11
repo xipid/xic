@@ -21,13 +21,26 @@
 #undef MAP_READ
 #endif
 
-// Diligent Engine Includes
-#include "CommandList.h"
-#include "DeviceContext.h"
-#include "EngineFactoryVk.h"
-#include "RefCntAutoPtr.hpp"
-#include "RenderDevice.h"
-#include "SwapChain.h"
+#define PLATFORM_LINUX 1
+
+// 1. First, define the platform and basic types
+// #include "Graphics/GraphicsEngine/interface/LoadEngineDll.h" // Essential for
+// 'LoadEngineDll'
+#include "Platforms/interface/NativeWindow.h" // Essential for 'NativeWindow' type
+#include "Primitives/interface/BasicTypes.h"
+
+// 2. Common Diligent structures
+#include "Common/interface/RefCntAutoPtr.hpp"
+#include "Platforms/Basic/interface/DebugUtilities.hpp"
+
+// 3. General Graphics Interfaces
+#include "Graphics/GraphicsEngine/interface/CommandList.h"
+#include "Graphics/GraphicsEngine/interface/DeviceContext.h"
+#include "Graphics/GraphicsEngine/interface/RenderDevice.h"
+#include "Graphics/GraphicsEngine/interface/SwapChain.h"
+
+// 4. Finally, the Vulkan specific factory
+// #include "Graphics/GraphicsEngineVulkan/interface/EngineFactoryVk.h"
 
 /**
  * @namespace Graphics
@@ -192,5 +205,3 @@ public:
 } // namespace Graphics
 
 #endif // XI_GRAPHICS_GRAPHICS_HPP
-
-#endif
