@@ -1,8 +1,8 @@
 {
   "name": "xic",
-  "version": "1.0.0",
-  "description": "Xi C++ Core Primitives: Arrays, maps, inline crypto, embedded mesh networking, and the Rho Protocol for high-performance applications.",
+  "description": "Xi C++ Core: Zero-exception primitives, memory-deterministic structures.",
   "type": "module",
+  "version": "1.0.0",
   "keywords": [
     "cpp",
     "esp32",
@@ -21,22 +21,21 @@
   "author": "Xi (Abderrahmene MERZOUG)",
   "license": "Apache-2.0",
   "packageManager": "pnpm@10.16.1",
-  "main": "./dist/wasm/index.js",
-  "module": "./dist/wasm/index.js",
-  "types": "./dist/wasm/index.d.ts",
+  "main": "./dist/js/xi.js",
+  "module": "./dist/js/xi.js",
+  "types": "./src/js/index.ts",
   "exports": {
     ".": {
-      "types": "./dist/wasm/index.d.ts",
-      "import": "./dist/wasm/index.js"
+      "types": "./src/js/index.ts",
+      "import": "./dist/js/xi.js"
     }
   },
   "scripts": {
     "dev": "vite",
-    "site:build": "vite build",
-    "build": "node src/build.js website",
-    "build:all": "node src/build.js all",
+    "build": "node src/build.js all",
     "build:wasm": "node src/build.js wasm",
     "build:python": "node src/build.js python",
+    "build:docs": "node src/build.js docs",
     "postinstall": "node src/build.js wasm"
   },
   "devDependencies": {

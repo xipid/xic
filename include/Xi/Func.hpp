@@ -1,16 +1,34 @@
-#ifndef XI_FUNC_HPP
-#define XI_FUNC_HPP
+/**
+ * @file Func.hpp
+ * @brief Type-erased function wrapper with Small Object Optimization (SBO).
+
+ */
+
+#ifndef XI_CORE_FUNC_HPP
+#define XI_CORE_FUNC_HPP
 
 #include "Primitives.hpp"
 #include <cstddef>
 
 namespace Xi {
 
+/**
+ * @class Func
+ * @brief A type-erased function wrapper similar to std::function.
+ *
+ * Employs Small Object Optimization (SBO) to avoid heap allocations for
+ * small callables (up to 128 bytes).
+ *
+ * @tparam T Function signature (e.g., R(Args...)).
+ */
 template <typename T> class Func;
 
+/**
+ * @brief Specialization for function signatures.
+ */
 template <typename R, typename... Args> class XI_EXPORT Func<R(Args...)> {
 private:
-  static constexpr usz SBO_Size = 128;
+  static constexpr usz SBO_Size = 128; ///< Threshold for SBO.
 
   struct VTable {
     R (*invoke)(void *, Args...);
@@ -18,7 +36,6 @@ private:
     void (*clone)(const void *, void *);
   };
 
-  // Internal union to handle either local storage or a heap pointer
   union Storage {
     alignas(max_align_t) u8 local[SBO_Size];
     void *heap;
@@ -29,17 +46,8 @@ private:
 
   // --- Implementation Helpers ---
   template <typename Callable> static R invoke_fn(void *ptr, Args... args) {
-    // If heap, ptr is the address of the pointer itself, so we dereference
     Callable *func = static_cast<Callable *>(ptr);
     return (*func)(args...);
-  }
-
-  static inline u32 clean_hash(usz h) {
-    u32 h32 = (u32)h;
-    if (sizeof(usz) == 8) {
-      h32 ^= (u32)((u64)h >> 32);
-    }
-    return (h32 | 1);
   }
 
   template <typename Callable> static void destroy_fn(void *ptr) {
@@ -52,7 +60,6 @@ private:
     if (sizeof(Callable) <= SBO_Size) {
       new (dst) Callable(*source);
     } else {
-      // Heap clone
       Callable *copy = (Callable *)::operator new(sizeof(Callable));
       new (copy) Callable(*source);
       *(void **)dst = (void *)copy;
@@ -60,20 +67,20 @@ private:
   }
 
 public:
-  Func() : vptr(null), is_heap(false) { data.heap = null; }
+  /** @brief Constructs an empty (invalid) function. */
+  Func() : vptr(nullptr), is_heap(false) { data.heap = nullptr; }
 
-  // Add this to your public section in XiFunc.hpp
+  /** @brief Constructs from a raw function pointer. */
   Func(R (*f)(Args...)) {
     using DecayedF = R (*)(Args...);
     static const VTable vt = {invoke_fn<DecayedF>, destroy_fn<DecayedF>,
                               clone_fn<DecayedF>};
     vptr = &vt;
-
-    // Function pointers always fit in SBO_Size
     new (data.local) DecayedF(f);
     is_heap = false;
   }
 
+  /** @brief Constructs from any callable object (lambdas, functors). */
   template <typename Callable> Func(Callable f) {
     using DecayedF = Callable;
     static const VTable vt = {invoke_fn<DecayedF>, destroy_fn<DecayedF>,
@@ -84,7 +91,6 @@ public:
       new (data.local) DecayedF(Xi::Move(f));
       is_heap = false;
     } else {
-      // Allocation logic if capture is too large
       DecayedF *heap_ptr = (DecayedF *)::operator new(sizeof(DecayedF));
       new (heap_ptr) DecayedF(Xi::Move(f));
       data.heap = heap_ptr;
@@ -92,43 +98,20 @@ public:
     }
   }
 
+  /** @brief Move constructor. */
   Func(Func &&o) noexcept : vptr(o.vptr), is_heap(o.is_heap) {
     if (is_heap) {
       data.heap = o.data.heap;
     } else {
-      // Copy the local buffer bytes
       for (usz i = 0; i < SBO_Size; ++i)
         data.local[i] = o.data.local[i];
     }
-    // Neutralize the source so _clear() does nothing
-    o.vptr = null;
+    o.vptr = nullptr;
     o.is_heap = false;
-    o.data.heap = null;
+    o.data.heap = nullptr;
   }
 
-  // Assignment Operator (Copy and Swap idiom)
-  Func &operator=(Func o) {
-    Xi::Swap(vptr, o.vptr);
-    Xi::Swap(is_heap, o.is_heap);
-    for (usz i = 0; i < SBO_Size; ++i) {
-      Xi::Swap(data.local[i], o.data.local[i]);
-    }
-    return *this;
-  }
-
-  ~Func() { _clear(); }
-
-  void _clear() {
-    if (vptr) {
-      void *target = is_heap ? data.heap : (void *)data.local;
-      vptr->destroy(target);
-      if (is_heap)
-        ::operator delete(data.heap);
-    }
-    vptr = null;
-  }
-
-  // Rule of 3/5: Copy and Move
+  /** @brief Copy constructor. */
   Func(const Func &o) : vptr(o.vptr), is_heap(o.is_heap) {
     if (vptr) {
       const void *src = is_heap ? o.data.heap : (const void *)o.data.local;
@@ -136,6 +119,30 @@ public:
     }
   }
 
+  /** @brief Assignment operator with copy-and-swap idiom. */
+  Func &operator=(Func o) {
+    Xi::Swap(vptr, o.vptr);
+    Xi::Swap(is_heap, o.is_heap);
+    for (usz i = 0; i < SBO_Size; ++i)
+      Xi::Swap(data.local[i], o.data.local[i]);
+    return *this;
+  }
+
+  /** @brief Destructor. */
+  ~Func() { _clear(); }
+
+  /** @brief Clears the current function and releases resources. */
+  void _clear() {
+    if (vptr) {
+      void *target = is_heap ? data.heap : (void *)data.local;
+      vptr->destroy(target);
+      if (is_heap)
+        ::operator delete(data.heap);
+    }
+    vptr = nullptr;
+  }
+
+  /** @brief Invokes the wrapped callable. */
   R operator()(Args... args) const {
     if (!vptr)
       return R();
@@ -143,9 +150,13 @@ public:
     return vptr->invoke(target, args...);
   }
 
-  bool isValid() const { return vptr != null; }
+  /** @brief Returns true if the function wrapper is valid. */
+  bool isValid() const { return vptr != nullptr; }
+
+  /** @brief Explicit boolean conversion for validity check. */
+  operator bool() const { return isValid(); }
 };
 
 } // namespace Xi
 
-#endif
+#endif // XI_CORE_FUNC_HPP

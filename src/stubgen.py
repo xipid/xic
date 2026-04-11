@@ -280,12 +280,12 @@ if __name__ == "__main__":
     generate(
         os.path.abspath(os.path.join(base, "../include")),
         os.path.abspath(os.path.join(base, "../dist/js/xi.d.ts")),
-        os.path.abspath(os.path.join(base, "../src/xi/xi_core.pyi"))
+        os.path.abspath(os.path.join(base, "../src/py/xi/xi_core.pyi"))
     )
     
     # Mirror copy for python IDE
-    with open(os.path.join(base, "../src/xi/xi_core.pyi"), 'r') as src:
-        with open(os.path.join(base, "../src/xi/xi.pyi"), 'w') as dst:
+    with open(os.path.join(base, "../src/py/xi/xi_core.pyi"), 'r') as src:
+        with open(os.path.join(base, "../src/py/xi/xi.pyi"), 'w') as dst:
             dst.write(src.read())
 
 

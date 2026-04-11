@@ -1,8 +1,24 @@
-// include/Xi/Primitives.hpp
+/**
+ * @file Primitives.hpp
+ * @brief Core type definitions and metaprogramming utilities for the Xi
+ * framework.
 
-#ifndef XI_PRIMITIVES
-#define XI_PRIMITIVES
+ */
 
+#ifndef XI_CORE_PRIMITIVES_HPP
+#define XI_CORE_PRIMITIVES_HPP
+
+namespace Collection {
+class String;
+}
+
+#include <time.h>
+
+/**
+ * @def XI_EXPORT
+ * @brief Macro for exporting symbols (handles Cheerp, bindgen, and standard
+ * C++).
+ */
 #ifdef __cheerp__
 #define XI_EXPORT [[cheerp::jsexport]]
 #elif defined(__BINDGEN__)
@@ -21,36 +37,52 @@
 #define __PLACEMENT_NEW_INLINE
 #endif
 
+/**
+ * @namespace Xi
+ * @brief The core namespace for the Xi framework.
+ */
 namespace Xi {
+
+/** @typedef usz
+ *  @brief Unsigned size type (equivalent to size_t).
+ */
 using usz = decltype(sizeof(0));
 
-using u8 = unsigned char;
-using i8 = signed char;
+using u8 = unsigned char; ///< Unsigned 8-bit integer.
+using i8 = signed char;   ///< Signed 8-bit integer.
 
 // Auto-detect integer sizes for 16/32 bit types
 #if __SIZEOF_INT__ == 2
-using u16 = unsigned int;
-using i16 = int;
-using u32 = unsigned long;
-using i32 = long;
+using u16 = unsigned int;  ///< Unsigned 16-bit integer.
+using i16 = int;           ///< Signed 16-bit integer.
+using u32 = unsigned long; ///< Unsigned 32-bit integer.
+using i32 = long;          ///< Signed 32-bit integer.
 #else
-using u16 = unsigned short;
-using i16 = short;
-using u32 = unsigned int;
-using i32 = int;
+using u16 = unsigned short; ///< Unsigned 16-bit integer.
+using i16 = short;          ///< Signed 16-bit integer.
+using u32 = unsigned int;   ///< Unsigned 32-bit integer.
+using i32 = int;            ///< Signed 32-bit integer.
 #endif
 
-using u64 = unsigned long long;
-using i64 = long long;
+using u64 = unsigned long long; ///< Unsigned 64-bit integer.
+using i64 = long long;          ///< Signed 64-bit integer.
 
-using f32 = float;
-using f64 = double;
+using f32 = float;  ///< 32-bit floating point.
+using f64 = double; ///< 64-bit floating point.
 
+/** @var null
+ *  @brief Type-safe null pointer constant.
+ */
 static constexpr decltype(nullptr) null = nullptr;
 
 // -------------------------------------------------------------------------
 // Metaprogramming Utilities
 // -------------------------------------------------------------------------
+
+/**
+ * @struct RemoveRef
+ * @brief Removes reference qualifier from a type.
+ */
 template <typename T> struct RemoveRef {
   using Type = T;
 };
@@ -61,27 +93,41 @@ template <typename T> struct RemoveRef<T &&> {
   using Type = T;
 };
 
+/**
+ * @brief Casts an lvalue to an rvalue (equivalent to std::move).
+ */
 template <typename T>
-inline typename RemoveRef<T>::Type &&
-Move(T &&arg) noexcept // Added noinline/noexcept
-{
+inline typename RemoveRef<T>::Type &&Move(T &&arg) noexcept {
   return static_cast<typename RemoveRef<T>::Type &&>(arg);
 }
 
-// Custom EnableIf to avoid <type_traits>
+/**
+ * @struct EnableIf
+ * @brief SFINAE helper for conditional template instantiation.
+ */
 template <bool B, typename T = void> struct EnableIf {};
 template <typename T> struct EnableIf<true, T> {
   using Type = T;
 };
 
+/**
+ * @brief Swaps the values of two objects.
+ */
 template <typename T> inline void Swap(T &a, T &b) {
   T temp = Xi::Move(a);
   a = Xi::Move(b);
   b = Xi::Move(temp);
 }
 
+/**
+ * @brief Returns an rvalue reference to a type without constructing it.
+ */
 template <typename T> T &&DeclVal() noexcept;
 
+/**
+ * @struct IsSame
+ * @brief Checks if two types are identical.
+ */
 template <typename U, typename V> struct IsSame {
   static const bool Value = false;
 };
@@ -89,9 +135,17 @@ template <typename U> struct IsSame<U, U> {
   static const bool Value = true;
 };
 
+/**
+ * @struct Equal
+ * @brief Generic equality comparator.
+ */
 template <typename T> struct Equal {
   static bool eq(const T &a, const T &b) { return a == b; }
 };
+
+/**
+ * @brief Specialization for C-style Collection::Strings.
+ */
 template <> struct Equal<const char *> {
   static bool eq(const char *a, const char *b) {
     if (a == b)
@@ -108,12 +162,16 @@ template <> struct Equal<const char *> {
   }
 };
 
-// --- Constantes ---
+// --- Mathematical Constants ---
 #ifndef PI
 static constexpr f64 PI = 3.14159265358979323846;
 #endif
 static constexpr f64 E = 2.71828182845904523536;
 
+/**
+ * @struct FNVHasher
+ * @brief Fowler-Noll-Vo (FNV) hash implementation.
+ */
 template <typename T> struct FNVHasher {
   static usz fnvHash(const T &key) {
     const char *ptr = (const char *)&key;
@@ -132,7 +190,9 @@ template <typename T> struct FNVHasher {
   }
 };
 
-// Specialization for raw pointers (Murmur3 Mixer)
+/**
+ * @brief Specialization for raw pointers using Murmur3 mixer.
+ */
 template <typename T> struct FNVHasher<T *> {
   static usz fnvHash(T *key) {
     usz k = (usz)key;
@@ -153,9 +213,16 @@ template <typename T> struct FNVHasher<T *> {
   }
 };
 
+/**
+ * @brief Mixes a hash value for better distribution.
+ */
 usz fnvHashMix(usz k);
 
-class IMemoryDevice {
+/**
+ * @class IMemoryDevice
+ * @brief Interface for memory management devices (CPU/GPU).
+ */
+class XI_EXPORT IMemoryDevice {
 public:
   virtual void *alloc(usz size) = 0;
   virtual void free(void *handle) = 0;
@@ -170,45 +237,48 @@ public:
 // Serialization Traits & Helpers
 // -------------------------------------------------------------------------
 
-class String;
-
+/**
+ * @struct HasSerialize
+ * @brief Detects if a type has a .serialize() method.
+ */
 template <typename T> struct HasSerialize {
 private:
   template <typename U>
-  static auto test(int) -> decltype(Move(DeclVal<U>().serialize()), char());
+  static auto test(int)
+      -> decltype(Xi::Move(Xi::DeclVal<U>().serialize()), char());
   template <typename U> static long test(...);
 
 public:
   static const bool Value = sizeof(test<T>(0)) == sizeof(char);
 };
 
+/**
+ * @struct HasDeserialize
+ * @brief Detects if a type has a static .deserialize(Collection::String)
+ * method.
+ */
 template <typename T> struct HasDeserialize {
 private:
   template <typename U>
-  static auto test(int) -> decltype(U::deserialize(DeclVal<String>()), char());
+  static auto test(int)
+      -> decltype(U::deserialize(Xi::DeclVal<Collection::String>()), char());
   template <typename U> static long test(...);
 
 public:
   static const bool Value = sizeof(test<T>(0)) == sizeof(char);
 };
 
+/**
+ * @struct HasDeserializeAt
+ * @brief Detects if a type has a static .deserialize(Collection::String, usz&)
+ * method.
+ */
 template <typename T> struct HasDeserializeAt {
 private:
   template <typename U>
   static auto test(int)
-      -> decltype(U::deserialize(DeclVal<String>(), DeclVal<usz &>()), char());
-  template <typename U> static long test(...);
-
-public:
-  static const bool Value = sizeof(test<T>(0)) == sizeof(char);
-};
-
-template <typename T> struct HasValidToDeserialize {
-private:
-  template <typename U>
-  static auto test(int)
-      -> decltype(Xi::DeclVal<U>().validToDeserialize(Xi::DeclVal<String>(),
-                                                      Xi::DeclVal<usz>()),
+      -> decltype(U::deserialize(Xi::DeclVal<Collection::String>(),
+                                 Xi::DeclVal<usz &>()),
                   char());
   template <typename U> static long test(...);
 
@@ -216,13 +286,19 @@ public:
   static const bool Value = sizeof(test<T>(0)) == sizeof(char);
 };
 
+/**
+ * @struct IsPrimitive
+ * @brief Identifies built-in numeric/boolean types.
+ */
 template <typename T> struct IsPrimitive {
   static const bool Value = false;
 };
+
 #define XI_MARK_PRIMITIVE(Ty)                                                  \
   template <> struct IsPrimitive<Ty> {                                         \
     static const bool Value = true;                                            \
   };
+
 XI_MARK_PRIMITIVE(bool)
 XI_MARK_PRIMITIVE(u8)
 XI_MARK_PRIMITIVE(i8)
@@ -236,62 +312,64 @@ XI_MARK_PRIMITIVE(f32)
 XI_MARK_PRIMITIVE(f64)
 
 /**
- * @brief Serializes an object to a String.
- * Calls obj.serialize() if available, or handles primitives and structs.
+ * @brief Serializes an object to a Collection::String.
  */
-template <typename T, typename S = String> S serialize(const T &obj);
+template <typename T, typename S = Collection::String>
+S serialize(const T &obj);
 
 /**
- * @brief Checks if a String is valid to deserialize into a type.
+ * @brief Checks if a Collection::String is valid to deserialize into a type.
  */
 template <typename T> bool validToDeserialize(const T &obj, usz originalLength);
 
-/**
- * @brief Helper for deserialize inference.
- */
-struct Deserializer {
-  String *data;
-  template <typename T> operator T();
-};
+struct Deserializer;
 
 /**
- * @brief Deserializes a String into an object.
+ * @brief Deserializes a Collection::String into an object.
  */
-template <typename S = String> inline Deserializer deserialize(const S &s) {
-  return {const_cast<S *>(&s)};
-}
+template <typename S = Collection::String>
+inline Deserializer deserialize(const S &s);
 
 /**
- * @brief Deserializes a String into an object from a specific offset.
+ * @brief Deserializes a Collection::String into an object from a specific
+ * offset.
  */
-template <typename T, typename S = String> T deserialize(const S &s, usz &at);
+template <typename T, typename S = Collection::String>
+T deserialize(const S &s, usz &at);
 
 // -------------------------------------------------------------------------
 // Time Primitives
 // -------------------------------------------------------------------------
 
+/**
+ * @brief Returns current time in milliseconds.
+ */
 i64 millis();
+
+/**
+ * @brief Returns current time in microseconds.
+ */
 i64 micros();
 
-// Global Epoch Offset (controlled by Spatial / Time Sync)
+/** @var systemStartMicros
+ *  @brief Global epoch offset for time synchronization.
+ */
 #if __cplusplus >= 201703L || (defined(_MSVC_LANG) && _MSVC_LANG >= 201703L)
 static inline i64 systemStartMicros = 0;
 #else
 static i64 systemStartMicros = 0;
 #endif
 
+// Specialized Hashers
 template <> struct FNVHasher<u32> {
   static usz fnvHash(const u32 &k) { return fnvHashMix((usz)k); }
 };
-
 template <> struct FNVHasher<int> {
   static usz fnvHash(const int &k) { return fnvHashMix((usz)k); }
 };
-
 template <> struct FNVHasher<u64> {
   static usz fnvHash(const u64 &k) { return fnvHashMix((usz)k); }
 };
-
 template <> struct FNVHasher<const char *> {
   static usz fnvHash(const char *key) {
 #if __SIZEOF_POINTER__ == 8
@@ -309,12 +387,60 @@ template <> struct FNVHasher<const char *> {
   }
 };
 
+i64 epochMicros();
+
+int getGMT();
+
+inline int parse_int(const char *&str, int len) {
+  int v = 0;
+  for (int i = 0; i < len; ++i) {
+    char c = *str;
+    if (c >= '0' && c <= '9') {
+      v = v * 10 + (c - '0');
+      str++;
+    } else
+      break;
+  }
+  return v;
+}
+
+inline bool ch_eq(char a, char b) {
+  if (a >= 'A' && a <= 'Z')
+    a += 32;
+  if (b >= 'A' && b <= 'Z')
+    b += 32;
+  return a == b;
+}
+
+inline void sleepU(u64 us) {
+#if defined(FREERTOS_CONFIG_H) || defined(INC_FREERTOS_H)
+  TickType_t xDelay =
+      static_cast<TickType_t>(us / 1000000 * configTICK_RATE_HZ);
+  if (xDelay == 0 && us > 0)
+    xDelay = 1;
+  vTaskDelay(xDelay);
+#elif defined(ARDUINO)
+  ::delay(static_cast<unsigned long>(us / 1000));
+#elif defined(_WIN32)
+  ::Sleep(static_cast<DWORD>(us / 1000));
+#else
+  struct timespec ts;
+  ts.tv_sec = static_cast<time_t>(us / 1000000);
+  ts.tv_nsec = static_cast<long>((us - static_cast<double>(ts.tv_sec)) * 1e9);
+  nanosleep(&ts, nullptr);
+#endif
+}
+
+inline void sleep(double seconds) { sleepU(seconds * 1000000); }
+
+inline void sleepM(u64 ms) { sleepU(ms * 1000); }
+
 } // namespace Xi
 
 #ifndef __PLACEMENT_NEW_INLINE
 #define __PLACEMENT_NEW_INLINE
-inline void *operator new(decltype(sizeof(0)), void *p) noexcept { return p; }
+inline void *operator new(usz, void *p) noexcept { return p; }
 inline void operator delete(void *, void *) noexcept {}
 #endif
 
-#endif // XI_PRIMITIVES
+#endif // XI_CORE_PRIMITIVES_HPP

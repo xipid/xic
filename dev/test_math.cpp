@@ -1,5 +1,5 @@
-#include "Xi/Math.hpp"
-#include "Xi/Vector.hpp"
+#include "../include/Xi/Array.hpp"
+#include "../include/Xi/Math.hpp"
 #include <iostream>
 
 using namespace Xi;

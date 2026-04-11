@@ -2,36 +2,36 @@
 #define XI_HARDWARE_MPU_HPP
 
 #include "../Xi/Device.hpp"
+#include "../Collection/Array.hpp"
+#include "../Xi/Primitives.hpp"
 #include "../Xi/Math.hpp"
 
 namespace Xi {
 
 class MPUDevice : public Device {
 public:
-    Vector3 accel;
-    Vector3 gyro;
-    Vector3 mag;
-    f32 temp;
+    Vector3 accel = {0,0,0};
+    Vector3 gyro = {0,0,0};
+    Vector3 mag = {0,0,0};
+    f32 temperature = 0;
+
+    // Calibration offsets
+    Vector3 accelOffset = {0,0,0};
+    Vector3 gyroOffset = {0,0,0};
+    Vector3 magOffset = {0,0,0};
 
     virtual void update() override = 0;
 };
 
 class MPU9250 : public MPUDevice {
 public:
-    u8 addr = 0x68;
-    int cs = -1;
-    bool useSPI = false;
-
-    void init();
+    MPU9250(u8 address = 0x68);
+    
     void update() override;
+    void calibrate();
 
 private:
-#if defined(ARDUINO)
-    void writeReg(u8 reg, u8 val);
-    void readRegs(u8 reg, u8 *buf, int len);
-    void writeReg0xC(u8 reg, u8 val);
-    void readRegs0xC(u8 reg, u8 *buf, int len);
-#endif
+    u8 _addr;
 };
 
 } // namespace Xi

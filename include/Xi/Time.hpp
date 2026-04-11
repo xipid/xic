@@ -1,14 +1,31 @@
-#ifndef XI_TIME
-#define XI_TIME
+/**
+ * @file Time.hpp
+ * @brief High-precision time and date utilities for the Xi framework.
 
+ */
+
+#ifndef XI_CORE_TIME_HPP
+#define XI_CORE_TIME_HPP
+
+#include "../Collection/String.hpp"
 #include "Primitives.hpp"
-#include "String.hpp"
+
+using namespace Collection;
 
 namespace Xi {
 
+/** @brief Returns current system time in microseconds since Unix epoch. */
 i64 epochMicros();
+/** @brief Returns global GMT offset in seconds. */
 int getGMT();
 
+/**
+ * @class Time
+ * @brief High-precision timestamp and calendar utility.
+ *
+ * Stores time in microseconds since Unix epoch and provides extensive
+ * conversion and manipulation methods.
+ */
 class XI_EXPORT Time {
 private:
   static constexpr i64 US_PER_SEC = 1000000ULL;
@@ -20,27 +37,35 @@ private:
   friend int getGMT();
 
 public:
-  int tz = 0;
-  i64 us;
+  int tz = 0; ///< Timezone offset in seconds.
+  i64 us;     ///< Microseconds since Unix epoch.
 
+  /** @brief Pauses the current thread for a specific duration. */
   static void sleep(double seconds);
+  /** @brief Checks if a year is a leap year. */
   static bool isLeap(int y) {
     return (y % 4 == 0) && (y % 100 != 0 || y % 400 == 0);
   }
   static int daysInMonth(int m, int y);
   static void civFromDays(long long z, int &y, int &m, int &d, int &doy);
   static long long daysFromCiv(int y, int m, int d);
-  static int parse_int(const char *&str, int len);
-  static bool ch_eq(char a, char b);
 
-  // static void syncPPS();
+  /** @brief Synchronizes the global clock with a specific value. */
   static void syncClock(i64 now);
+  /** @brief Synchronizes the global clock with system time. */
   static void syncClock();
 
-  Time();
-  Time(i64 u) : us(u) {}
-  Time(const Xi::String &date, const Xi::String &fmt);
+  /** @brief Default constructor (uninitialized or zero). */
+  Time() : us(0), tz(0) {}
+  /** @brief Constructs from raw microseconds and optional timezone. */
+  Time(i64 u, int t = 0) : us(u), tz(t) {}
+  /** @brief Parses a date string based on a format. */
+  Time(const String &date, const String &fmt);
 
+  /**
+   * @struct Property
+   * @brief Helper for Python-like property syntax (e.g., time.year = 2024).
+   */
   template <typename Owner, int (Owner::*Getter)() const,
             void (Owner::*Setter)(int)>
   struct Property {
@@ -89,10 +114,13 @@ public:
   Property<Time, &Time::getSecondInMinute, &Time::setSecondInMinute> second{
       this};
 
-  Xi::String toString(const Xi::String &fmt = "yyyy/mm/dd hh:mm:ss",
-                      int targetTzHours = 0) const;
+  /**
+   * @brief Formats the time into a string.
+   */
+  String toString(const String &fmt = "yyyy/mm/dd hh:mm:ss",
+                  int targetTzHours = 0) const;
 };
 
 } // namespace Xi
 
-#endif
+#endif // XI_CORE_TIME_HPP

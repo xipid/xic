@@ -4,13 +4,8 @@
   "description": "Xi C++ Core Primitives: Zero-exception, memory-deterministic structures and the high-performance Rho mesh-networking protocol for ESP32 and embedded ecosystems.",
   "keywords": [
     "esp32",
-    "mesh",
     "udp",
     "crypto",
-    "rho",
-    "tunnel",
-    "railway",
-    "networking",
     "monocypher"
   ],
   "repository": {
@@ -25,8 +20,15 @@
     }
   ],
   "license": "ISC",
-  "frameworks": ["arduino", "espidf"],
-  "platforms": ["espressif32", "linux_x86_64", "native"],
+  "frameworks": [
+    "arduino",
+    "espidf"
+  ],
+  "platforms": [
+    "espressif32",
+    "linux_x86_64",
+    "native"
+  ],
   "build": {
     "flags": [
       "-Iinclude",

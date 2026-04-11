@@ -1,9 +1,10 @@
 import { execSync } from "child_process";
 import fs from "fs";
+import os from "os";
 import path from "path";
 
 const targets = process.argv.slice(2);
-const allTargets = ["wasm", "python", "website"];
+const allTargets = ["wasm", "python", "website", "docs"];
 const activeTargets = targets.length > 0 ? targets : ["all"];
 
 const colors = {
@@ -33,6 +34,55 @@ function run(cmd, desc, options = {}) {
   }
 }
 
+const pythonBin = process.platform === "win32" ? ".venv/Scripts/python" : ".venv/bin/python3";
+
+async function setupVenv() {
+  if (!fs.existsSync(".venv")) {
+    run("python3 -m venv .venv", "Creating Python Virtual Environment");
+  }
+  
+  run(`${pythonBin} -m pip install -r requirements-build.txt`, "Synchronizing Venv Build Dependencies");
+}
+
+async function ensureEmsdk() {
+  log("Checking for Emscripten SDK...", colors.yellow);
+  
+  // 1. Check if emcc is already in PATH
+  try {
+    execSync("emcc --version", { stdio: "ignore" });
+    log("✅ Emscripten already available in system PATH.", colors.green);
+    return;
+  } catch (e) {
+    // Not in PATH, continue to cache check
+  }
+
+  const homeDir = os.homedir();
+  const sdkBase = path.join(homeDir, ".cache", "xic", "emsdk");
+  const emccPath = path.join(sdkBase, "upstream", "emscripten", "emcc");
+
+  if (!fs.existsSync(emccPath)) {
+    log("Installing Emscripten to external cache...", colors.bright + colors.blue);
+    const parentDir = path.dirname(sdkBase);
+    if (!fs.existsSync(parentDir)) fs.mkdirSync(parentDir, { recursive: true });
+
+    run(`git clone --depth 1 https://github.com/emscripten-core/emsdk.git ${sdkBase}`, "Cloning EMSDK");
+    
+    const emsdkBin = path.join(sdkBase, "emsdk");
+    run(`${emsdkBin} install latest`, "Installing Emscripten Logic (This may take several minutes)");
+    run(`${emsdkBin} activate latest`, "Activating Toolchain");
+  }
+
+  // Inject PATH variables for the current process
+  const pathsToAdd = [
+    path.join(sdkBase, "upstream", "emscripten"),
+    path.join(sdkBase, "node", "20.18.0_64bit", "bin"), // Approximation, emsdk activates its own node
+    sdkBase
+  ];
+
+  process.env.PATH = pathsToAdd.join(path.delimiter) + path.delimiter + process.env.PATH;
+  log("✅ Emscripten PATH injected successfully.", colors.green);
+}
+
 async function buildWasm() {
   const binDir = "dist/bin/wasm";
   const jsDir = "dist/js";
@@ -42,10 +92,11 @@ async function buildWasm() {
   const includePaths = "-Iinclude -Ipackages/monocypher";
   const emccBin = "emcc";
 
-  run("python3 src/stubgen.py", "Generating Typescript .d.ts and Python .pyi stubs from C++ Headers");
+  await setupVenv();
+  await ensureEmsdk();
+  run(`${pythonBin} src/stubgen.py`, "Generating Typescript .d.ts and Python .pyi stubs from C++ Headers");
 
   const excludedWasmFiles = ["Camera.cpp", "Graphics.cpp", "Window.cpp"];
-
   const sources = [
     "packages/monocypher/monocypher.c",
     ...fs.readdirSync("src/Xi")
@@ -83,32 +134,21 @@ async function buildWasm() {
 async function buildPython() {
   log("Building Python Package (Sdist & Wheel)...", colors.yellow);
   
-  run("python3 src/stubgen.py", "Generating Typescript .d.ts and Python .pyi stubs from C++ Headers");
+  await setupVenv();
+  run(`${pythonBin} src/stubgen.py`, "Generating Typescript .d.ts and Python .pyi stubs from C++ Headers");
 
-  try {
-    run("python3 -m build", "Executing PEP 517 build", { allowFail: true });
-  } catch (e) {
-    log(
-      "\n⚠️  PEP 517 build failed (is 'build' module installed?).",
-      colors.yellow,
-    );
-    log("Installing 'build' module and retrying...", colors.blue);
-    try {
-      run("python3 -m pip install build", "Installing build module");
-      run("python3 -m build", "Retrying PEP 517 build");
-    } catch (e2) {
-      log(
-        "❌ Failed to build python package. Please ensure 'build' is available.",
-        colors.red,
-      );
-      throw e2;
-    }
-  }
+  run(`${pythonBin} -m build`, "Executing PEP 517 build via venv");
   log("✅ Python build complete.", colors.green);
 }
 
+async function buildDocs() {
+  log("Generating Documentation...", colors.yellow);
+  run("node src/build.js website", "Rebuilding Website for Docs");
+  log("✅ Documentation build complete.", colors.green);
+}
+
 async function buildWebsite() {
-  run("pnpm run site:build", "Building Website (Vite)");
+  run("vite build", "Building Website (Vite)");
   log("✅ Website build complete.", colors.green);
 }
 
@@ -125,6 +165,10 @@ async function main() {
 
   if (activeTargets.includes("all") || activeTargets.includes("website")) {
     await buildWebsite();
+  }
+
+  if (activeTargets.includes("all") || activeTargets.includes("docs")) {
+    await buildDocs();
   }
 
   log(

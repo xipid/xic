@@ -1,8 +1,15 @@
-#include <Xi/Math.hpp>
-#include <Xi/Array.hpp>
+/**
+ * @file Math.cpp
+ * @brief Implementation of mathematical utilities and matrix operations.
+
+ */
+
+#include "../../include/Xi/Math.hpp"
+#include "../../include/Collection/Array.hpp"
+
+using namespace Collection;
 
 namespace Xi {
-namespace Math {
 
 Matrix4 identity() {
   Matrix4 r = {{{0}}};
@@ -53,7 +60,7 @@ Matrix4 rotateZ(f32 rad) {
 
 Matrix4 lookAt(Vector3 eye, Vector3 center, Vector3 up) {
   auto norm = [](Vector3 v) {
-    f32 l = Xi::Math::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    f32 l = sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
     return (l == 0) ? Vector3{0, 0, 0} : Vector3{v.x / l, v.y / l, v.z / l};
   };
   auto cross = [](Vector3 a, Vector3 b) {
@@ -137,7 +144,7 @@ f32 det(const Matrix4 &m) {
 
 Matrix4 inverse(const Matrix4 &m) {
   f32 d = det(m);
-  if (Xi::Math::abs(d) < 1e-8f)
+  if (abs(d) < 1e-8f)
     return identity();
   f32 invDet = 1.0f / d;
 
@@ -185,69 +192,74 @@ Matrix4 inverse(const Matrix4 &m) {
 
   return res;
 }
-f32 sum(const Array<f32> &a) {
-    f32 s = 0;
-    for (usz i = 0; i < a.fragments.size(); ++i) {
-        const auto &f = a.fragments.data()[i];
-        const f32 *d = f.data();
-        usz n = f.size();
-        _Pragma("omp simd") for (usz k = 0; k < n; ++k) s += d[k];
-    }
-    return s;
+
+template <> f32 sum<f32>(const Array<f32> &a) {
+  f32 s = 0;
+  for (usz i = 0; i < a.fragments.size(); ++i) {
+    const auto &f = a.fragments[i];
+    const f32 *d = f.data();
+    usz n = f.size();
+    _Pragma("omp simd") for (usz k = 0; k < n; k++) s += d[k];
+  }
+  return s;
 }
 
-f32 mean(const Array<f32> &a) {
-    usz n = a.size();
-    return (n == 0) ? 0 : sum(a) / (f32)n;
+template <> f32 mean<f32>(const Array<f32> &a) {
+  usz n = a.size();
+  return (n == 0) ? 0 : sum(a) / (f32)n;
 }
 
-f32 var(const Array<f32> &a) {
-    usz n = a.size();
-    if (n == 0) return 0;
-    f32 m = mean(a);
-    f32 v = 0;
-    for (usz i = 0; i < a.fragments.size(); ++i) {
-        const auto &f = a.fragments.data()[i];
-        const f32 *d = f.data();
-        usz count = f.size();
-        for (usz k = 0; k < count; ++k) {
-            f32 diff = d[k] - m;
-            v += diff * diff;
-        }
+template <> f32 var<f32>(const Array<f32> &a) {
+  usz n = a.size();
+  if (n == 0)
+    return 0;
+  f32 m = mean(a);
+  f32 v = 0;
+  for (usz i = 0; i < a.fragments.size(); ++i) {
+    const auto &f = a.fragments[i];
+    const f32 *d = f.data();
+    usz fn = f.size();
+    for (usz k = 0; k < fn; k++) {
+      f32 diff = d[k] - m;
+      v += diff * diff;
     }
-    return v / (f32)n;
+  }
+  return v / (f32)n;
 }
 
-f32 std(const Array<f32> &a) { return Xi::Math::sqrt(var(a)); }
+template <> f32 std<f32>(const Array<f32> &a) { return sqrt(var(a)); }
 
-Array<f32> softmax(const Array<f32> &a) {
-    Array<f32> res;
-    usz n = a.size();
-    res.allocate(n);
-    f32 maxVal = -1e30f;
-    for (usz i = 0; i < a.fragments.size(); ++i) {
-        const auto &f = a.fragments.data()[i];
-        const f32 *d = f.data();
-        usz count = f.size();
-        for (usz k = 0; k < count; ++k)
-            if (d[k] > maxVal) maxVal = d[k];
+template <> Array<f32> softmax<Array<f32>>(const Array<f32> &a) {
+  Array<f32> res;
+  usz n = a.size();
+  res.allocate(n);
+  f32 maxVal = -1e30f;
+  for (usz i = 0; i < a.fragments.size(); ++i) {
+    const auto &f = a.fragments[i];
+    const f32 *d = f.data();
+    usz fn = f.size();
+    for (usz k = 0; k < fn; k++)
+      if (d[k] > maxVal)
+        maxVal = d[k];
+  }
+
+  f32 sumExp = 0;
+  for (usz i = 0; i < a.fragments.size(); ++i) {
+    const auto &f = a.fragments[i];
+    const f32 *d = f.data();
+    usz fn = f.size();
+    usz off = f.offset;
+    for (usz k = 0; k < fn; k++) {
+      f32 e = exp(d[k] - maxVal);
+      res[off + k] = e;
+      sumExp += e;
     }
-    f32 sumExp = 0;
-    for (usz i = 0; i < a.fragments.size(); ++i) {
-        const auto &f = a.fragments.data()[i];
-        const f32 *d = f.data();
-        usz count = f.size();
-        usz offset = f.offset;
-        for (usz k = 0; k < count; ++k) {
-            f32 e = Xi::Math::exp(d[k] - maxVal);
-            res[offset + k] = e;
-            sumExp += e;
-        }
-    }
-    f32 invSumExp = 1.0f / sumExp;
-    for (usz i = 0; i < n; i++) res[i] *= invSumExp;
-    return res;
+  }
+
+  f32 invSumExp = 1.0f / sumExp;
+  for (usz i = 0; i < n; i++)
+    res[i] *= invSumExp;
+  return res;
 }
 
-} // namespace Math
 } // namespace Xi

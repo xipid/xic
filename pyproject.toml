@@ -23,17 +23,15 @@ Homepage = "https://github.com/xizyd/xic"
 Repository = "https://github.com/xizyd/xic.git"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/xi"]
+packages = ["src/py/xi"]
 
-# We force-include the C++ headers and monocypher package directly into the Python wheel
-# so that cppyy can dynamically compile them upon module import on the user's machine.
 [tool.hatch.build.targets.wheel.force-include]
 "include" = "xi/include"
 "packages" = "xi/packages"
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "src/xi",
+    "src/py",
     "include",
     "packages",
     "library.json",

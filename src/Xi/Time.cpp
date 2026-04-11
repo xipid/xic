@@ -1,3 +1,9 @@
+/**
+ * @file Time.cpp
+ * @brief Implementation of time-related utilities and the Time class.
+
+ */
+
 #include "../../include/Xi/Time.hpp"
 
 #if defined(FREERTOS_CONFIG_H) || defined(INC_FREERTOS_H)
@@ -14,80 +20,15 @@
 
 namespace Xi {
 
-i64 epochMicros() {
-#if defined(ARDUINO)
-  return ::Xi::micros() + Xi::systemStartMicros;
-#elif defined(_WIN32)
-  unsigned long long ft;
-  ::GetSystemTimePreciseAsFileTime(&ft);
-  return (ft - 116444736000000000ULL) / 10ULL;
-#else
-  struct timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
-  return (i64)ts.tv_sec * 1000000ULL + (i64)(ts.tv_nsec / 1000);
-#endif
-}
+i64 epochMicros() { return systemStartMicros + micros(); }
 
 int getGMT() {
-#if defined(ARDUINO)
-  return 0; // Default or sync from GPS
-#else
-  time_t t = time(NULL);
-  struct tm *lt = localtime(&t);
-  struct tm *gt = gmtime(&t);
-  return (int)difftime(mktime(lt), mktime(gt)) / 3600;
-#endif
+  // This should ideally come from location.getGMT() or a system setting
+  // For now, return 0 or common default
+  return 0;
 }
-
-int Time::parse_int(const char *&str, int len) {
-  int v = 0;
-  for (int i = 0; i < len; ++i) {
-    char c = *str;
-    if (c >= '0' && c <= '9') {
-      v = v * 10 + (c - '0');
-      str++;
-    } else
-      break;
-  }
-  return v;
-}
-
-bool Time::ch_eq(char a, char b) {
-  if (a >= 'A' && a <= 'Z')
-    a += 32;
-  if (b >= 'A' && b <= 'Z')
-    b += 32;
-  return a == b;
-}
-
-// void Time::syncPPS() {
-//   i64 m = Xi::micros();
-//   i64 currentEpoch = m + Xi::systemStartMicros;
-//   i64 nearestSecondMicros =
-//       ((currentEpoch + 500000ULL) / 1000000ULL) * 1000000ULL;
-//   Xi::systemStartMicros = nearestSecondMicros - m;
-// }
 
 void Time::syncClock(i64 now) { Xi::systemStartMicros = now - Xi::micros(); }
-
-void Time::sleep(double seconds) {
-#if defined(FREERTOS_CONFIG_H) || defined(INC_FREERTOS_H)
-  TickType_t xDelay = static_cast<TickType_t>(seconds * configTICK_RATE_HZ);
-  if (xDelay == 0 && seconds > 0)
-    xDelay = 1;
-  vTaskDelay(xDelay);
-#elif defined(ARDUINO)
-  ::delay(static_cast<unsigned long>(seconds * 1000.0));
-#elif defined(_WIN32)
-  ::Sleep(static_cast<DWORD>(seconds * 1000.0));
-#else
-  struct timespec ts;
-  ts.tv_sec = static_cast<time_t>(seconds);
-  ts.tv_nsec =
-      static_cast<long>((seconds - static_cast<double>(ts.tv_sec)) * 1e9);
-  nanosleep(&ts, nullptr);
-#endif
-}
 
 void Time::civFromDays(long long z, int &y, int &m, int &d, int &doy) {
   z += 719468;
@@ -130,20 +71,20 @@ int Time::daysInMonth(int m, int y) {
   return days[m - 1];
 }
 
-int Time::getSecond() const { return (us / US_PER_SEC); }
-int Time::getSecondInMinute() const { return (us / US_PER_SEC) % 60; }
+int Time::getSecond() const { return (int)(us / US_PER_SEC); }
+int Time::getSecondInMinute() const { return (int)(us / US_PER_SEC) % 60; }
 void Time::setSecondInMinute(int v) {
   long long baseMin = (us / US_PER_SEC) / 60;
   us = (baseMin * 60 + v) * US_PER_SEC + (us % US_PER_SEC);
 }
-int Time::getMinute() const { return (us / US_PER_MIN); }
-int Time::getMinuteInHour() const { return (us / US_PER_MIN) % 60; }
+int Time::getMinute() const { return (int)(us / US_PER_MIN); }
+int Time::getMinuteInHour() const { return (int)(us / US_PER_MIN) % 60; }
 void Time::setMinuteInHour(int v) {
   long long baseHour = (us / US_PER_MIN) / 60;
   long long secPart = (us / US_PER_SEC) % 60;
   us = ((baseHour * 60 + v) * 60 + secPart) * US_PER_SEC + (us % US_PER_SEC);
 }
-int Time::getHourInDay() const { return (us / US_PER_HOUR) % 24; }
+int Time::getHourInDay() const { return (int)(us / US_PER_HOUR) % 24; }
 void Time::setHourInDay(int v) {
   long long days = us / US_PER_DAY;
   long long rem = (us % US_PER_DAY) % US_PER_HOUR;
@@ -197,12 +138,7 @@ void Time::updateDate(int y, int m, int d) {
   us = daysFromCiv(y, m, d) * US_PER_DAY + (us % US_PER_DAY);
 }
 
-Time::Time() {
-  us = ::Xi::epochMicros();
-  tz = ::Xi::getGMT();
-}
-
-Time::Time(const Xi::String &date, const Xi::String &fmt) : us(0) {
+Time::Time(const String &date, const String &fmt) : us(0) {
   const char *s = date.c_str();
   const char *f = fmt.c_str();
   int Y = 1970, M = 1, D = 1, h = 0, mn = 0, sc = 0;
@@ -269,19 +205,19 @@ Time::Time(const Xi::String &date, const Xi::String &fmt) : us(0) {
        US_PER_SEC;
 }
 
-Xi::String Time::toString(const Xi::String &fmt, int targetTzHours) const {
-  long long localUs = us + (targetTzHours * 3600 * US_PER_SEC);
+String Time::toString(const String &fmt, int targetTzHours) const {
+  long long localUs = us + (targetTzHours * 3600LL * US_PER_SEC);
 
   int y, m, d, doy;
   long long days = localUs / US_PER_DAY;
   civFromDays(days, y, m, d, doy);
 
   long long timeOfDay = localUs % US_PER_DAY;
-  int h = (timeOfDay / US_PER_HOUR);
-  int mn = (timeOfDay % US_PER_HOUR) / US_PER_MIN;
-  int s = (timeOfDay % US_PER_MIN) / US_PER_SEC;
+  int h = (int)(timeOfDay / US_PER_HOUR);
+  int mn = (int)(timeOfDay % US_PER_HOUR) / US_PER_MIN;
+  int s = (int)(timeOfDay % US_PER_MIN) / US_PER_SEC;
 
-  Xi::String res;
+  String res;
   const char *f = fmt.c_str();
 
   while (*f) {
@@ -298,7 +234,6 @@ Xi::String Time::toString(const Xi::String &fmt, int targetTzHours) const {
         }
         back--;
       }
-
       int v = isMin ? mn : m;
       if (v < 10)
         res += '0';

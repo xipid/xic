@@ -1,8 +1,13 @@
+/**
+ * @file Random.cpp
+ * @brief Implementation of random number generation utilities.
+ */
+
 #include "../../include/Xi/Random.hpp"
+#include "../../include/LLT/Crypto.hpp"
 #include <fcntl.h>
 #include <string.h>
 #include <sys/time.h>
-#include <time.h>
 #include <unistd.h>
 
 #if __has_include(<sys/mman.h>) && defined(__linux__)
@@ -15,7 +20,6 @@ alignas(64) u32 _randomPool[20] = {
     123456789, 362436069, 521288629, 88675123, 0, 0, 0, 0, 0, 0,
     0,         0,         0,         0,        0, 0, 0, 0, 0, 0};
 bool _randomInitialized = false;
-u32 _secureCounter = 0;
 
 u32 randomNext() {
   u32 t = _randomPool[3];
@@ -29,7 +33,9 @@ u32 randomNext() {
   return _randomPool[0];
 }
 
-void randomSeed(u32 s) {
+void randomSeed(u32 s, bool overwrite) {
+  if (!overwrite && _randomInitialized)
+    return;
   for (int i = 0; i < 20; i++) {
     s = 1812433253U * (s ^ (s >> 30)) + i;
     _randomPool[i] = s;
@@ -39,11 +45,14 @@ void randomSeed(u32 s) {
   _randomInitialized = true;
 }
 
-void randomSeed() {
+void randomSeed(bool overwrite) {
+  if (!overwrite && _randomInitialized)
+    return;
 #if defined(__linux__) || defined(__APPLE__)
   int fd = open("/dev/urandom", O_RDONLY);
   if (fd >= 0) {
-    read(fd, _randomPool, sizeof(_randomPool));
+    ssize_t n = read(fd, _randomPool, sizeof(_randomPool));
+    (void)n;
     close(fd);
     _randomInitialized = true;
   }
@@ -51,7 +60,7 @@ void randomSeed() {
   for (int i = 0; i < 20; i++)
     _randomPool[i] = esp_random();
 #else
-  randomSeed(987654321);
+  randomSeed((u32)987654321);
 #endif
 
 #if defined(__linux__) && __has_include(<sys/mman.h>)
@@ -87,6 +96,30 @@ void randomFill(u8 *buffer, usz size) {
       r >>= 8;
     }
   }
+}
+
+/**
+ * @brief Fills a string with pseudo-random bytes.
+ */
+void randomFill(String &s, usz len) {
+  if (len == 0 || s.size() < len)
+    len = s.size();
+  u8 *raw = const_cast<u8 *>(reinterpret_cast<const u8 *>(s.data()));
+  if (raw)
+    randomFill(raw, len);
+}
+
+/**
+ * @brief Utility for seeding the PRNG using string hash.
+ */
+inline void randomSeed(String str) {
+  u32 h = 5381;
+  int c;
+  unsigned char *d = (unsigned char *)str.data();
+  while (d && (c = *d++)) {
+    h = ((h << 5) + h) + c;
+  }
+  randomSeed(h);
 }
 
 } // namespace Xi
