@@ -395,7 +395,7 @@ bool YAML::parse(const String &yaml, TreeItem &outRoot) {
   return true;
 }
 
-static String emitValue(const TreeItem *node, int indentLevel, int indentSize) {
+static String emitValue(const TreeItem *node, int indentLevel, int indentSize, bool firstLineNoIndent = false) {
   if (!node)
     return "null";
 
@@ -404,12 +404,16 @@ static String emitValue(const TreeItem *node, int indentLevel, int indentSize) {
     for (usz i = 0; i < branch->size(); ++i) {
       auto child = (*branch)[i];
       if (child->getName() == "_comment") {
-        emitIdent(res, (indentLevel)*indentSize);
+        if (!(i == 0 && firstLineNoIndent)) {
+          emitIdent(res, (indentLevel)*indentSize);
+        }
         res += "# " + dynamic_cast<const TreeItemT<String> *>(child)->value +
                "\n";
         continue;
       }
-      emitIdent(res, indentLevel * indentSize);
+      if (!(i == 0 && firstLineNoIndent)) {
+        emitIdent(res, indentLevel * indentSize);
+      }
       res += child->getName() + ": ";
       res += emitValue(child, indentLevel + 1, indentSize);
       res += "\n";
@@ -424,16 +428,20 @@ static String emitValue(const TreeItem *node, int indentLevel, int indentSize) {
     for (usz i = 0; i < arr->size(); ++i) {
       TreeItem *child = (*arr)[i];
       if (child->getName() == "_comment") {
-        emitIdent(res, (indentLevel)*indentSize);
+        if (!(first && firstLineNoIndent)) {
+          emitIdent(res, (indentLevel)*indentSize);
+        }
         res += "# " + dynamic_cast<const TreeItemT<String> *>(child)->value +
                "\n";
         continue;
       }
       if (!first)
         res += "\n";
-      emitIdent(res, indentLevel * indentSize);
+      if (!(first && firstLineNoIndent)) {
+        emitIdent(res, indentLevel * indentSize);
+      }
       res += "- ";
-      res += emitValue(child, indentLevel + 1, indentSize);
+      res += emitValue(child, indentLevel + 1, indentSize, true);
       first = false;
     }
     return res;
