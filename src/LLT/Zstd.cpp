@@ -117,6 +117,12 @@ void ZSTD::train(const Array<String> &samples, usz dictSize) {
 #endif
 }
 
+void ZSTD::setDictionary(const String &dict) {
+  dictionary.clear();
+  dictionary.push(dict);
+  _dictDirty = true;
+}
+
 // -------------------------------------------------------------------------
 // Compress — hot path: no allocations other than the output String
 // -------------------------------------------------------------------------

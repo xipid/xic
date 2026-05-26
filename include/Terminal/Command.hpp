@@ -87,6 +87,12 @@ public:
    */
   Command &option(const String &names);
 
+  /**
+   * @brief Retrieve a boolean flag. If the parser incorrectly swallowed a positional 
+   *        argument as its value, this method un-swallows it.
+   */
+  Command &flag(const String &names);
+
   // ─── Option modifiers (chainable after option()) ───────────────────
 
   /** @brief Set a default value if the option was not provided. */

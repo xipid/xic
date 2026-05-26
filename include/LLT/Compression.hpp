@@ -121,6 +121,11 @@ public:
    */
   void train(const Array<String> &samples, usz dictSize = 112 * 1024);
 
+  /**
+   * @brief Sets a pre-trained dictionary and flags it as dirty.
+   */
+  void setDictionary(const String &dict);
+
   String compress(const String &input) override;
   String decompress(const String &input) override;
 

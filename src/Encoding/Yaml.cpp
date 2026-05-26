@@ -290,61 +290,54 @@ struct YamlParser {
     }
 
     // Block Mapping or Literal
-    // We check if it looks like a key: value
     usz peek = i;
     bool isKey = false;
-    String keyName;
+    int blockIndent = currentIndent;
+    
+    // Simple lookahead for a key
     while (peek < input.length() && input.charAt(peek) != '\n' &&
            input.charAt(peek) != '\r') {
       if (input.charAt(peek) == ':') {
         isKey = true;
         break;
       }
-      keyName += input.charAt(peek++);
+      peek++;
     }
 
     if (isKey) {
       TaggedTreeBranch *branch = new TaggedTreeBranch();
-      int blockIndent = currentIndent;
       while (i < input.length()) {
         skipComments(branch);
-        if (currentIndent < blockIndent && !isNewLine)
+        if (currentIndent < blockIndent)
           break;
         if (i >= input.length())
           break;
 
-        // Re-parse key in loop
-        String k;
-        while (i < input.length() && input.charAt(i) != ':')
-          k += input.charAt(i++);
-        if (i < input.length() && input.charAt(i) == ':')
-          i++;
-        k = k.trim();
+        // Check for sequence start at same level (invalid for mapping)
+        if (input.charAt(i) == '-' && (i + 1 >= input.length() || isSpace(input.charAt(i + 1))))
+          break;
 
+        // Parse Key
+        String k;
+        while (i < input.length() && input.charAt(i) != ':') {
+           char ck = input.charAt(i++);
+           if (ck == '\n') break; 
+           k += ck;
+        }
+        if (i < input.length() && input.charAt(i) == ':') i++;
+        k = k.trim();
+        if (k.isEmpty()) break;
+
+        // Parse Value
         TreeItem *v = parseValue(blockIndent, branch);
         if (v) {
           v->setName(k);
           branch->add(v);
         }
 
-        // Check next line indent
-        usz save = i;
-        int nextIndent = 0;
-        bool nextNL = false;
-        while (save < input.length()) {
-          char sc = input.charAt(save);
-          if (sc == ' ') {
-            nextIndent++;
-            save++;
-          } else if (sc == '\n') {
-            nextIndent = 0;
-            nextNL = true;
-            save++;
-          } else
-            break;
-        }
-        if (nextIndent < blockIndent)
-          break;
+        // After value, we must be on a new line or at EOF
+        skipComments(branch);
+        if (currentIndent < blockIndent) break;
       }
       return branch;
     }
@@ -359,17 +352,17 @@ struct YamlParser {
       return new TaggedTreeItem();
 
     bool isNum = true;
-    bool hasDot = false;
+    int dotCount = 0;
     for (usz k = 0; k < s.length(); ++k) {
       if (s.charAt(k) == '.')
-        hasDot = true;
+        dotCount++;
       else if (s.charAt(k) < '0' || s.charAt(k) > '9') {
         if (k != 0 || s.charAt(k) != '-')
           isNum = false;
       }
     }
-    if (isNum && s.length() > 0 && s != "-") {
-      if (hasDot)
+    if (isNum && s.length() > 0 && s != "-" && dotCount <= 1) {
+      if (dotCount == 1)
         return new TaggedTreeItemT<f64>(s.toDouble());
       return new TaggedTreeItemT<long long>(s.toInt());
     }

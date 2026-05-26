@@ -12,7 +12,7 @@
 
 using namespace Collection;
 
-namespace Xi {
+namespace Resource {
 
 class Address;
 
@@ -22,9 +22,151 @@ class Address;
  * segments).
  */
 class NumericalAddress : public Array<u64> {
+private:
+  static bool _isHex(u8 c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+  }
+  static u64 _hexToU64(const String &s) {
+    u64 v = 0;
+    for (usz i = 0; i < s.size(); i++) {
+      u8 c = s[i];
+      v <<= 4;
+      if (c >= '0' && c <= '9') v |= (c - '0');
+      else if (c >= 'a' && c <= 'f') v |= (c - 'a' + 10);
+      else if (c >= 'A' && c <= 'F') v |= (c - 'A' + 10);
+    }
+    return v;
+  }
+  static bool _strIsNumeric(const String &s) {
+    if (s.isEmpty()) return false;
+    for (usz i = 0; i < s.size(); i++)
+      if (s[i] < '0' || s[i] > '9') return false;
+    return true;
+  }
+  static bool _strIsHex(const String &s) {
+    if (s.isEmpty()) return false;
+    for (usz i = 0; i < s.size(); i++)
+      if (!_isHex(s[i])) return false;
+    return true;
+  }
+
+  void _parseIPv6Body(const String &str) {
+    long long dc = str.find("::");
+    if (dc != -1) {
+      String before = str.substring(0, (usz)dc);
+      String after;
+      if ((usz)dc + 2 < str.size())
+        after = str.substring((usz)dc + 2);
+
+      Array<u64> bSegs, aSegs;
+      if (!before.isEmpty()) {
+        Array<String> p = before.split(":");
+        for (usz i = 0; i < p.size(); i++)
+          bSegs.push(_hexToU64(p[i]));
+      }
+      if (!after.isEmpty()) {
+        Array<String> p = after.split(":");
+        for (usz i = 0; i < p.size(); i++)
+          aSegs.push(_hexToU64(p[i]));
+      }
+      usz zeros = 8 - bSegs.size() - aSegs.size();
+      for (usz i = 0; i < bSegs.size(); i++) push(bSegs[i]);
+      for (usz i = 0; i < zeros; i++) push(0);
+      for (usz i = 0; i < aSegs.size(); i++) push(aSegs[i]);
+    } else {
+      Array<String> p = str.split(":");
+      for (usz i = 0; i < p.size(); i++)
+        push(_hexToU64(p[i]));
+    }
+  }
+
 public:
   NumericalAddress() {}
   NumericalAddress(const Address &hn);
+  NumericalAddress(const char *str) : NumericalAddress(String(str)) {}
+  NumericalAddress& operator=(const String &str) {
+    *this = NumericalAddress(str);
+    return *this;
+  }
+  NumericalAddress& operator=(const char *str) {
+    *this = NumericalAddress(String(str));
+    return *this;
+  }
+
+  /**
+   * @brief Construct from a string. Recognizes:
+   *   - Rho comma-separated:  "7,0,0,0,0,9000"
+   *   - IPv4 dotted:          "192.168.1.1"  or  "192.168.1.1:8080"
+   *   - IPv6 full/compressed: "::1", "2001:db8::1", "fe80::1%eth0"
+   *   - IPv6 bracketed+port:  "[::1]:8080"
+   *   - Rho dotted fallback:  "7.0.0.0.0.9000" (non-4-octet dot notation)
+   */
+  NumericalAddress(const String &str) {
+    if (str.isEmpty()) return;
+
+    // ── Rho comma-separated: "7,0,0,0,0,9000" ──
+    if (str.find(",") != -1) {
+      Array<String> parts = str.split(",");
+      for (usz i = 0; i < parts.size(); i++)
+        push((u64)parseLong(parts[i]));
+      return;
+    }
+
+    // ── IPv6 bracket notation: "[::1]:8080" ──
+    if (str.size() > 0 && str[0] == '[') {
+      long long cb = str.find("]");
+      if (cb == -1) return;
+      String body = str.substring(1, (usz)cb);
+      push(8); // TopLevel::IPv6
+      _parseIPv6Body(body);
+      if ((usz)cb + 2 < str.size() && str[(usz)cb + 1] == ':')
+        push((u64)parseLong(str.substring((usz)cb + 2)));
+      return;
+    }
+
+    // Count colons to distinguish IPv6 from IPv4
+    int colonCount = 0;
+    for (usz i = 0; i < str.size(); i++)
+      if (str[i] == ':') colonCount++;
+
+    // ── IPv6 (2+ colons): "::1", "2001:db8::1", "fe80::1" ──
+    if (colonCount >= 2) {
+      push(8); // TopLevel::IPv6
+      _parseIPv6Body(str);
+      return;
+    }
+
+    // ── IPv4 with optional port: "192.168.1.1" or "192.168.1.1:8080" ──
+    String host = str;
+    String portStr;
+    if (colonCount == 1) {
+      long long ci = str.find(":");
+      host = str.substring(0, (usz)ci);
+      portStr = str.substring((usz)ci + 1);
+    }
+
+    Array<String> octets = host.split(".");
+    if (octets.size() == 4) {
+      bool allNum = true;
+      for (usz i = 0; i < 4 && allNum; i++)
+        allNum = _strIsNumeric(octets[i]);
+      if (allNum) {
+        push(7); // TopLevel::IPv4
+        for (usz i = 0; i < 4; i++)
+          push((u64)parseLong(octets[i]));
+        if (!portStr.isEmpty())
+          push((u64)parseLong(portStr));
+        return;
+      }
+    }
+
+    // ── Rho dot-separated fallback: "7.0.0.0.0.9000" ──
+    Array<String> parts = host.split(".");
+    for (usz i = 0; i < parts.size(); i++)
+      push((u64)parseLong(parts[i]));
+    if (!portStr.isEmpty())
+      push((u64)parseLong(portStr));
+  }
 
   /**
    * @brief Finds the longest common prefix between two addresses.
@@ -252,6 +394,18 @@ inline NumericalAddress::NumericalAddress(const Address &hn) {
 inline Address::Address(const NumericalAddress &nhn) {
   for (usz i = 0; i < nhn.size(); i++)
     push(String(nhn[i]));
+}
+
+inline bool operator==(const NumericalAddress& a, const NumericalAddress& b) {
+  if (a.size() != b.size()) return false;
+  for (usz i = 0; i < a.size(); ++i) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
+
+inline bool operator!=(const NumericalAddress& a, const NumericalAddress& b) {
+  return !(a == b);
 }
 
 /**
@@ -513,6 +667,6 @@ public:
   }
 };
 
-} // namespace Xi
+} // namespace Resource
 
 #endif // XI_CORE_PATH_HPP

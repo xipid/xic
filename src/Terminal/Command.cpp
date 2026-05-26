@@ -383,6 +383,20 @@ Command &Command::option(const String &names) {
   return opt;
 }
 
+Command &Command::flag(const String &names) {
+  Command &opt = option(names);
+  if (opt.active && opt.value.size() > 0) {
+    String val = opt.value[0];
+    if (val != "true" && val != "false" && val != "1" && val != "0" && val != "on" && val != "off" && val != "yes" && val != "no") {
+      // Swallowed a positional! Un-swallow it.
+      _positionals.unshift(val);
+      opt.value.clear();
+      opt.value.push("true");
+    }
+  }
+  return opt;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Commands
 // ═══════════════════════════════════════════════════════════════════════

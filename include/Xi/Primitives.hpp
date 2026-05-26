@@ -426,7 +426,7 @@ inline void sleepU(u64 us) {
 #else
   struct timespec ts;
   ts.tv_sec = static_cast<time_t>(us / 1000000);
-  ts.tv_nsec = static_cast<long>((us - static_cast<double>(ts.tv_sec)) * 1e9);
+  ts.tv_nsec = static_cast<long>((us % 1000000) * 1000);
   nanosleep(&ts, nullptr);
 #endif
 }

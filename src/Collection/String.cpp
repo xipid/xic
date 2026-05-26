@@ -521,6 +521,38 @@ long long String::shiftI64() {
   return (long long)r;
 }
 
+String *String::pushI32(int v) {
+  for (int i = 0; i < 4; i++)
+    push((u8)((v >> (i * 8)) & 0xff));
+  return this;
+}
+int String::shiftI32() {
+  if (size() < 4)
+    return 0;
+  unsigned int r = 0;
+  for (int i = 0; i < 4; i++)
+    r |= (unsigned int)shift() << (i * 8);
+  return (int)r;
+}
+int String::peekI32(usz offset) const {
+  if (offset + 4 > size())
+    return 0;
+  const u8 *d = data();
+  unsigned int r = 0;
+  for (int i = 0; i < 4; i++)
+    r |= (unsigned int)d[offset + i] << (i * 8);
+  return (int)r;
+}
+long long String::peekI64(usz offset) const {
+  if (offset + 8 > size())
+    return 0;
+  const u8 *d = data();
+  unsigned long long r = 0;
+  for (int i = 0; i < 8; i++)
+    r |= (unsigned long long)d[offset + i] << (i * 8);
+  return (long long)r;
+}
+
 String *String::pushF64(f64 v) {
   union {
     f64 f;
@@ -580,6 +612,22 @@ VarLongResult String::peekVarLong(usz offset) const {
       break;
   }
   return {0, 0, true};
+}
+
+VarStringResult String::peekVarString(usz offset) const {
+  auto lenRes = peekVarLong(offset);
+  if (lenRes.error) {
+    return { String(), 0, true };
+  }
+  if (lenRes.value > 0) {
+    usz strLen = (usz)(lenRes.value - 1);
+    if (offset + lenRes.bytes + strLen > size()) {
+      return { String(), 0, true };
+    }
+    String val = substring(offset + lenRes.bytes, offset + lenRes.bytes + strLen);
+    return { val, lenRes.bytes + (int)strLen, false };
+  }
+  return { String(), 0, true };
 }
 
 String String::toDeci() const {

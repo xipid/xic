@@ -11,263 +11,177 @@ option(XI_BUILD_TLS "Build TLS/HTTP Support (mbedTLS)" ON)
 option(XI_BUILD_DEFLATE "Build DEFLATE Compression (miniz)" ON)
 option(XI_BUILD_LZ4 "Build LZ4 Compression" ON)
 option(XI_BUILD_ZSTD "Build Zstandard Compression" ON)
+option(XI_BUILD_AS_OBJECTS "Build as an OBJECT library" ON)
 
-# Source Groups
-set(XI_CORE_SOURCES
-    packages/monocypher/monocypher.c
-    src/Xi/Device.cpp
-    src/Xi/Math.cpp
-    src/Xi/Primitives.cpp
-    src/Xi/Random.cpp
-    src/Xi/Time.cpp
-    src/Xi/Transform.cpp
+# --- Automatic Source Discovery ---
+# Core components that are always included
+file(GLOB_RECURSE CORE_SOURCES 
+    "packages/monocypher/monocypher.c"
+    "src/Xi/*.cpp"
+    "src/Collection/*.cpp"
+    "src/Encoding/*.cpp"
+    "src/Execution/*.cpp"
+    "src/LLT/*.cpp"
+    "src/Sec/*.cpp"
+    "src/Resource/*.cpp"
+    "src/Terminal/*.cpp"
 )
 
-set(XI_COLLECTION_SOURCES
-    src/Collection/String.cpp
-)
+# Filter out optional sources from the core list to avoid double-inclusion or missing dependencies
+list(FILTER CORE_SOURCES EXCLUDE REGEX "src/Hardware/.*")
+list(FILTER CORE_SOURCES EXCLUDE REGEX "src/Graphics/.*")
+list(FILTER CORE_SOURCES EXCLUDE REGEX "src/Resource/TLS.cpp")
+list(FILTER CORE_SOURCES EXCLUDE REGEX "src/Resource/HTTP.cpp")
+list(FILTER CORE_SOURCES EXCLUDE REGEX "src/Resource/ZIPArchive.cpp")
+list(FILTER CORE_SOURCES EXCLUDE REGEX "src/LLT/Deflate.cpp")
+list(FILTER CORE_SOURCES EXCLUDE REGEX "src/LLT/LZ4.cpp")
+list(FILTER CORE_SOURCES EXCLUDE REGEX "src/LLT/Zstd.cpp")
 
-set(XI_ENCODING_SOURCES
-    src/Encoding/Regex.cpp
-    src/Encoding/Yaml.cpp
-)
+set(XI_SOURCES ${CORE_SOURCES})
 
-set(XI_EXECUTION_SOURCES
-    src/Execution/Routine.cpp
-)
-
-set(XI_LLT_SOURCES
-    src/LLT/Crypto.cpp
-)
-
-set(XI_RESOURCE_SOURCES
-    src/Resource/Archive.cpp
-    src/Resource/File.cpp
-    src/Resource/Network.cpp
-    src/Resource/Socket.cpp
-)
-
-set(XI_TERMINAL_SOURCES
-    src/Terminal/Command.cpp
-    src/Terminal/Format.cpp
-    src/Terminal/Prompt.cpp
-)
-
-set(XI_HARDWARE_SOURCES
-    src/Hardware/DHT.cpp
-    src/Hardware/GPS.cpp
-    src/Hardware/GS.cpp
-    src/Hardware/MPU.cpp
-)
-
-set(XI_TLS_SOURCES
-    src/Resource/TLS.cpp
-    src/Resource/HTTP.cpp
-)
-
-set(GRAPHICS_SOURCES
-    src/Graphics/Camera.cpp
-    src/Graphics/Graphics.cpp
-    src/Graphics/Window.cpp
-)
-
-# Main Library
-add_library(Xi 
-    ${XI_CORE_SOURCES} 
-    ${XI_COLLECTION_SOURCES}
-    ${XI_ENCODING_SOURCES}
-    ${GRAPHICS_SOURCES}
-    #${XI_EXECUTION_SOURCES}
-    ${XI_LLT_SOURCES}
-    ${XI_RESOURCE_SOURCES}
-    ${XI_TERMINAL_SOURCES}
-)
-
-if(XI_BUILD_HARDWARE)
-    target_sources(Xi PRIVATE ${XI_HARDWARE_SOURCES})
+# --- Main Target Definition ---
+if(XI_BUILD_AS_OBJECTS)
+    add_library(Xi OBJECT ${XI_SOURCES})
+    # If building as OBJECT, we need PIC for shared libs that might link to us
+    set_target_properties(Xi PROPERTIES POSITION_INDEPENDENT_CODE ON)
+else()
+    add_library(Xi STATIC ${XI_SOURCES})
 endif()
 
-# Graphics: Auto-detect Diligent & GLFW (FetchContent or system)
-if(XI_BUILD_GRAPHICS)
-    # Check if DiligentCore was already fetched (FetchContent)
-    if(TARGET Diligent-GraphicsEngineVk-static OR TARGET Diligent-GraphicsEngineOpenGL-static)
-        message(STATUS "Diligent Engine detected (FetchContent target). Enabling Graphics.")
-        set(XI_DILIGENT_FOUND TRUE)
+# Basic Include Directories
+target_include_directories(Xi PUBLIC 
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+target_include_directories(Xi PRIVATE 
+    ${CMAKE_CURRENT_SOURCE_DIR}/packages/monocypher
+)
 
-        # Auto-wire Diligent include directories from FetchContent source dir
+# --- Fail-safe Dependency Handling ---
+
+# Graphics (Diligent Engine)
+if(XI_BUILD_GRAPHICS)
+    if(TARGET Diligent-GraphicsEngineVk-static OR TARGET Diligent-GraphicsEngineOpenGL-static)
+        set(XI_DILIGENT_FOUND TRUE)
         if(DEFINED diligentcore_SOURCE_DIR)
             target_include_directories(Xi PUBLIC ${diligentcore_SOURCE_DIR})
         endif()
-
     else()
-        # Fallback: search for installed Diligent headers
         find_path(DILIGENT_CORE_INTERFACE_DIR NAMES CommandList.h
                   PATH_SUFFIXES DiligentCore/Graphics/GraphicsEngine/interface
                                 Graphics/GraphicsEngine/interface)
         if(DILIGENT_CORE_INTERFACE_DIR)
-            message(STATUS "Diligent Engine found at ${DILIGENT_CORE_INTERFACE_DIR}. Enabling Graphics.")
             set(XI_DILIGENT_FOUND TRUE)
             get_filename_component(DILIGENT_CORE_ROOT "${DILIGENT_CORE_INTERFACE_DIR}/../../.." ABSOLUTE)
             target_include_directories(Xi PUBLIC
                 ${DILIGENT_CORE_ROOT}
                 ${DILIGENT_CORE_ROOT}/Graphics/GraphicsEngine/interface
-                ${DILIGENT_CORE_ROOT}/Graphics/GraphicsEngineVulkan/interface
-                ${DILIGENT_CORE_ROOT}/Graphics/GraphicsEngineOpenGL/interface
                 ${DILIGENT_CORE_ROOT}/Common/interface
                 ${DILIGENT_CORE_ROOT}/Primitives/interface
                 ${DILIGENT_CORE_ROOT}/Platforms/interface
-                ${DILIGENT_CORE_ROOT}/Platforms/Linux/interface
-                ${DILIGENT_CORE_ROOT}/Platforms/Basic/interface
             )
-        else()
-            message(WARNING "Diligent Engine not found. Skipping Graphics.")
-            set(XI_DILIGENT_FOUND FALSE)
         endif()
     endif()
 
     if(XI_DILIGENT_FOUND)
+        file(GLOB GRAPHICS_SOURCES "src/Graphics/*.cpp")
         target_sources(Xi PRIVATE ${GRAPHICS_SOURCES})
         target_compile_definitions(Xi PUBLIC XI_GRAPHICS_ENABLED)
-
-        # Platform definitions
-        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-            target_compile_definitions(Xi PUBLIC PLATFORM_LINUX=1)
-        elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-            target_compile_definitions(Xi PUBLIC PLATFORM_WIN32=1)
-        endif()
-
-        # Vulkan support
-        if(TARGET Diligent-GraphicsEngineVk-static)
-            target_compile_definitions(Xi PUBLIC VULKAN_SUPPORTED=1)
-            target_link_libraries(Xi PUBLIC
-                Diligent-GraphicsEngineVk-static
-                Diligent-Common
-                Diligent-Primitives
-            )
-        endif()
-
-        # GLFW: auto-detect target (from FetchContent or system)
+        
         if(TARGET glfw)
-            message(STATUS "GLFW detected. Linking to Xi.")
             target_link_libraries(Xi PUBLIC glfw)
-            # Ensure Xi can find glfw3native.h
-            if(DEFINED glfw_SOURCE_DIR)
-                target_include_directories(Xi PRIVATE ${glfw_SOURCE_DIR}/include)
-            endif()
         else()
             find_package(glfw3 QUIET)
             if(glfw3_FOUND)
                 target_link_libraries(Xi PUBLIC glfw)
             endif()
         endif()
+    else()
+        message(STATUS "Diligent Engine not found. Skipping Graphics.")
     endif()
 endif()
 
-# TLS/HTTP check (Reliant on mbedTLS presence)
+# TLS/HTTP (mbedTLS)
 if(XI_BUILD_TLS)
-    # Search for the mbedTLS ssl.h header
     find_path(MBEDTLS_INCLUDE_DIR NAMES mbedtls/ssl.h)
-
     if(MBEDTLS_INCLUDE_DIR)
-        message(STATUS "mbedTLS found at ${MBEDTLS_INCLUDE_DIR}. Enabling TLS/HTTP.")
-
-        find_library(MBEDTLS_LIBRARY NAMES mbedtls)
-        find_library(MBEDX509_LIBRARY NAMES mbedx509)
-        find_library(MBEDCRYPTO_LIBRARY NAMES mbedcrypto)
-
-        target_sources(Xi PRIVATE ${XI_TLS_SOURCES})
+        message(STATUS "mbedTLS found. Enabling TLS/HTTP.")
+        target_sources(Xi PRIVATE src/Resource/TLS.cpp src/Resource/HTTP.cpp)
         target_compile_definitions(Xi PUBLIC XI_TLS_ENABLED)
-
         target_include_directories(Xi PUBLIC ${MBEDTLS_INCLUDE_DIR})
-
-        if(MBEDTLS_LIBRARY AND MBEDX509_LIBRARY AND MBEDCRYPTO_LIBRARY)
-            target_link_libraries(Xi PUBLIC
-                ${MBEDTLS_LIBRARY}
-                ${MBEDX509_LIBRARY}
-                ${MBEDCRYPTO_LIBRARY}
-            )
+        
+        find_library(MBEDTLS_LIB NAMES mbedtls QUIET)
+        find_library(MBEDX509_LIB NAMES mbedx509 QUIET)
+        find_library(MBEDCRYPTO_LIB NAMES mbedcrypto QUIET)
+        if(MBEDTLS_LIB AND MBEDX509_LIB AND MBEDCRYPTO_LIB)
+            target_link_libraries(Xi PUBLIC ${MBEDTLS_LIB} ${MBEDX509_LIB} ${MBEDCRYPTO_LIB})
         endif()
     else()
-        message(WARNING "mbedTLS not found (mbedtls/ssl.h missing). Skipping TLS/HTTP part.")
+        message(STATUS "mbedTLS not found. Skipping TLS/HTTP.")
     endif()
 endif()
 
-find_path(MINIZ_INCLUDE_DIR NAMES miniz.h PATH_SUFFIXES miniz)
-include_directories(${MINIZ_INCLUDE_DIR})
-
-# DEFLATE check (Reliant on miniz presence)
+# DEFLATE (miniz)
 if(XI_BUILD_DEFLATE)
-    find_path(MINIZ_INCLUDE_DIR NAMES miniz.h)
-
+    find_path(MINIZ_INCLUDE_DIR NAMES miniz.h PATH_SUFFIXES miniz)
     if(MINIZ_INCLUDE_DIR)
-        message(STATUS "miniz found at ${MINIZ_INCLUDE_DIR}. Enabling DEFLATE.")
-
+        message(STATUS "miniz found. Enabling DEFLATE.")
         target_sources(Xi PRIVATE src/LLT/Deflate.cpp src/Resource/ZIPArchive.cpp)
         target_compile_definitions(Xi PUBLIC XI_DEFLATE_ENABLED)
         target_include_directories(Xi PUBLIC ${MINIZ_INCLUDE_DIR})
-
-        find_library(MINIZ_LIBRARY NAMES miniz)
-        if(MINIZ_LIBRARY)
-            target_link_libraries(Xi PUBLIC ${MINIZ_LIBRARY})
+        
+        find_library(MINIZ_LIB NAMES miniz QUIET)
+        if(MINIZ_LIB)
+            target_link_libraries(Xi PUBLIC ${MINIZ_LIB})
         endif()
     else()
-        message(WARNING "miniz not found (miniz.h missing). Skipping DEFLATE.")
+        message(STATUS "miniz not found. Skipping DEFLATE.")
     endif()
 endif()
 
-# LZ4 check (Reliant on lz4 presence)
+# LZ4
 if(XI_BUILD_LZ4)
     find_path(LZ4_INCLUDE_DIR NAMES lz4.h)
-
     if(LZ4_INCLUDE_DIR)
-        message(STATUS "LZ4 found at ${LZ4_INCLUDE_DIR}. Enabling LZ4.")
-
+        message(STATUS "LZ4 found. Enabling LZ4.")
         target_sources(Xi PRIVATE src/LLT/LZ4.cpp)
         target_compile_definitions(Xi PUBLIC XI_LZ4_ENABLED)
         target_include_directories(Xi PUBLIC ${LZ4_INCLUDE_DIR})
-
-        find_library(LZ4_LIBRARY NAMES lz4)
-        if(LZ4_LIBRARY)
-            target_link_libraries(Xi PUBLIC ${LZ4_LIBRARY})
+        
+        find_library(LZ4_LIB NAMES lz4 QUIET)
+        if(LZ4_LIB)
+            target_link_libraries(Xi PUBLIC ${LZ4_LIB})
         endif()
     else()
-        message(WARNING "LZ4 not found (lz4.h missing). Skipping LZ4.")
+        message(STATUS "LZ4 not found. Skipping LZ4.")
     endif()
 endif()
 
-# ZSTD check (Reliant on libzstd presence)
+# ZSTD
 if(XI_BUILD_ZSTD)
     find_path(ZSTD_INCLUDE_DIR NAMES zstd.h)
-
     if(ZSTD_INCLUDE_DIR)
-        message(STATUS "Zstandard found at ${ZSTD_INCLUDE_DIR}. Enabling ZSTD.")
-
+        message(STATUS "Zstandard found. Enabling ZSTD.")
         target_sources(Xi PRIVATE src/LLT/Zstd.cpp)
         target_compile_definitions(Xi PUBLIC XI_ZSTD_ENABLED)
         target_include_directories(Xi PUBLIC ${ZSTD_INCLUDE_DIR})
-
-        find_library(ZSTD_LIBRARY NAMES zstd)
-        if(ZSTD_LIBRARY)
-            target_link_libraries(Xi PUBLIC ${ZSTD_LIBRARY})
+        
+        find_library(ZSTD_LIB NAMES zstd QUIET)
+        if(ZSTD_LIB)
+            target_link_libraries(Xi PUBLIC ${ZSTD_LIB})
         endif()
     else()
-        message(WARNING "Zstandard not found (zstd.h missing). Skipping ZSTD.")
+        message(STATUS "Zstandard not found. Skipping ZSTD.")
     endif()
 endif()
 
-# Include Directories
-target_include_directories(Xi PUBLIC 
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
-)
+# Hardware
+if(XI_BUILD_HARDWARE)
+    file(GLOB HARDWARE_SOURCES "src/Hardware/*.cpp")
+    target_sources(Xi PRIVATE ${HARDWARE_SOURCES})
+endif()
 
-target_include_directories(Xi PRIVATE 
-    ${CMAKE_CURRENT_SOURCE_DIR}/packages/monocypher
-)
-
-# Alias
-add_library(Xi::Xi ALIAS Xi)
-
-# Run Example / Test
-#add_executable(test_xic tests/test_xic.cpp)
-#target_link_libraries(test_xic PRIVATE Xi)
+# Alias for consistent usage
+if(NOT TARGET Xi::Xi)
+    add_library(Xi::Xi ALIAS Xi)
+endif()

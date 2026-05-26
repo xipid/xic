@@ -43,6 +43,8 @@ struct VarLongResult {
   bool error;      ///< Whether decoding failed.
 };
 
+struct VarStringResult;
+
 /**
  * @class String
  * @brief A mutable, COW-optimized string class inheriting from InlineArray<u8>.
@@ -275,6 +277,11 @@ public:
   String *pushI64(long long v);
   long long shiftI64();
 
+  String *pushI32(int v);
+  int shiftI32();
+  int peekI32(usz offset = 0) const;
+  long long peekI64(usz offset = 0) const;
+
   String *pushF64(f64 v);
   f64 shiftF64();
 
@@ -287,11 +294,26 @@ public:
   VarLongResult peekVarLong(usz offset = 0) const;
 
   /**
+   * @brief Decodes a VarString at an offset without moving indices.
+   */
+  VarStringResult peekVarString(usz offset = 0) const;
+
+  /**
    * @brief Returns decimal representation of a binary string.
    */
   String toDeci() const;
 
   static void check_abi() {}
+};
+
+/**
+ * @struct VarStringResult
+ * @brief Result of a variable-length string decoding/peeking operation.
+ */
+struct VarStringResult {
+  String value;    ///< Decoded string value.
+  int bytes;       ///< Number of bytes consumed.
+  bool error;      ///< Whether decoding failed.
 };
 
 // -------------------------------------------------------------------------

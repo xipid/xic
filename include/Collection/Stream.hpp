@@ -1,78 +1,94 @@
 /**
  * @file Stream.hpp
- * @brief Virtual stream abstractions and C++20 stream concepts for the Xi
- * framework.
+ * @brief Virtual stream abstractions and concrete stream implementations for the Xi framework.
  */
 
 #ifndef XI_CORE_STREAM_HPP
 #define XI_CORE_STREAM_HPP
 
 #include "../Xi/Func.hpp"
-#include "Array.hpp"
+#include "InlineArray.hpp"
 
 namespace Collection {
 
 /**
- * @class VirtualStream
- * @brief Base class for polymorphic data streams.
+ * @class StreamBase
+ * @brief Non-templated base class for all polymorphic streams.
  */
-template <typename T> class VirtualStream {
+class StreamBase {
 public:
-  /** @brief Called when data is pushed to the stream. Optimization for
-   * listeners. */
+  virtual ~StreamBase() = default;
+  virtual usz size() const = 0;
+  virtual usz isize() const = 0;
+};
+
+/**
+ * @class Stream
+ * @brief Concrete data stream with yield (T) and inverse (I) channels.
+ */
+template <typename T, typename I = T> class Stream : public StreamBase {
+public:
+  InlineArray<T> primary;
+  InlineArray<I> inverse;
   Xi::Func<void(const T &)> onPush;
 
-  virtual ~VirtualStream() = default;
+  Stream() = default;
+  virtual ~Stream() = default;
 
-  /** @brief Pushes an element to the end of the stream. */
-  virtual void push(const T &val) = 0;
+  // --- Primary Channel (Yield) ---
+  virtual void push(const T &val) { 
+    primary.push(val); 
+    if (onPush) onPush(val); 
+  }
+  
+  virtual void unshift(const T &val) { primary.unshift(val); }
+  
+  virtual T shift() { return primary.shift(); }
+  
+  virtual T pop() { return primary.pop(); }
+  
+  usz size() const override { return primary.size(); }
 
-  /** @brief Prepends an element to the beginning of the stream. */
-  virtual void unshift(const T &val) = 0;
+  T &operator[](usz idx) { return primary[idx]; }
+  const T &operator[](usz idx) const { return primary[idx]; }
 
-  /** @brief Returns the current number of elements in the stream. */
-  virtual usz size() const = 0;
+  // --- Inverse Channel ---
+  virtual void ipush(const I &val) { inverse.push(val); }
+  
+  virtual void iunshift(const I &val) { inverse.unshift(val); }
+  
+  virtual I ishift() { return inverse.shift(); }
+  
+  virtual I ipop() { return inverse.pop(); }
+  
+  usz isize() const override { return inverse.size(); }
 
-  /** @brief Removes and returns the first element. */
-  virtual T shift() = 0;
-
-  /** @brief Removes and returns the last element. */
-  virtual T pop() = 0;
-
-  /** @brief Removes a range of elements. */
-  virtual void splice(usz start, usz length) = 0;
-
-  /** @brief Cleans up resources. */
-  virtual void destroy() = 0;
+  // --- General ---
+  virtual void splice(usz start, usz length) { primary.splice(start, length); }
+  
+  virtual void destroy() {
+    primary.destroy();
+    inverse.destroy();
+  }
 
   // --- Iterators for Generator Support ---
   struct Iterator {
-    VirtualStream<T> *stream;
+    Stream<T, I> *stream;
     bool operator!=(const Iterator &other) const { return stream != other.stream; }
     Iterator &operator++() { return *this; }
     T operator*() { return stream->shift(); }
   };
 
   Iterator begin() { return {this}; }
-  Iterator end() { return {null}; }
+  Iterator end() { return {nullptr}; }
 };
 
-#if __cplusplus >= 202002L
 /**
- * @brief C++20 concept for types that behave like streams.
- * Accepts Array, InlineArray, and VirtualStream.
+ * @class VirtualStream
+ * @brief Alias for backward compatibility.
  */
-template <typename S, typename T>
-concept Stream = requires(S s, T v) {
-  { s.push(v) };
-  { s.unshift(v) };
-  { s.size() } -> std::convertible_to<usz>;
-  { s.shift() } -> std::convertible_to<T>;
-  { s.pop() } -> std::convertible_to<T>;
-};
-#endif
+template <typename T> using VirtualStream = Stream<T, T>;
 
 } // namespace Collection
 
 #endif // XI_CORE_STREAM_HPP
-

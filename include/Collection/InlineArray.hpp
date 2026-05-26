@@ -487,6 +487,7 @@ public:
     }
     T ret = Xi::Move(_data[0]);
     _data[0].~T();
+    new (&_data[0]) T(); // Additon
     _data++;
     _length--;
     offset++;
@@ -634,6 +635,33 @@ public:
         res[i] = Xi::deserialize<T, S>(s, at);
     }
     return res;
+  }
+
+  /**
+   * @brief Removes a range of elements and collapses the gap.
+   */
+  void splice(usz start, usz length) {
+    if (length == 0 || start >= _length)
+      return;
+    if (start + length > _length)
+      length = _length - start;
+
+    // Trigger CoW if shared
+    if (block && block->useCount > 1) {
+      allocate(_length);
+    }
+
+    T *ptr = _data;
+    for (usz i = start + length; i < _length; ++i) {
+      ptr[i - length] = Xi::Move(ptr[i]);
+    }
+    for (usz i = _length - length; i < _length; ++i) {
+      ptr[i].~T();
+    }
+    _length -= length;
+    if (block)
+      block->_length = _length;
+    new (&ptr[_length]) T(); // Ensure null terminator for strings
   }
 
   IMemoryDevice *getDevice() const { return block ? block->device : nullptr; }

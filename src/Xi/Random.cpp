@@ -4,7 +4,7 @@
  */
 
 #include "../../include/Xi/Random.hpp"
-#include "../../include/LLT/Crypto.hpp"
+#include "../../include/Sec/Crypto.hpp"
 #include <fcntl.h>
 #include <string.h>
 #include <sys/time.h>

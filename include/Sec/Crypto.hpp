@@ -1,11 +1,11 @@
 /**
  * @file Crypto.hpp
  * @brief Cryptographic utilities for the Xi framework using Monocypher.
-
+ *
  */
 
-#ifndef XI_DATA_CRYPTO_HPP
-#define XI_DATA_CRYPTO_HPP
+#ifndef XI_SEC_CRYPTO_HPP
+#define XI_SEC_CRYPTO_HPP
 
 #include "../Collection/String.hpp"
 
@@ -13,10 +13,10 @@ using namespace Collection;
 using namespace Xi;
 
 /**
- * @namespace LLT
- * @brief Loss-less Transformation.
+ * @namespace Sec
+ * @brief Security and Cryptography namespace.
  */
-namespace LLT {
+namespace Sec {
 
 using namespace Xi;
 
@@ -143,6 +143,6 @@ String signX(const String &privateKey, const String &text);
 bool verifyX(const String &publicKey, const String &text,
              const String &signature);
 
-} // namespace LLT
+} // namespace Sec
 
-#endif // XI_DATA_CRYPTO_HPP
+#endif // XI_SEC_CRYPTO_HPP

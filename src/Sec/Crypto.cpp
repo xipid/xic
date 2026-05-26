@@ -3,13 +3,13 @@
  * @brief Implementation of cryptographic utilities for the Xi framework.
  */
 
-#include "../../include/LLT/Crypto.hpp"
+#include "../../include/Sec/Crypto.hpp"
 #include "../../include/Xi/Random.hpp"
 extern "C" {
 #include "../../packages/monocypher/monocypher.h"
 }
 
-namespace LLT {
+namespace Sec {
 
 String zeros(usz len) {
   String s;
@@ -253,14 +253,12 @@ void secureRandomFill(String &s, usz len) {
 // XEdDSA Sign & Verify (Using BLAKE2b)
 // -------------------------------------------------------------------------
 
-// Ed25519 Curve order (L), little endian.
 static const u8 L_BYTES[32] = {
     0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7,
     0xa2, 0xde, 0xf9, 0xde, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
 };
 
-// Helper: negate scalar a mod L => a' = L - a
 void negate_scalar_mod_L(u8 a_out[32], const u8 a[32]) {
   u32 carry = 0;
   for (int i = 0; i < 32; i++) {
@@ -302,7 +300,6 @@ String signX(const String &privateKey, const String &text) {
   u8 A_check[32];
   crypto_eddsa_scalarbase(A_check,
                           a_mod_L); // Use reduced scalar for correctness
-  // Monocypher's public keys have their sign bit in the most significant bit.
   if (A_check[31] & 0x80) {
     negate_scalar_mod_L(a_prime, a_mod_L);
   } else {
@@ -311,10 +308,9 @@ String signX(const String &privateKey, const String &text) {
   }
 
   // 4. Generate deterministic random nonce r
-  // r = BLAKE2b(secret_prefix || text) mod L
   u8 secret[64];
   crypto_blake2b(secret, 64, privateKey.data(), 32);
-  u8 *prefix = secret + 32; // The second 32 bytes
+  u8 *prefix = secret + 32;
 
   crypto_blake2b_ctx ctx;
   crypto_blake2b_init(&ctx, 64);
@@ -324,14 +320,14 @@ String signX(const String &privateKey, const String &text) {
   crypto_blake2b_final(&ctx, hash_out);
 
   u8 r[32];
-  crypto_eddsa_reduce(r, hash_out); // r = hash mod L
+  crypto_eddsa_reduce(r, hash_out);
 
   // 5. R = rB
   u8 R[32];
   crypto_eddsa_scalarbase(R, r);
 
   // 6. h = BLAKE2b(R || A || text) mod L
-  A[31] &= 0x7F; // XEdDSA requires hashing the unsigned generated A
+  A[31] &= 0x7F;
 
   crypto_blake2b_init(&ctx, 64);
   crypto_blake2b_update(&ctx, R, 32);
@@ -340,7 +336,7 @@ String signX(const String &privateKey, const String &text) {
   crypto_blake2b_final(&ctx, hash_out);
 
   u8 h[32];
-  crypto_eddsa_reduce(h, hash_out); // h = hash mod L
+  crypto_eddsa_reduce(h, hash_out);
 
   // 7. S = (r + h * a_prime) mod L
   u8 S[32];
@@ -365,14 +361,11 @@ bool verifyX(const String &publicKey, const String &text,
   if (publicKey.size() != 32 || signature.size() != 64)
     return false;
 
-  // 1. Convert X25519 public key to Ed25519 public key A
   u8 A[32];
   crypto_x25519_to_eddsa(A, publicKey.data());
 
-  // XEdDSA requires both hashing and checking against the unsigned A
   A[31] &= 0x7F;
 
-  // 2. h = BLAKE2b(R || A || text) mod L
   crypto_blake2b_ctx ctx;
   crypto_blake2b_init(&ctx, 64);
   crypto_blake2b_update(&ctx, signature.data(), 32); // R
@@ -384,13 +377,10 @@ bool verifyX(const String &publicKey, const String &text,
   u8 h[32];
   crypto_eddsa_reduce(h, hash_out);
 
-  // 3. check R == sB - hA
-  // Monocypher's internal function does exactly this for Ed25519
-  // crypto_eddsa_check_equation(signature, public_key, h)
   if (crypto_eddsa_check_equation((const u8 *)signature.data(), A, h) == 0) {
     return true;
   }
   return false;
 }
 
-} // namespace LLT
+} // namespace Sec
