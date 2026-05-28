@@ -45,6 +45,14 @@ usz select(const String &question, const Array<String> &options);
  */
 Array<usz> multiSelect(const String &question, const Array<String> &options);
 
+/**
+ * @brief Reads a line of input with full arrow key and history support.
+ * @param prompt The prompt to display (e.g. "> ").
+ * @param history Optional array to provide and store command history.
+ * @return The user's input string.
+ */
+String readLine(const String &prompt, Array<String> *history = nullptr);
+
 } // namespace Prompt
 } // namespace Terminal
 

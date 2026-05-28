@@ -157,6 +157,82 @@ Array<usz> multiSelect(const String &question, const Array<String> &options) {
   }
   return results;
 }
+String readLine(const String &prompt, Array<String> *history) {
+  if (!isatty(STDIN_FILENO)) {
+    char buf[4096];
+    if (!fgets(buf, sizeof(buf), stdin)) return "\x04";
+    String res(buf);
+    if (res.endsWith("\n")) res = res.substring(0, res.length() - 1);
+    if (res.endsWith("\r")) res = res.substring(0, res.length() - 1);
+    return res;
+  }
+
+  String res;
+  int cursor = 0;
+  int historyIdx = history ? history->size() : 0;
+  String savedCurrent;
+
+  RawMode raw;
+  while (true) {
+    printf("\r\x1b[2K%s%s", prompt.c_str(), res.c_str());
+    if (cursor < res.length()) {
+      printf("\x1b[%dD", (int)(res.length() - cursor));
+    }
+    fflush(stdout);
+
+    char c;
+    if (read(STDIN_FILENO, &c, 1) != 1) return res;
+
+    if (c == 4) { // Ctrl+D
+      if (res.isEmpty()) return "\x04";
+      continue;
+    } else if (c == 3) { // Ctrl+C
+      printf("\n");
+      return "\x03";
+    } else if (c == '\n' || c == '\r') {
+      printf("\n");
+      break;
+    } else if (c == 127 || c == 8) { // Backspace
+      if (cursor > 0) {
+        res = res.substring(0, cursor - 1) + res.substring(cursor);
+        cursor--;
+      }
+    } else if (c == '\x1b') {
+      char seq[2];
+      if (read(STDIN_FILENO, &seq[0], 1) == 1 && read(STDIN_FILENO, &seq[1], 1) == 1) {
+        if (seq[0] == '[') {
+          if (seq[1] == 'A') { // Up
+            if (history && historyIdx > 0) {
+              if (historyIdx == history->size()) savedCurrent = res;
+              historyIdx--;
+              res = (*history)[historyIdx];
+              cursor = res.length();
+            }
+          } else if (seq[1] == 'B') { // Down
+            if (history && historyIdx < history->size()) {
+              historyIdx++;
+              if (historyIdx == history->size()) res = savedCurrent;
+              else res = (*history)[historyIdx];
+              cursor = res.length();
+            }
+          } else if (seq[1] == 'C') { // Right
+            if (cursor < res.length()) cursor++;
+          } else if (seq[1] == 'D') { // Left
+            if (cursor > 0) cursor--;
+          }
+        }
+      }
+    } else if (c >= 32 && c <= 126) {
+      res = res.substring(0, cursor) + String(c) + res.substring(cursor);
+      cursor++;
+    }
+  }
+
+  if (history && !res.isEmpty()) {
+    history->push(res);
+  }
+  return res;
+}
 
 } // namespace Prompt
 } // namespace Terminal
