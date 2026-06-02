@@ -208,9 +208,21 @@ String readLine(const String &prompt, Array<String> *history) {
 
   RawMode raw;
   while (true) {
-    printf("\r\x1b[2K%s%s", prompt.c_str(), res.c_str());
-    if (cursor < res.length()) {
-      printf("\x1b[%dD", (int)(res.length() - cursor));
+    String suggestion;
+    if (history && cursor == res.length() && !res.isEmpty()) {
+      for (long long idx = (long long)history->size() - 1; idx >= 0; --idx) {
+        const String& h = (*history)[idx];
+        if (h.startsWith(res) && h.length() > res.length()) {
+          suggestion = h.substring(res.length());
+          break;
+        }
+      }
+    }
+
+    printf("\r\x1b[2K%s%s%s", prompt.c_str(), res.c_str(), Gray(suggestion).c_str());
+    int moveBack = (int)(res.length() - cursor) + (int)suggestion.length();
+    if (moveBack > 0) {
+      printf("\x1b[%dD", moveBack);
     }
     fflush(stdout);
 
@@ -225,6 +237,27 @@ String readLine(const String &prompt, Array<String> *history) {
     } else if (c == 3) { // Ctrl+C
       printf("\n");
       return "\x03";
+    } else if (c == 23) { // Ctrl+W: delete word before cursor
+      if (cursor > 0) {
+        int i = cursor - 1;
+        while (i > 0 && res[i] == ' ') i--;
+        while (i > 0 && res[i] != ' ') i--;
+        if (i < 0) i = 0;
+        res = res.substring(0, i) + res.substring(cursor);
+        cursor = i;
+      }
+    } else if (c == 21) { // Ctrl+U: delete line before cursor
+      res = res.substring(cursor);
+      cursor = 0;
+    } else if (c == 11) { // Ctrl+K: delete line after cursor
+      res = res.substring(0, cursor);
+    } else if (c == 12) { // Ctrl+L: clear screen
+      Clear();
+    } else if (c == '\t') { // Tab: accept suggestion
+      if (!suggestion.isEmpty()) {
+        res += suggestion;
+        cursor = res.length();
+      }
     } else if (c == '\n' || c == '\r') {
       printf("\n");
       break;
@@ -234,11 +267,11 @@ String readLine(const String &prompt, Array<String> *history) {
         cursor--;
       }
     } else if (c == '\x1b') {
-      char seq[2];
-      if (read(STDIN_FILENO, &seq[0], 1) == 1 &&
-          read(STDIN_FILENO, &seq[1], 1) == 1) {
-        if (seq[0] == '[') {
-          if (seq[1] == 'A') { // Up
+      char seq0, seq1;
+      if (read(STDIN_FILENO, &seq0, 1) == 1 &&
+          read(STDIN_FILENO, &seq1, 1) == 1) {
+        if (seq0 == '[') {
+          if (seq1 == 'A') { // Up
             if (history && historyIdx > 0) {
               if (historyIdx == history->size())
                 savedCurrent = res;
@@ -246,7 +279,7 @@ String readLine(const String &prompt, Array<String> *history) {
               res = (*history)[historyIdx];
               cursor = res.length();
             }
-          } else if (seq[1] == 'B') { // Down
+          } else if (seq1 == 'B') { // Down
             if (history && historyIdx < history->size()) {
               historyIdx++;
               if (historyIdx == history->size())
@@ -255,13 +288,53 @@ String readLine(const String &prompt, Array<String> *history) {
                 res = (*history)[historyIdx];
               cursor = res.length();
             }
-          } else if (seq[1] == 'C') { // Right
-            if (cursor < res.length())
+          } else if (seq1 == 'C') { // Right
+            if (cursor < res.length()) {
               cursor++;
-          } else if (seq[1] == 'D') { // Left
+            } else if (!suggestion.isEmpty()) {
+              res += suggestion;
+              cursor = res.length();
+            }
+          } else if (seq1 == 'D') { // Left
             if (cursor > 0)
               cursor--;
+          } else if (seq1 == 'H') { // Home
+            cursor = 0;
+          } else if (seq1 == 'F') { // End
+            cursor = res.length();
+          } else if (seq1 >= '1' && seq1 <= '9') {
+            char seq2;
+            if (read(STDIN_FILENO, &seq2, 1) == 1) {
+              if (seq2 == '~') {
+                if (seq1 == '1' || seq1 == '7') cursor = 0; // Home
+                else if (seq1 == '4' || seq1 == '8') cursor = res.length(); // End
+                else if (seq1 == '3') { // Delete
+                  if (cursor < res.length()) {
+                    res = res.substring(0, cursor) + res.substring(cursor + 1);
+                  }
+                }
+              } else if (seq2 == ';') {
+                char seq3, seq4;
+                if (read(STDIN_FILENO, &seq3, 1) == 1 && read(STDIN_FILENO, &seq4, 1) == 1) {
+                  if (seq3 == '5') { // Ctrl
+                    if (seq4 == 'C') { // Ctrl+Right
+                      while (cursor < res.length() && res[cursor] == ' ') cursor++;
+                      while (cursor < res.length() && res[cursor] != ' ') cursor++;
+                    } else if (seq4 == 'D') { // Ctrl+Left
+                      if (cursor > 0) {
+                        cursor--;
+                        while (cursor > 0 && res[cursor] == ' ') cursor--;
+                        while (cursor > 0 && res[cursor - 1] != ' ') cursor--;
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
+        } else if (seq0 == 'O') {
+          if (seq1 == 'H') cursor = 0; // Home
+          else if (seq1 == 'F') cursor = res.length(); // End
         }
       }
     } else if (c >= 32 && c <= 126) {

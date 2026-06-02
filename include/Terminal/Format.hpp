@@ -88,6 +88,13 @@ struct LinearTask {
   String total;
   String current;
   String eta;
+  String message;
+  double speed = 0.0;
+  u64 totalRaw = 0;
+  u64 currentRaw = 0;
+  u64 startTime = 0;
+  u64 lastUpdateTime = 0;
+  String unit = "it";
   bool loading = false;
 };
 
@@ -109,10 +116,17 @@ public:
   void update();
   void destroy();
 
+  usz addLinearTask(u64 total, const String& unit = "it", const String& msg = "");
+  void updateLinearTask(usz taskIdx, u64 current, const String& msg = "");
+  void addLinearTaskDelta(usz taskIdx, u64 delta, const String& msg = "");
+
 private:
   bool _started = false;
+  bool _hiddenCursor = false;
   void _render();
   void _updateTerminalPrivateMode(int percentage);
+  String _formatSize(u64 bytes);
+  String _formatTime(double seconds);
 };
 
 /**

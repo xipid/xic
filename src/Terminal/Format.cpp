@@ -9,6 +9,13 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <termios.h>
+#include <chrono>
+
+static u64 getEpochMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()
+  ).count();
+}
 
 namespace Terminal {
 
@@ -178,6 +185,7 @@ void Progress::update() {
   if (!_started) {
     _started = true;
     HideCursor();
+    _hiddenCursor = true;
   }
   _render();
 }
@@ -186,34 +194,174 @@ void Progress::destroy() {
   if (_started) {
     _started = false;
     _updateTerminalPrivateMode(0);
+    
+    int lines = (int)(tasks.size() + bitmapTasks.size());
+    if (!message.isEmpty()) lines += 1;
+    if (lines > 0) {
+        printf("\x1b[%dB", lines);
+    }
     printf("\n");
-    ShowCursor();
+    
+    if (_hiddenCursor) {
+      ShowCursor();
+      _hiddenCursor = false;
+    }
+    fflush(stdout);
   }
 }
 
+usz Progress::addLinearTask(u64 total, const String& unit, const String& msg) {
+  LinearTask t;
+  t.totalRaw = total;
+  t.unit = unit;
+  t.message = msg;
+  t.startTime = getEpochMs();
+  t.lastUpdateTime = t.startTime;
+  tasks.push(t);
+  return tasks.size() - 1;
+}
+
+void Progress::updateLinearTask(usz taskIdx, u64 current, const String& msg) {
+  if (taskIdx >= tasks.size()) return;
+  auto& t = tasks[taskIdx];
+  t.currentRaw = current;
+  if (!msg.isEmpty()) t.message = msg;
+  t.lastUpdateTime = getEpochMs();
+}
+
+void Progress::addLinearTaskDelta(usz taskIdx, u64 delta, const String& msg) {
+  if (taskIdx >= tasks.size()) return;
+  auto& t = tasks[taskIdx];
+  t.currentRaw += delta;
+  if (!msg.isEmpty()) t.message = msg;
+  t.lastUpdateTime = getEpochMs();
+}
+
+String Progress::_formatSize(u64 bytes) {
+  double val = (double)bytes;
+  const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+  int uIdx = 0;
+  while (val >= 1024.0 && uIdx < 4) {
+    val /= 1024.0;
+    uIdx++;
+  }
+  char buf[64];
+  snprintf(buf, sizeof(buf), "%.1f %s", val, units[uIdx]);
+  return String(buf);
+}
+
+String Progress::_formatTime(double seconds) {
+  if (seconds < 0.0 || seconds > 3600.0 * 24.0 * 365.0) return "--:--";
+  int h = (int)(seconds / 3600);
+  int m = (int)((seconds - h * 3600) / 60);
+  int s = (int)(seconds - h * 3600 - m * 60);
+  char buf[64];
+  if (h > 0) {
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d", h, m, s);
+  } else {
+    snprintf(buf, sizeof(buf), "%02d:%02d", m, s);
+  }
+  return String(buf);
+}
+
 void Progress::_render() {
-  printf("\r\x1b[K%s ", (const char *)message.c_str());
+  printf("\r\x1b[J");
+  if (!message.isEmpty()) {
+      printf("%s\n", message.c_str());
+  }
 
   int totalPct = 0;
   int count = 0;
 
   for (usz i = 0; i < tasks.size(); ++i) {
-    const auto &t = tasks[i];
-    printf("[%s/%s] %s ", t.current.c_str(), t.total.c_str(), t.eta.c_str());
+    auto &t = tasks[i];
+    
+    if (t.startTime == 0) {
+        t.startTime = getEpochMs();
+    }
+    
+    u64 now = getEpochMs();
+    double elapsed = (now - t.startTime) / 1000.0;
+    if (elapsed > 0.05) {
+        t.speed = (double)t.currentRaw / elapsed;
+    }
+    
+    double pct = (t.totalRaw > 0) ? (double)t.currentRaw / t.totalRaw : 0.0;
+    if (pct > 1.0) pct = 1.0;
+    
+    double etaVal = 0.0;
+    if (t.speed > 0.0 && t.totalRaw > t.currentRaw) {
+        etaVal = (double)(t.totalRaw - t.currentRaw) / t.speed;
+    }
+
+    t.current = (t.unit == "B") ? _formatSize(t.currentRaw) : String::from((long long)t.currentRaw);
+    t.total = (t.unit == "B") ? _formatSize(t.totalRaw) : String::from((long long)t.totalRaw);
+    t.eta = _formatTime(elapsed) + " < " + _formatTime(etaVal);
+
+    int barWidth = 25;
+    int filled = (int)(pct * barWidth);
+    const char* blocks[] = {"░", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"};
+    
+    String filledStr;
+    for (int j = 0; j < filled; ++j) filledStr += "█";
+    if (filled < barWidth) {
+        double remainder = (pct * barWidth) - filled;
+        int chunk = (int)(remainder * 8);
+        if (chunk > 8) chunk = 8;
+        if (chunk < 0) chunk = 0;
+        filledStr += blocks[chunk];
+    }
+    String emptyStr;
+    for (int j = filled + 1; j < barWidth; ++j) emptyStr += "░";
+    
+    String bar = "[" + Cyan(filledStr) + Gray(emptyStr) + "]";
+    String pctText = String::from((int)(pct * 100)) + "%";
+    
+    String speedText;
+    if (t.speed > 0) {
+        speedText = (t.unit == "B") ? (_formatSize((u64)t.speed) + "/s") : (String::from((long long)t.speed) + " " + t.unit + "/s");
+    } else {
+        speedText = "--/s";
+    }
+
+    String msgText = t.message;
+    if (!msgText.isEmpty()) {
+      if (msgText.length() > 35) {
+        msgText = msgText.substring(0, 32) + "...";
+      } else {
+        msgText = msgText.padEnd(35);
+      }
+    }
+
+    printf("  %s%s %s | %s/%s | %s | %s\n",
+           msgText.isEmpty() ? "" : (msgText + " ").c_str(),
+           bar.c_str(),
+           Bold(pctText).c_str(),
+           t.current.c_str(), t.total.c_str(),
+           Yellow(speedText).c_str(),
+           Gray(t.eta).c_str());
+
+    totalPct += (int)(pct * 100);
     count++;
   }
 
   for (usz i = 0; i < bitmapTasks.size(); ++i) {
     const auto &bt = bitmapTasks[i];
-    printf("▕");
+    printf("  ▕");
     usz set = 0;
     for (usz j = 0; j < bt.size(); ++j) {
       printf("%s", bt[j] ? "█" : "░");
       if (bt[j]) set++;
     }
-    printf("▏ ");
+    printf("▏\n");
     if (bt.size() > 0) totalPct += (int)(set * 100 / bt.size());
     count++;
+  }
+
+  int lines = (int)(tasks.size() + bitmapTasks.size());
+  if (!message.isEmpty()) lines += 1;
+  if (lines > 0) {
+      printf("\x1b[%dA", lines);
   }
 
   fflush(stdout);

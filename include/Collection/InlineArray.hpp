@@ -8,6 +8,7 @@
 #define XI_CORE_INLINE_ARRAY_HPP
 
 #include "../Xi/Primitives.hpp"
+#include <cstring>
 
 #if defined(AVR) || defined(ARDUINO)
 #define XI_ARRAY_MIN_CAP 4

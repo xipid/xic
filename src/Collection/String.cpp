@@ -491,12 +491,18 @@ String *String::unshiftVarLong(long long v) {
   return this;
 }
 
-void String::pushVarString(const String &s) { *this += s.serialize(); }
+void String::pushVarString(const String &s) {
+  pushVarLong((long long)s.size() + 1);
+  *this += s;
+}
 
 String String::shiftVarString() {
-  usz at = 0;
-  String res = InlineArray<u8>::deserialize(*this, at);
-  for (usz i = 0; i < at; i++)
+  long long len = shiftVarLong();
+  if (len <= 0) return String();
+  usz strLen = (usz)(len - 1);
+  if (size() < strLen) return String();
+  String res = substring(0, strLen);
+  for (usz i = 0; i < strLen; i++)
     shift();
   return res;
 }

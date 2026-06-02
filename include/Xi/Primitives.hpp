@@ -135,6 +135,116 @@ template <typename U> struct IsSame<U, U> {
   static const bool Value = true;
 };
 
+template <typename T> struct RemoveConst { using Type = T; };
+template <typename T> struct RemoveConst<const T> { using Type = T; };
+
+template <typename T> struct Decay {
+  using Type = typename RemoveConst<typename RemoveRef<T>::Type>::Type;
+};
+
+template <typename... Ts> struct MaxSize;
+template <typename T> struct MaxSize<T> { static constexpr usz Value = sizeof(T); };
+template <typename T, typename... Ts> struct MaxSize<T, Ts...> {
+  static constexpr usz rest = MaxSize<Ts...>::Value;
+  static constexpr usz Value = sizeof(T) > rest ? sizeof(T) : rest;
+};
+
+template <typename... Ts> struct MaxAlign;
+template <typename T> struct MaxAlign<T> { static constexpr usz Value = alignof(T); };
+template <typename T, typename... Ts> struct MaxAlign<T, Ts...> {
+  static constexpr usz rest = MaxAlign<Ts...>::Value;
+  static constexpr usz Value = alignof(T) > rest ? alignof(T) : rest;
+};
+
+template <typename T, typename... Ts> struct TypeIndex;
+template <typename T, typename... Ts> struct TypeIndex<T, T, Ts...> {
+  static constexpr u32 Value = 0;
+};
+template <typename T, typename U, typename... Ts> struct TypeIndex<T, U, Ts...> {
+  static constexpr u32 Value = 1 + TypeIndex<T, Ts...>::Value;
+};
+
+template <typename... Ts>
+class Either {
+  alignas(MaxAlign<Ts...>::Value) u8 data[MaxSize<Ts...>::Value];
+  i32 type_id = -1;
+  void (*destroy_fn)(void*) = nullptr;
+  void (*copy_fn)(void*, const void*) = nullptr;
+  void (*move_fn)(void*, void*) = nullptr;
+
+public:
+  Either() {}
+
+  template <typename T, typename = typename EnableIf<!IsSame<typename Decay<T>::Type, Either>::Value>::Type>
+  Either(T&& val) {
+    using Decayed = typename Decay<T>::Type;
+    type_id = (i32)TypeIndex<Decayed, Ts...>::Value;
+    new (data) Decayed(Xi::Move(val));
+    destroy_fn = [](void* ptr) { static_cast<Decayed*>(ptr)->~Decayed(); };
+    copy_fn = [](void* dst, const void* src) { new (dst) Decayed(*static_cast<const Decayed*>(src)); };
+    move_fn = [](void* dst, void* src) { new (dst) Decayed(Xi::Move(*static_cast<Decayed*>(src))); };
+  }
+
+  Either(const Either& other) : type_id(other.type_id), destroy_fn(other.destroy_fn), copy_fn(other.copy_fn), move_fn(other.move_fn) {
+    if (copy_fn) copy_fn(data, other.data);
+  }
+
+  Either(Either&& other) : type_id(other.type_id), destroy_fn(other.destroy_fn), copy_fn(other.copy_fn), move_fn(other.move_fn) {
+    if (move_fn) move_fn(data, other.data);
+    other.type_id = -1;
+    other.destroy_fn = nullptr;
+    other.copy_fn = nullptr;
+    other.move_fn = nullptr;
+  }
+
+  Either& operator=(const Either& other) {
+    if (this != &other) {
+      if (destroy_fn) destroy_fn(data);
+      type_id = other.type_id;
+      destroy_fn = other.destroy_fn;
+      copy_fn = other.copy_fn;
+      move_fn = other.move_fn;
+      if (copy_fn) copy_fn(data, other.data);
+    }
+    return *this;
+  }
+
+  Either& operator=(Either&& other) {
+    if (this != &other) {
+      if (destroy_fn) destroy_fn(data);
+      type_id = other.type_id;
+      destroy_fn = other.destroy_fn;
+      copy_fn = other.copy_fn;
+      move_fn = other.move_fn;
+      if (move_fn) move_fn(data, other.data);
+      other.type_id = -1;
+      other.destroy_fn = nullptr;
+      other.copy_fn = nullptr;
+      other.move_fn = nullptr;
+    }
+    return *this;
+  }
+
+  ~Either() {
+    if (destroy_fn) destroy_fn(data);
+  }
+
+  template <typename T>
+  bool is() const {
+    return type_id == (i32)TypeIndex<T, Ts...>::Value;
+  }
+
+  template <typename T>
+  T& get() {
+    return *reinterpret_cast<T*>(data);
+  }
+
+  template <typename T>
+  const T& get() const {
+    return *reinterpret_cast<const T*>(data);
+  }
+};
+
 /**
  * @struct Equal
  * @brief Generic equality comparator.
