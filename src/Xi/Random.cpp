@@ -4,14 +4,26 @@
  */
 
 #include "../../include/Xi/Random.hpp"
-#include "../../include/Sec/Crypto.hpp"
+#include "../../include/Security/Crypto.hpp"
+#if !defined(__KERNEL__) && !defined(XI_NO_STD)
 #include <fcntl.h>
-#include <string.h>
 #include <sys/time.h>
 #include <unistd.h>
-
 #if __has_include(<sys/mman.h>) && defined(__linux__)
 #include <sys/mman.h>
+#endif
+#endif
+
+#if defined(__KERNEL__)
+#include <linux/random.h>
+#endif
+
+#if !defined(__KERNEL__)
+#include <string.h>
+#endif
+
+#if defined(_WIN32)
+extern "C" __declspec(dllimport) unsigned char __stdcall SystemFunction036(void* RandomBuffer, unsigned long RandomBufferLength);
 #endif
 
 namespace Xi {
@@ -48,7 +60,39 @@ void randomSeed(u32 s, bool overwrite) {
 void randomSeed(bool overwrite) {
   if (!overwrite && _randomInitialized)
     return;
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__KERNEL__)
+  get_random_bytes(_randomPool, sizeof(_randomPool));
+  _randomInitialized = true;
+#elif defined(ESP_PLATFORM)
+  for (int i = 0; i < 20; i++)
+    _randomPool[i] = esp_random();
+  _randomInitialized = true;
+#elif defined(_WIN32)
+  if (SystemFunction036(_randomPool, sizeof(_randomPool))) {
+    _randomInitialized = true;
+  }
+#elif defined(ARDUINO)
+  u32 seed = 0;
+  for (int i = 0; i < 16; i++) {
+    seed = (seed << 2) | (analogRead(0) & 3);
+  }
+  randomSeed(seed, overwrite);
+#elif defined(XI_NO_STD) && defined(__linux__)
+  #if defined(__x86_64__)
+    long ret;
+    __asm__ volatile (
+      "syscall"
+      : "=a"(ret)
+      : "a"(318), "D"(_randomPool), "S"(sizeof(_randomPool)), "d"(0)
+      : "rcx", "r11", "memory"
+    );
+    if (ret > 0) {
+      _randomInitialized = true;
+    }
+  #else
+    randomSeed((u32)987654321, overwrite);
+  #endif
+#elif defined(__linux__) || defined(__APPLE__)
   int fd = open("/dev/urandom", O_RDONLY);
   if (fd >= 0) {
     ssize_t n = read(fd, _randomPool, sizeof(_randomPool));
@@ -56,15 +100,24 @@ void randomSeed(bool overwrite) {
     close(fd);
     _randomInitialized = true;
   }
-#elif defined(ESP_PLATFORM)
-  for (int i = 0; i < 20; i++)
-    _randomPool[i] = esp_random();
 #else
-  randomSeed((u32)987654321);
+  randomSeed((u32)987654321, overwrite);
 #endif
 
-#if defined(__linux__) && __has_include(<sys/mman.h>)
-  madvise(_randomPool, sizeof(_randomPool), MADV_WIPEONFORK);
+#if defined(__linux__)
+  #if defined(XI_NO_STD)
+    #if defined(__x86_64__)
+      long ret;
+      __asm__ volatile (
+        "syscall"
+        : "=a"(ret)
+        : "a"(28), "D"(_randomPool), "S"(sizeof(_randomPool)), "d"(18)
+        : "rcx", "r11", "memory"
+      );
+    #endif
+  #elif __has_include(<sys/mman.h>)
+    madvise(_randomPool, sizeof(_randomPool), MADV_WIPEONFORK);
+  #endif
 #endif
 }
 

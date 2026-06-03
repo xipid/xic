@@ -19,7 +19,7 @@ namespace Resource {
 // -------------------------------------------------------------------------
 
 SockBind::SockBind(const String &p) {
-  Device::name = "SockBind";
+  name = "SockBind";
   path = p;
   if (path.isEmpty()) {
     char tmp[] = "/tmp/xi_sock_XXXXXX";

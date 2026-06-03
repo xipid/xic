@@ -26,7 +26,7 @@ public:
   int port = 0; ///< Local port binding.
   String host;  ///< Local host/IP binding.
 
-  UDPBind(int p = 0, const String &h = "");
+  UDPBind(const NumericalAddress &address = NumericalAddress());
   virtual ~UDPBind();
 
   void onPacket(Func<void(String)> cb) override;
@@ -47,7 +47,7 @@ public:
   int port = 0;
   String host;
 
-  TCPBind(int p = 0, const String &h = "");
+  TCPBind(const NumericalAddress &address = NumericalAddress());
   virtual ~TCPBind();
 
   void onPacket(Func<void(String)> cb) override;
@@ -57,10 +57,6 @@ public:
 private:
   Func<void(String)> _packetListener;
 };
-
-// Factory functions
-XI_EXPORT UDPBind *requestUDPBind(int port = 0, const String &host = "");
-XI_EXPORT TCPBind *requestTCPBind(int port = 0, const String &host = "");
 
 } // namespace Resource
 

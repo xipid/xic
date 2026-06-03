@@ -14,7 +14,8 @@
 
 namespace Resource {
 
-UDPBind::UDPBind(int p, const String &h) : port(p), host(h) {
+UDPBind::UDPBind(const NumericalAddress &address) {
+  parseNumericalAddress(address, host, port);
   name = "UDPBind";
   fd = socket(AF_INET, SOCK_DGRAM, 0);
   if (fd != -1) {
@@ -99,7 +100,8 @@ void UDPBind::update() {
 // TCPBind
 // -------------------------------------------------------------------------
 
-TCPBind::TCPBind(int p, const String &h) : port(p), host(h) {
+TCPBind::TCPBind(const NumericalAddress &address) {
+  parseNumericalAddress(address, host, port);
   name = "TCPBind";
   fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd != -1) {
@@ -180,13 +182,6 @@ void TCPBind::update() {
       // Marked for removal logic should be here if needed
     }
   }
-}
-
-UDPBind *requestUDPBind(int port, const String &host) {
-  return new UDPBind(port, host);
-}
-TCPBind *requestTCPBind(int port, const String &host) {
-  return new TCPBind(port, host);
 }
 
 } // namespace Resource

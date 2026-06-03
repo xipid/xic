@@ -3,7 +3,7 @@
  * @brief In-memory virtual filesystem and ZIP archive for the Xi framework.
  *
  * Archive: A full virtual filesystem backed by RAM with LRU cache eviction.
- *          Extends FilesystemDevice so it can be used anywhere a filesystem is
+ *          Extends Filesystem so it can be used anywhere a filesystem is
  *          expected (read, write, stat, mkdir, unlink, append).
  *
  * ZIPArchive: Extends Archive with ZIP format parsing/writing via miniz.
@@ -37,20 +37,20 @@ struct XI_EXPORT VFSEntry {
  * @class Archive
  * @brief Full in-memory virtual filesystem with LRU caching.
  *
- * All FilesystemDevice methods are implemented against an in-memory tree.
+ * All Filesystem methods are implemented against an in-memory tree.
  * When `maxCache` is exceeded, the least recently accessed files are evicted
  * (content cleared, `cached` set to false). Directories are never evicted.
  *
  * A `maxCache` of 0 means no content is kept — metadata (stat) still works.
  */
-class XI_EXPORT Archive : public FilesystemDevice {
+class XI_EXPORT Archive : public Filesystem {
 public:
   usz maxCache = 1024 * 1024; ///< Max bytes kept in RAM (default 1 MB).
 
   Archive();
   virtual ~Archive();
 
-  // --- FilesystemDevice interface ---
+  // --- Filesystem interface ---
   String read(const String &path, u64 startPos = 0,
               u64 maxLength = 0) override;
   void write(const String &path, const String &content,

@@ -126,7 +126,7 @@ public:
    * @param port Local port (0 = client-only ephemeral).
    * @param host Local host/IP (empty = INADDR_ANY).
    */
-  HTTPBind(int port = 0, const String &host = "");
+  HTTPBind(const NumericalAddress &address = NumericalAddress());
   virtual ~HTTPBind();
 
   /**
@@ -195,9 +195,6 @@ private:
   void _parseHeaderLine(HTTPClient *cli, const String &line);
   HTTPClient *_getOrCreateClient(const String &key);
 };
-
-// Factory
-XI_EXPORT HTTPBind *requestHTTPBind(int port = 0, const String &host = "");
 
 } // namespace Resource
 

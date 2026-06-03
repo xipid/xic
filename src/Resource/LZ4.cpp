@@ -9,13 +9,13 @@
  * Decompress: single-shot LZ4_decompress_safe (size is known from header).
  */
 
-#include "../../include/LLT/Compression.hpp"
+#include "../../include/Resource/Compression.hpp"
 
 #ifdef XI_LZ4_ENABLED
 
 #include <lz4.h>
 
-namespace LLT {
+namespace Resource {
 
 LZ4::LZ4() { level = 1; }
 
@@ -84,6 +84,6 @@ String LZ4::decompress(const String &input) {
   return output;
 }
 
-} // namespace LLT
+} // namespace Resource
 
 #endif // XI_LZ4_ENABLED

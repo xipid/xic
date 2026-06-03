@@ -70,6 +70,49 @@ template <typename T> constexpr usz count_f32() {
 
 // --- Scalar Base Functions ---
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <math.h>
+#define SC_W(name, func) \
+  inline f32 name(f32 x) { return func(x); }
+SC_W(sin, ::sinf)
+SC_W(cos, ::cosf)
+SC_W(tan, ::tanf)
+SC_W(asin, ::asinf)
+SC_W(acos, ::acosf)
+SC_W(atan, ::atanf)
+SC_W(sinh, ::sinhf)
+SC_W(cosh, ::coshf)
+SC_W(tanh, ::tanhf)
+SC_W(asinh, ::asinhf)
+SC_W(acosh, ::acoshf)
+SC_W(atanh, ::atanhf)
+SC_W(exp, ::expf)
+SC_W(log, ::logf)
+SC_W(log10, ::log10f)
+SC_W(log2, ::log2f)
+SC_W(sqrt, ::sqrtf)
+
+inline f32 atan2(f32 y, f32 x) { return ::atan2f(y, x); }
+inline f32 sqr(f32 x) { return x * x; }
+inline i32 floor(f32 x) { return (i32)::floorf(x); }
+inline i32 ceil(f32 x) { return (i32)::ceilf(x); }
+inline i32 round(f32 x) { return (i32)::roundf(x); }
+inline f32 floor(f32 x, int) { return ::floorf(x); }
+inline f32 ceil(f32 x, int) { return ::ceilf(x); }
+inline f32 round(f32 x, int) { return ::roundf(x); }
+inline f32 abs(f32 x) { return ::fabsf(x); }
+inline f32 sgn(f32 x) {
+  return (x > 0.0f) ? 1.0f : ((x < 0.0f) ? -1.0f : 0.0f);
+}
+inline f32 min(f32 a, f32 b) { return (a < b) ? a : b; }
+inline f32 max(f32 a, f32 b) { return (a > b) ? a : b; }
+inline f32 clamp(f32 v, f32 mn, f32 mx) { return min(max(v, mn), mx); }
+inline f32 pow(f32 b, f32 e) { return ::powf(b, e); }
+inline f32 inverse(f32 x) { return 1.0f / x; }
+inline f32 relu(f32 x) { return max(0.0f, x); }
+inline f32 sigmoid(f32 x) { return 1.0f / (1.0f + ::expf(-x)); }
+inline f32 rsqrt(f32 x) { return 1.0f / ::sqrtf(x); }
+#else
 #define SC_W(name, func)                                                       \
   inline f32 name(f32 x) { return func(x); }
 
@@ -111,6 +154,7 @@ inline f32 inverse(f32 x) { return 1.0f / x; }
 inline f32 relu(f32 x) { return max(0.0f, x); }
 inline f32 sigmoid(f32 x) { return 1.0f / (1.0f + __builtin_expf(-x)); }
 inline f32 rsqrt(f32 x) { return 1.0f / __builtin_sqrtf(x); }
+#endif
 
 // --- Generic Automatic Struct/Vector Overloads ---
 

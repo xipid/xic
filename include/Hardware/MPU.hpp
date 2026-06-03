@@ -1,14 +1,14 @@
 #ifndef XI_HARDWARE_MPU_HPP
 #define XI_HARDWARE_MPU_HPP
 
-#include "../Xi/Device.hpp"
+#include "../Input/Input.hpp"
 #include "../Collection/Array.hpp"
 #include "../Xi/Primitives.hpp"
 #include "../Xi/Math.hpp"
 
 namespace Xi {
 
-class MPUDevice : public Device {
+class MPUDevice : public Input::InputDevice {
 public:
     Vector3 accel = {0,0,0};
     Vector3 gyro = {0,0,0};

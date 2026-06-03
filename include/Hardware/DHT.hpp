@@ -1,12 +1,12 @@
 #ifndef XI_HARDWARE_DHT_HPP
 #define XI_HARDWARE_DHT_HPP
 
-#include "../Xi/Device.hpp"
+#include "../Input/Input.hpp"
 #include "../Xi/Primitives.hpp"
 
 namespace Xi {
 
-class DHTDevice : public Device {
+class DHTDevice : public Input::InputDevice {
 public:
     f32 temperature = 0;
     f32 humidity = 0;

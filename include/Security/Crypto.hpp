@@ -4,8 +4,8 @@
  *
  */
 
-#ifndef XI_SEC_CRYPTO_HPP
-#define XI_SEC_CRYPTO_HPP
+#ifndef XI_SECURITY_CRYPTO_HPP
+#define XI_SECURITY_CRYPTO_HPP
 
 #include "../Collection/String.hpp"
 
@@ -13,10 +13,10 @@ using namespace Collection;
 using namespace Xi;
 
 /**
- * @namespace Sec
+ * @namespace Security
  * @brief Security and Cryptography namespace.
  */
-namespace Sec {
+namespace Security {
 
 using namespace Xi;
 
@@ -143,6 +143,6 @@ String signX(const String &privateKey, const String &text);
 bool verifyX(const String &publicKey, const String &text,
              const String &signature);
 
-} // namespace Sec
+} // namespace Security
 
-#endif // XI_SEC_CRYPTO_HPP
+#endif // XI_SECURITY_CRYPTO_HPP

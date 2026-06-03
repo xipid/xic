@@ -3,13 +3,13 @@
  * @brief Implementation of cryptographic utilities for the Xi framework.
  */
 
-#include "../../include/Sec/Crypto.hpp"
+#include "../../include/Security/Crypto.hpp"
 #include "../../include/Xi/Random.hpp"
 extern "C" {
 #include "../../packages/monocypher/monocypher.h"
 }
 
-namespace Sec {
+namespace Security {
 
 String zeros(usz len) {
   String s;
@@ -383,4 +383,4 @@ bool verifyX(const String &publicKey, const String &text,
   return false;
 }
 
-} // namespace Sec
+} // namespace Security

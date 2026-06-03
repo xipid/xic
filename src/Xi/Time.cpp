@@ -11,11 +11,15 @@
 #include <task.h>
 #elif defined(ARDUINO)
 #include <Arduino.h>
+#elif defined(__KERNEL__)
+#include <linux/timekeeping.h>
 #else
-#include <time.h>
-#if defined(_WIN32)
-#include <windows.h>
-#endif
+  #if !defined(XI_NO_STD)
+  #include <time.h>
+  #endif
+  #if defined(_WIN32)
+  #include <windows.h>
+  #endif
 #endif
 
 namespace Xi {
@@ -53,10 +57,31 @@ long long Time::daysFromCiv(int y, int m, int d) {
 }
 
 void Time::syncClock() {
-#if defined(_WIN32)
+#if defined(__KERNEL__)
+  syncClock(ktime_get_real_ns() / 1000ULL);
+#elif defined(_WIN32)
   unsigned long long ft;
   ::GetSystemTimePreciseAsFileTime(&ft);
   syncClock((ft - 116444736000000000ULL) / 10ULL);
+#elif defined(XI_NO_STD) && defined(__linux__)
+  #if defined(__x86_64__)
+    struct {
+      long long tv_sec;
+      long long tv_nsec;
+    } ts;
+    long ret;
+    __asm__ volatile (
+      "syscall"
+      : "=a"(ret)
+      : "a"(228), "D"(0), "S"(&ts)
+      : "rcx", "r11", "memory"
+    );
+    if (ret == 0) {
+      syncClock((i64)ts.tv_sec * 1000000ULL + (i64)(ts.tv_nsec / 1000));
+    }
+  #endif
+#elif defined(ARDUINO)
+  syncClock(0);
 #else
   struct timespec ts;
   clock_gettime(CLOCK_REALTIME, &ts);

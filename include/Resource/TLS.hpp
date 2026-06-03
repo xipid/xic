@@ -56,7 +56,7 @@ public:
    * @param port Local port (0 = ephemeral / client-only).
    * @param host Local host/IP to bind on.
    */
-  TLSBind(int port = 0, const String &host = "");
+  TLSBind(const NumericalAddress &address = NumericalAddress());
   virtual ~TLSBind();
 
   /**
@@ -113,9 +113,6 @@ protected:
   static int _bioRecv(void *ctx, unsigned char *buf, size_t len);
 #endif
 };
-
-// Factory
-XI_EXPORT TLSBind *requestTLSBind(int port = 0, const String &host = "");
 
 } // namespace Resource
 

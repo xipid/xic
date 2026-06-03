@@ -26,10 +26,9 @@
 * [🎨 Rich Formatting](docs/4-Terminal/Formatting.md)
 * [📟 Command Parser](docs/4-Terminal/Cli.md)
 
-## 🔐 Security & Low-Level
+## 🔐 Security
 
-* [🤫 Encryption (LLT)](docs/5-LLT/Encryption.md)
-* [🗜️ Compression (LLT)](docs/5-LLT/Compression.md)
+* [🤫 Encryption](docs/5-Security/Encryption.md)
 * [📜 Professional Logging](docs/6-Encoding/Logging.md)
 * [🔍 Regex Patterns](docs/6-Encoding/Regex.md)
 * [📄 Yaml & Serialization](docs/6-Encoding/Yaml.md)
@@ -38,6 +37,7 @@
 
 * [💾 Filesystem API](docs/7-Resource/Filesystem.md)
 * [🌐 Networking (Rho)](docs/7-Resource/Networking.md)
+* [🗜️ Compression](docs/7-Resource/Compression.md)
 * [📦 Archive Management](docs/7-Resource/Archives.md)
 
 ## 🚀 Execution & Tasks

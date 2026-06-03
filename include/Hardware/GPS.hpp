@@ -1,13 +1,13 @@
 #ifndef XI_HARDWARE_GPS_HPP
 #define XI_HARDWARE_GPS_HPP
 
-#include "../Xi/Device.hpp"
+#include "../Input/Input.hpp"
 #include "../Collection/Array.hpp"
 #include "../Xi/Math.hpp"
 
 namespace Xi {
 
-class GPSDevice : public Device {
+class GPSDevice : public Input::InputDevice {
 public:
     Vector3 pos = {0, 0, 0}; ///< Latitude, Longitude, Altitude
     u64 lastTimeSync = 0;    ///< Last synchronized epoch microseconds

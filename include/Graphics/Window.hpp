@@ -14,7 +14,8 @@
 #define PLATFORM_WIN32 1
 #endif
 
-#include "../Xi/Device.hpp"
+#include "Screen.hpp"
+#include <Input/Input.hpp>
 #include "Graphics.hpp"
 
 // -------------------------------------------------------------------------
@@ -60,7 +61,7 @@ using namespace Collection;
  * @brief A screen implementation backed by a GLFW window and a Diligent swap
  * chain.
  */
-class XI_EXPORT GLFWDiligentScreen : public DeviceScreen {
+class XI_EXPORT GLFWDiligentScreen : public Screen {
 private:
   GLFWwindow *_win = nullptr; ///< Pointer to the GLFW window.
   SwapContext _swp;           ///< Diligent Engine swap context.
@@ -95,13 +96,17 @@ public:
  * @class GLFWDiligentWindow
  * @brief A high-level device representing a window with a rendering context.
  */
-class XI_EXPORT GLFWDiligentWindow : public Device {
+class XI_EXPORT GLFWDiligentWindow {
 private:
   GLFWwindow *_win = nullptr; ///< The underlying GLFW window.
   GLFWDiligentScreen *_screen =
-      nullptr; ///< The screen device associated with this window.
+      nullptr; ///< The screen associated with this window.
+  GLFWDiligentRenderingDevice *_gpuDevice = nullptr;
 
 public:
+  bool shouldRelease = false;
+  Collection::Array<Input::InputDevice *> inputs;
+
   /**
    * @brief Creates a new GLFW window and initializes the rendering context.
    */
@@ -111,20 +116,20 @@ public:
   /**
    * @brief Polls window events and updates the internal state.
    */
-  void update() override;
+  void update();
 
   /**
    * @brief Retrieves the screen associated with this window.
-   * @return Pointer to the DeviceScreen.
+   * @return Pointer to the Screen.
    */
-  DeviceScreen *screen();
+  Screen *screen();
 };
 
 /**
- * @brief Factory function to request a new window device.
- * @return A pointer to the created Device.
+ * @brief Factory function to request a new window.
+ * @return A pointer to the created window.
  */
-XI_EXPORT Device *requestWindow();
+XI_EXPORT GLFWDiligentWindow *requestWindow();
 
 } // namespace Graphics
 

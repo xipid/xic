@@ -12,7 +12,13 @@ namespace Collection {
 class String;
 }
 
+#if !defined(__KERNEL__) && !defined(XI_NO_STD)
 #include <time.h>
+#endif
+
+#ifdef __KERNEL__
+#include <linux/delay.h>
+#endif
 
 /**
  * @def XI_EXPORT
@@ -27,6 +33,7 @@ class String;
 #define XI_EXPORT
 #endif
 
+#if !defined(__KERNEL__) && !defined(XI_NO_STD)
 #if defined(__has_include)
 #if __has_include(<new>)
 #include <new>
@@ -35,6 +42,7 @@ class String;
 #elif defined(__cplusplus) && __cplusplus >= 201103L
 #include <new>
 #define __PLACEMENT_NEW_INLINE
+#endif
 #endif
 
 /**
@@ -343,6 +351,25 @@ public:
   virtual ~IMemoryDevice() = default;
 };
 
+class XI_EXPORT MemoryDevice : public IMemoryDevice {
+public:
+  virtual void *alloc(usz size) override = 0;
+  virtual void free(void *handle) override = 0;
+  virtual void upload(void *handle, const void *src, usz size) override = 0;
+  virtual void download(void *handle, void *dst, usz size) override = 0;
+
+  virtual void *view(void *handle, i32 type = 0) override {
+    (void)type;
+    return handle;
+  }
+
+  virtual void *allocSurface(i32 w, i32 h, i32 channels = 4) override {
+    return alloc((usz)(w * h * channels));
+  }
+
+  virtual ~MemoryDevice() = default;
+};
+
 // -------------------------------------------------------------------------
 // Serialization Traits & Helpers
 // -------------------------------------------------------------------------
@@ -523,16 +550,61 @@ inline bool ch_eq(char a, char b) {
 }
 
 inline void sleepU(u64 us) {
-#if defined(FREERTOS_CONFIG_H) || defined(INC_FREERTOS_H)
-  TickType_t xDelay =
-      static_cast<TickType_t>(us / 1000000 * configTICK_RATE_HZ);
-  if (xDelay == 0 && us > 0)
-    xDelay = 1;
-  vTaskDelay(xDelay);
+#if defined(__KERNEL__)
+  if (us >= 20000) {
+    msleep(static_cast<unsigned int>(us / 1000));
+  } else if (us > 0) {
+    usleep_range(static_cast<unsigned long>(us), static_cast<unsigned long>(us));
+  }
+#elif defined(FREERTOS_CONFIG_H) || defined(INC_FREERTOS_H) || defined(ESP_PLATFORM)
+  #if defined(ESP_PLATFORM)
+    vTaskDelay(us / 1000 / portTICK_PERIOD_MS);
+  #else
+    TickType_t xDelay =
+        static_cast<TickType_t>(us / 1000000 * configTICK_RATE_HZ);
+    if (xDelay == 0 && us > 0)
+      xDelay = 1;
+    vTaskDelay(xDelay);
+  #endif
 #elif defined(ARDUINO)
   ::delay(static_cast<unsigned long>(us / 1000));
 #elif defined(_WIN32)
   ::Sleep(static_cast<DWORD>(us / 1000));
+#elif defined(XI_NO_STD) && defined(__linux__)
+  #if defined(__x86_64__)
+    struct {
+      long long tv_sec;
+      long long tv_nsec;
+    } ts;
+    ts.tv_sec = static_cast<long long>(us / 1000000);
+    ts.tv_nsec = static_cast<long long>((us % 1000000) * 1000);
+    long ret;
+    __asm__ volatile (
+      "syscall"
+      : "=a"(ret)
+      : "a"(35), "D"(&ts), "S"(nullptr)
+      : "rcx", "r11", "memory"
+    );
+  #elif defined(__i386__)
+    struct {
+      long tv_sec;
+      long tv_nsec;
+    } ts;
+    ts.tv_sec = static_cast<long>(us / 1000000);
+    ts.tv_nsec = static_cast<long>((us % 1000000) * 1000);
+    long ret;
+    __asm__ volatile (
+      "int $0x80"
+      : "=a"(ret)
+      : "a"(162), "b"(&ts), "c"(nullptr)
+      : "memory"
+    );
+  #else
+    i64 start = micros();
+    while (micros() - start < (i64)us) {
+      // busy wait
+    }
+  #endif
 #else
   struct timespec ts;
   ts.tv_sec = static_cast<time_t>(us / 1000000);

@@ -21,8 +21,7 @@ file(GLOB_RECURSE CORE_SOURCES
     "src/Collection/*.cpp"
     "src/Encoding/*.cpp"
     "src/Execution/*.cpp"
-    "src/LLT/*.cpp"
-    "src/Sec/*.cpp"
+    "src/Security/*.cpp"
     "src/Resource/*.cpp"
     "src/Terminal/*.cpp"
 )
@@ -33,9 +32,9 @@ list(FILTER CORE_SOURCES EXCLUDE REGEX "src/Graphics/.*")
 list(FILTER CORE_SOURCES EXCLUDE REGEX "src/Resource/TLS.cpp")
 list(FILTER CORE_SOURCES EXCLUDE REGEX "src/Resource/HTTP.cpp")
 list(FILTER CORE_SOURCES EXCLUDE REGEX "src/Resource/ZIPArchive.cpp")
-list(FILTER CORE_SOURCES EXCLUDE REGEX "src/LLT/Deflate.cpp")
-list(FILTER CORE_SOURCES EXCLUDE REGEX "src/LLT/LZ4.cpp")
-list(FILTER CORE_SOURCES EXCLUDE REGEX "src/LLT/Zstd.cpp")
+list(FILTER CORE_SOURCES EXCLUDE REGEX "src/Resource/Deflate.cpp")
+list(FILTER CORE_SOURCES EXCLUDE REGEX "src/Resource/LZ4.cpp")
+list(FILTER CORE_SOURCES EXCLUDE REGEX "src/Resource/Zstd.cpp")
 
 set(XI_SOURCES ${CORE_SOURCES})
 
@@ -126,7 +125,7 @@ if(XI_BUILD_DEFLATE)
     find_path(MINIZ_INCLUDE_DIR NAMES miniz.h PATH_SUFFIXES miniz)
     if(MINIZ_INCLUDE_DIR)
         message(STATUS "miniz found. Enabling DEFLATE.")
-        target_sources(Xi PRIVATE src/LLT/Deflate.cpp src/Resource/ZIPArchive.cpp)
+        target_sources(Xi PRIVATE src/Resource/Deflate.cpp src/Resource/ZIPArchive.cpp)
         target_compile_definitions(Xi PUBLIC XI_DEFLATE_ENABLED)
         target_include_directories(Xi PUBLIC ${MINIZ_INCLUDE_DIR})
         
@@ -144,7 +143,7 @@ if(XI_BUILD_LZ4)
     find_path(LZ4_INCLUDE_DIR NAMES lz4.h)
     if(LZ4_INCLUDE_DIR)
         message(STATUS "LZ4 found. Enabling LZ4.")
-        target_sources(Xi PRIVATE src/LLT/LZ4.cpp)
+        target_sources(Xi PRIVATE src/Resource/LZ4.cpp)
         target_compile_definitions(Xi PUBLIC XI_LZ4_ENABLED)
         target_include_directories(Xi PUBLIC ${LZ4_INCLUDE_DIR})
         
@@ -162,7 +161,7 @@ if(XI_BUILD_ZSTD)
     find_path(ZSTD_INCLUDE_DIR NAMES zstd.h)
     if(ZSTD_INCLUDE_DIR)
         message(STATUS "Zstandard found. Enabling ZSTD.")
-        target_sources(Xi PRIVATE src/LLT/Zstd.cpp)
+        target_sources(Xi PRIVATE src/Resource/Zstd.cpp)
         target_compile_definitions(Xi PUBLIC XI_ZSTD_ENABLED)
         target_include_directories(Xi PUBLIC ${ZSTD_INCLUDE_DIR})
         

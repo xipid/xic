@@ -1,6 +1,6 @@
-# Loss-less Transformation: Compression
+# Resource: Compression
 
-The **LLT::Compression** module provides a unified interface for various lossless compression algorithms. It is designed to be pluggable, allowing you to choose the best balance between speed, memory usage, and compression ratio.
+The **Resource::Compression** module provides a unified interface for various lossless compression algorithms. It is designed to be pluggable, allowing you to choose the best balance between speed, memory usage, and compression ratio.
 
 ---
 
@@ -19,7 +19,7 @@ xic supports three major backends, conditionally enabled based on your build fla
 All compression engines share the same basic API, allowing you to switch algorithms with a single line of code.
 
 ```cpp
-using namespace LLT;
+using namespace Resource;
 
 // Instantiate your backend (e.g., ZSTD)
 ZSTD engine;

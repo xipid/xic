@@ -186,7 +186,7 @@ void TLSBind::_stepRead(TLSSession *s) {
 // Public API
 // -------------------------------------------------------------------------
 
-TLSBind::TLSBind(int p, const String &h) : TCPBind(p, h) {
+TLSBind::TLSBind(const NumericalAddress &address) : TCPBind(address) {
   name = "TLSBind";
   _initMbedTLS();
 }
@@ -317,10 +317,6 @@ void TLSBind::update() {
       _stepRead(s);
     }
   }
-}
-
-TLSBind *requestTLSBind(int port, const String &host) {
-  return new TLSBind(port, host);
 }
 
 } // namespace Resource

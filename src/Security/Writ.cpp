@@ -1,10 +1,10 @@
-#include "../../include/Sec/Writ.hpp"
-#include "../../include/Sec/Crypto.hpp"
+#include "../../include/Security/Writ.hpp"
+#include "../../include/Security/Crypto.hpp"
 extern "C" {
 #include "../../packages/monocypher/monocypher.h"
 }
 
-namespace Sec {
+namespace Security {
 
 Writ::Writ(const String &bytes) {
   usz at = 0;
@@ -173,4 +173,4 @@ Array<Array<Writ>> Writ::chains(const Array<Writ> &allWrits,
   return result;
 }
 
-} // namespace Sec
+} // namespace Security

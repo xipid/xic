@@ -281,7 +281,7 @@ question_done:
 // HTTPBind
 // =========================================================================
 
-HTTPBind::HTTPBind(int p, const String &h) : TLSBind(p, h) { name = "HTTPBind"; }
+HTTPBind::HTTPBind(const NumericalAddress &address) : TLSBind(address) { name = "HTTPBind"; }
 
 HTTPBind::~HTTPBind() {
   // Clean up HTTPClient allocations
@@ -613,10 +613,6 @@ void HTTPBind::update() {
       cli->_requestSent = true;
     }
   }
-}
-
-HTTPBind *requestHTTPBind(int port, const String &host) {
-  return new HTTPBind(port, host);
 }
 
 } // namespace Resource

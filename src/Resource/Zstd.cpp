@@ -3,15 +3,9 @@
  * @brief Zstandard compression — zero-alloc hot path via persistent contexts.
  *
  * Only compiled when XI_ZSTD_ENABLED is defined by CMake (libzstd found).
- *
- * Design:
- *   - CCtx and DCtx are allocated once in the constructor and reused.
- *   - CDict/DDict are rebuilt lazily only when the dictionary blob changes.
- *   - Decompression uses frame content size when available; otherwise grows
- *     the output buffer on ZSTD_error_dstSize_tooSmall until maxScratch.
  */
 
-#include "../../include/LLT/Compression.hpp"
+#include "../../include/Resource/Compression.hpp"
 
 #ifdef XI_ZSTD_ENABLED
 
@@ -21,7 +15,7 @@
 #define XI_ZSTD_DICT_AVAILABLE 1
 #endif
 
-namespace LLT {
+namespace Resource {
 
 // -------------------------------------------------------------------------
 // Lifecycle
@@ -124,7 +118,7 @@ void ZSTD::setDictionary(const String &dict) {
 }
 
 // -------------------------------------------------------------------------
-// Compress — hot path: no allocations other than the output String
+// Compress
 // -------------------------------------------------------------------------
 
 String ZSTD::compress(const String &input) {
@@ -161,7 +155,7 @@ String ZSTD::compress(const String &input) {
 }
 
 // -------------------------------------------------------------------------
-// Decompress — growable buffer, single-shot context reuse
+// Decompress
 // -------------------------------------------------------------------------
 
 String ZSTD::decompress(const String &input) {
@@ -223,6 +217,6 @@ String ZSTD::decompress(const String &input) {
   }
 }
 
-} // namespace LLT
+} // namespace Resource
 
 #endif // XI_ZSTD_ENABLED

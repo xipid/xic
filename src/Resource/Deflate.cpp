@@ -9,14 +9,14 @@
  *             when the output buffer needs to grow.
  */
 
-#include "../../include/LLT/Compression.hpp"
+#include "../../include/Resource/Compression.hpp"
 
 #ifdef XI_DEFLATE_ENABLED
 
 #include <miniz.h>
 #include <cstring>
 
-namespace LLT {
+namespace Resource {
 
 DEFLATE::DEFLATE() { level = 6; }
 
@@ -102,6 +102,6 @@ String DEFLATE::decompress(const String &input) {
   return output;
 }
 
-} // namespace LLT
+} // namespace Resource
 
 #endif // XI_DEFLATE_ENABLED

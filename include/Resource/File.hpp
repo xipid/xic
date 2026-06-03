@@ -8,7 +8,7 @@
 #define XI_CORE_FILE_HPP
 
 #include "../Collection/String.hpp"
-#include "../Xi/Device.hpp"
+#include "../Xi/Primitives.hpp"
 
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -23,9 +23,9 @@
 #include <unistd.h>
 #endif
 
-using namespace Xi;
-
 namespace Resource {
+using namespace Xi;
+using namespace Collection;
 
 class SockBind;
 class SockStation;
@@ -72,12 +72,13 @@ public:
  * @class FilesystemDevice
  * @brief Conceptual device representing a filesystem.
  */
-class XI_EXPORT FilesystemDevice : public Device {
+class XI_EXPORT Filesystem {
 public:
+  String name = "Filesystem";
   String workdir = ""; ///< Working directory, prepended to relative paths.
   String basedir = ""; ///< Base directory, strict prefix for all operations.
 
-  FilesystemDevice() { name = "Filesystem"; }
+  Filesystem() {}
 
   /**
    * @brief Reads file content.
@@ -122,12 +123,14 @@ public:
   virtual SockStation *station(const String &path = "") = 0;
 
   /** @brief Gets the default global filesystem device. */
-  static FilesystemDevice &fs();
+  static Filesystem &fs();
   /** @brief Returns a reference to the filesystem at a specific path. */
-  FilesystemDevice &fs(const String &path);
+  Filesystem &fs(const String &path);
+
+  virtual ~Filesystem() = default;
 
 protected:
-  static FilesystemDevice *_singleton;
+  static Filesystem *_singleton;
   String resolve(const String &path);
 };
 
@@ -135,10 +138,10 @@ protected:
  * @class LinuxFS
  * @brief POSIX-compliant filesystem implementation.
  */
-class XI_EXPORT LinuxFS : public FilesystemDevice {
+class XI_EXPORT LinuxFS : public Filesystem {
 public:
   LinuxFS() { name = "LinuxFS"; }
-  LinuxFS(const LinuxFS &other) : FilesystemDevice() {
+  LinuxFS(const LinuxFS &other) : Filesystem() {
     name = other.name;
     workdir = other.workdir;
     basedir = other.basedir;
@@ -167,7 +170,7 @@ public:
 /**
  * @brief Factory function to get appropriate OS filesystem.
  */
-FilesystemDevice *requestFS();
+Filesystem *requestFS();
 
 } // namespace Resource
 

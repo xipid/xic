@@ -9,13 +9,13 @@
  *   - ZSTD:   zstd.h    → XI_ZSTD_ENABLED
  */
 
-#ifndef XI_LLT_COMPRESSION_HPP
-#define XI_LLT_COMPRESSION_HPP
+#ifndef XI_RESOURCE_COMPRESSION_HPP
+#define XI_RESOURCE_COMPRESSION_HPP
 
 #include "../Collection/Array.hpp"
 #include "../Collection/String.hpp"
 
-namespace LLT {
+namespace Resource {
 
 using namespace Xi;
 using namespace Collection;
@@ -142,6 +142,6 @@ private:
 
 #endif // XI_ZSTD_ENABLED
 
-} // namespace LLT
+} // namespace Resource
 
-#endif // XI_LLT_COMPRESSION_HPP
+#endif // XI_RESOURCE_COMPRESSION_HPP

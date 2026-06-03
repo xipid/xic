@@ -20,7 +20,7 @@ using namespace Xi;
 
 namespace Resource {
 
-String FilesystemDevice::resolve(const String &path) {
+String Filesystem::resolve(const String &path) {
   String fullPath = basedir;
   if (!fullPath.isEmpty() && !fullPath.endsWith("/"))
     fullPath += "/";
@@ -202,8 +202,8 @@ Stat LinuxFS::stat(const String &path, i32 depth, i32 maxChildren) {
 SockBind *LinuxFS::socket(const String &path) { return nullptr; }
 SockStation *LinuxFS::station(const String &path) { return nullptr; }
 
-FilesystemDevice *FilesystemDevice::_singleton = nullptr;
-FilesystemDevice &FilesystemDevice::fs() {
+Filesystem *Filesystem::_singleton = nullptr;
+Filesystem &Filesystem::fs() {
   if (!_singleton) {
 #ifdef _WIN32
     _singleton = nullptr;
@@ -214,7 +214,7 @@ FilesystemDevice &FilesystemDevice::fs() {
   return *_singleton;
 }
 
-FilesystemDevice &FilesystemDevice::fs(const String &path) {
+Filesystem &Filesystem::fs(const String &path) {
   LinuxFS *sub = new LinuxFS(*(LinuxFS *)this);
   sub->basedir = resolve(path);
   return *sub;

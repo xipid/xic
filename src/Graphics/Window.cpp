@@ -20,8 +20,6 @@
 namespace Graphics {
 
 GLFWDiligentScreen::GLFWDiligentScreen(GLFWwindow *gw) : _win(gw) {
-  name = "Screen";
-  outputIntended = true;
   writable = true;
 
   glfwGetFramebufferSize(_win, &width, &height);
@@ -69,8 +67,6 @@ void GLFWDiligentScreen::update() {
 void GLFWDiligentScreen::resizeSwapchain(int w, int h) { _swp.resize(w, h); }
 
 GLFWDiligentWindow::GLFWDiligentWindow() {
-  name = "Xi Window";
-
 #if PLATFORM_LINUX
   glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
 #endif
@@ -82,12 +78,9 @@ GLFWDiligentWindow::GLFWDiligentWindow() {
   if (!_win)
     return;
 
-  auto *dev = new GLFWDiligentRenderingDevice();
-  devices.push((Device *)dev);
-
+  _gpuDevice = new GLFWDiligentRenderingDevice();
   _screen = new GLFWDiligentScreen(_win);
-  _screen->renderingDevice = dev;
-  devices.push((Device *)_screen);
+  _screen->gpu = _gpuDevice;
 
   glfwSetWindowUserPointer(_win, this);
 
@@ -96,21 +89,23 @@ GLFWDiligentWindow::GLFWDiligentWindow() {
     if (!self)
       return;
 
-    for (usz i = 0; i < self->devices.size(); ++i) {
-      auto *key = dynamic_cast<Device1D *>(self->devices[i]);
-      if (key && key->id == k) {
-        key->value = (a != GLFW_RELEASE) ? 1.0f : 0.0f;
-        return;
+    for (usz i = 0; i < self->inputs.size(); ++i) {
+      if (self->inputs[i]->name == "Input1D") {
+        auto *key = static_cast<Input::Input1D *>(self->inputs[i]);
+        if (key && key->id == k) {
+          key->value = (a != GLFW_RELEASE) ? 1.0f : 0.0f;
+          return;
+        }
       }
     }
 
     if (a == GLFW_PRESS) {
-      auto *key = new Device1D();
+      auto *key = new Input::Input1D();
       key->id = k;
-      key->name = "Key";
+      key->name = "Input1D";
       key->value = 1.0f;
       key->readable = true;
-      self->devices.push((Device *)key);
+      self->inputs.push(key);
     }
   });
 
@@ -126,8 +121,10 @@ GLFWDiligentWindow::GLFWDiligentWindow() {
 }
 
 GLFWDiligentWindow::~GLFWDiligentWindow() {
-  for (usz i = 0; i < devices.size(); ++i)
-    delete devices[i];
+  for (usz i = 0; i < inputs.size(); ++i)
+    delete inputs[i];
+  delete _screen;
+  delete _gpuDevice;
   if (_win)
     glfwDestroyWindow(_win);
   glfwTerminate();
@@ -138,13 +135,14 @@ void GLFWDiligentWindow::update() {
   if (_win) {
     shouldRelease = glfwWindowShouldClose(_win);
   }
-  for (usz i = 0; i < devices.size(); ++i)
-    devices[i]->update();
+  _screen->update();
+  for (usz i = 0; i < inputs.size(); ++i)
+    inputs[i]->update();
 }
 
-DeviceScreen *GLFWDiligentWindow::screen() { return _screen; }
+Screen *GLFWDiligentWindow::screen() { return _screen; }
 
-Device *requestWindow() { return new GLFWDiligentWindow(); }
+GLFWDiligentWindow *requestWindow() { return new GLFWDiligentWindow(); }
 
 } // namespace Graphics
 

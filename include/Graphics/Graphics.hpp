@@ -8,7 +8,7 @@
 #ifndef XI_GRAPHICS_GRAPHICS_HPP
 #define XI_GRAPHICS_GRAPHICS_HPP
 
-#include "../Xi/Device.hpp"
+#include <Xi/Primitives.hpp>
 
 // CRITICAL: Undefine Linux system macros that collide with Diligent
 #ifdef MAP_TYPE
@@ -189,7 +189,7 @@ struct XI_EXPORT SwapContext {
  * @brief A rendering device implementation that manages GPU memory and
  * resources.
  */
-class XI_EXPORT GLFWDiligentRenderingDevice : public DeviceRenderingDevice {
+class XI_EXPORT GLFWDiligentRenderingDevice : public MemoryDevice {
 public:
   GLFWDiligentRenderingDevice();
   virtual ~GLFWDiligentRenderingDevice() = default;

@@ -149,11 +149,11 @@ static void buildCube(Mesh3 &mesh) {
 
 int main() {
   // 1. Create Window
-  Device *win = requestWindow();
+  GLFWDiligentWindow *win = requestWindow();
   if (!win)
     return -1;
 
-  DeviceScreen *screen = ((GLFWDiligentWindow *)win)->screen();
+  Screen *screen = win->screen();
 
   // 2. Build Geometry
   Mesh3 cubeMesh;
@@ -179,7 +179,7 @@ int main() {
   // 5. Setup Camera
   Camera3 camera;
   camera.root = &sceneRoot;
-  camera.device = screen->renderingDevice;
+  camera.device = screen->gpu;
   camera.fov = 60.0f;
   camera.setPosition({0.0f, 2.0f, -5.0f});
   camera.lookAt({0, 0, 0});

@@ -1,5 +1,5 @@
-#ifndef XI_SEC_WRIT_HPP
-#define XI_SEC_WRIT_HPP 1
+#ifndef XI_SECURITY_WRIT_HPP
+#define XI_SECURITY_WRIT_HPP 1
 
 #include <Collection/Array.hpp>
 #include <Collection/Map.hpp>
@@ -8,7 +8,7 @@
 using namespace Xi;
 using namespace Collection;
 
-namespace Sec {
+namespace Security {
 
 /**
  * @struct Writ
@@ -52,6 +52,6 @@ struct XI_EXPORT Writ {
          const Array<String> &rootPublicKeys);
 };
 
-} // namespace Sec
+} // namespace Security
 
-#endif // XI_SEC_WRIT_HPP
+#endif // XI_SECURITY_WRIT_HPP
