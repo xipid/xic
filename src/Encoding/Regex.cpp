@@ -775,6 +775,14 @@ bool Regex::DFAState::operator==(const DFAState &o) const {
   return true;
 }
 
+Array<String> Regex::split(const String &s) const {
+    return s.split(*this);
+}
+
+String Regex::replace(const String &s, const String &rep) const {
+    return s.replace(*this, rep);
+}
+
 } // namespace Encoding
 
 namespace Collection {
