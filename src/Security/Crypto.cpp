@@ -273,41 +273,46 @@ void negate_scalar_mod_L(u8 a_out[32], const u8 a[32]) {
   }
 }
 
+// -------------------------------------------------------------------------
+// Corrected XEdDSA Sign & Verify
+// -------------------------------------------------------------------------
+
 String signX(const String &privateKey, const String &text) {
   if (privateKey.size() != 32)
     return String();
 
-  u8 a[32]; // private scalar
-  u8 A[32]; // corresponding Ed25519 public key
-  u8 a_prime[32];
+  u8 a[32];       // Clamped private scalar
+  u8 A[32];       // Target Ed25519 point
+  u8 a_prime[32]; // Adjusted scalar
 
-  // 1. Get Ed25519 public key from X25519 private key
+  // 1. Correctly compute the target public key point directly from your X25519 private key
   u8 pub_x[32];
   crypto_x25519_public_key(pub_x, privateKey.data());
   crypto_x25519_to_eddsa(A, pub_x);
 
-  // 2. Clamp scalar `a`
+  // 2. Trim and process your scalar values
   crypto_eddsa_trim_scalar(a, privateKey.data());
-
-  // 3. Reduce `a` modulo L
+  
   u8 a_padded[64] = {0};
-  for (int i = 0; i < 32; ++i)
-    a_padded[i] = a[i];
+  for (int i = 0; i < 32; ++i) a_padded[i] = a[i];
   u8 a_mod_L[32];
   crypto_eddsa_reduce(a_mod_L, a_padded);
 
-  // 4. To match XEdDSA definition we need to see if A has negative sign bit.
+  // 3. Check the sign bit of the native point derived from the scalar
   u8 A_check[32];
-  crypto_eddsa_scalarbase(A_check,
-                          a_mod_L); // Use reduced scalar for correctness
-  if (A_check[31] & 0x80) {
+  crypto_eddsa_scalarbase(A_check, a_mod_L);
+
+  // CRITICAL FIX: Match the sign bit mapping explicitly with Monocypher's internal coordinate output
+  if ((A_check[31] & 0x80) != (A[31] & 0x80)) {
     negate_scalar_mod_L(a_prime, a_mod_L);
   } else {
-    for (int i = 0; i < 32; ++i)
-      a_prime[i] = a_mod_L[i];
+    for (int i = 0; i < 32; ++i) a_prime[i] = a_mod_L[i];
   }
 
-  // 4. Generate deterministic random nonce r
+  // 4. Force target public key sign bit clear for signature transmission standard compatibility
+  A[31] &= 0x7F;
+
+  // 5. Build a secure, deterministic random nonce prefix
   u8 secret[64];
   crypto_blake2b(secret, 64, privateKey.data(), 32);
   u8 *prefix = secret + 32;
@@ -322,30 +327,29 @@ String signX(const String &privateKey, const String &text) {
   u8 r[32];
   crypto_eddsa_reduce(r, hash_out);
 
-  // 5. R = rB
+  // 6. Compute R point value
   u8 R[32];
   crypto_eddsa_scalarbase(R, r);
 
-  // 6. h = BLAKE2b(R || A || text) mod L
-  A[31] &= 0x7F;
-
+  // 7. Calculate signature check hash
   crypto_blake2b_init(&ctx, 64);
   crypto_blake2b_update(&ctx, R, 32);
-  crypto_blake2b_update(&ctx, A, 32);
+  crypto_blake2b_update(&ctx, A, 32); // Match unsigned standard frame
   crypto_blake2b_update(&ctx, text.data(), text.size());
   crypto_blake2b_final(&ctx, hash_out);
 
   u8 h[32];
   crypto_eddsa_reduce(h, hash_out);
 
-  // 7. S = (r + h * a_prime) mod L
+  // 8. Finalize S scalar tracking
   u8 S[32];
   crypto_eddsa_mul_add(S, h, a_prime, r);
 
   String signature = zeros(64);
+  u8 *sigData = signature.data();
   for (int i = 0; i < 32; i++) {
-    signature.data()[i] = R[i];
-    signature.data()[i + 32] = S[i];
+    sigData[i] = R[i];
+    sigData[i + 32] = S[i];
   }
 
   crypto_wipe(a, 32);
@@ -356,20 +360,20 @@ String signX(const String &privateKey, const String &text) {
   return signature;
 }
 
-bool verifyX(const String &publicKey, const String &text,
-             const String &signature) {
+bool verifyX(const String &publicKey, const String &text, const String &signature) {
   if (publicKey.size() != 32 || signature.size() != 64)
     return false;
 
   u8 A[32];
   crypto_x25519_to_eddsa(A, publicKey.data());
-
+  
+  // Clear the sign bit explicitly to conform with your signing generation scheme standard
   A[31] &= 0x7F;
 
   crypto_blake2b_ctx ctx;
   crypto_blake2b_init(&ctx, 64);
-  crypto_blake2b_update(&ctx, signature.data(), 32); // R
-  crypto_blake2b_update(&ctx, A, 32);                // unsigned A
+  crypto_blake2b_update(&ctx, signature.data(), 32); 
+  crypto_blake2b_update(&ctx, A, 32);                
   crypto_blake2b_update(&ctx, text.data(), text.size());
   u8 hash_out[64];
   crypto_blake2b_final(&ctx, hash_out);
@@ -377,10 +381,8 @@ bool verifyX(const String &publicKey, const String &text,
   u8 h[32];
   crypto_eddsa_reduce(h, hash_out);
 
-  if (crypto_eddsa_check_equation((const u8 *)signature.data(), A, h) == 0) {
-    return true;
-  }
-  return false;
+  // Monocypher return parity verification check
+  return (crypto_eddsa_check_equation((const u8 *)signature.data(), A, h) == 0);
 }
 
 } // namespace Security

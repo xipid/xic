@@ -337,6 +337,8 @@ bool String::operator==(const String &other) const {
   usz n = size();
   if (n != other.size())
     return false;
+  if (n == 0)
+    return true;
 
   const u8 *d1 = data();
   const u8 *d2 = other.data();
@@ -347,6 +349,19 @@ bool String::operator==(const String &other) const {
     if (d1[i] != d2[i])
       return false;
   return true;
+}
+
+bool String::operator<(const String &other) const {
+  usz minSz = size() < other.size() ? size() : other.size();
+  const u8 *d1 = data();
+  const u8 *d2 = other.data();
+  if (!d1) return d2 != nullptr;
+  if (!d2) return false;
+  for (usz i = 0; i < minSz; ++i) {
+    if (d1[i] < d2[i]) return true;
+    if (d1[i] > d2[i]) return false;
+  }
+  return size() < other.size();
 }
 
 bool String::operator==(const char *other) const {

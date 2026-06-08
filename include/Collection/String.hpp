@@ -197,6 +197,7 @@ public:
 
   bool operator==(const String &other) const;
   bool operator!=(const String &other) const { return !(*this == other); }
+  bool operator<(const String &other) const;
   bool operator==(const char *other) const;
   bool operator!=(const char *other) const { return !(*this == other); }
 
