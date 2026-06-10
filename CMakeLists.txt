@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(Xi VERSION 1.0.0 LANGUAGES C CXX)
+project(Xi VERSION 1.0.0 LANGUAGES C CXX ASM)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,6 +21,7 @@ file(GLOB_RECURSE CORE_SOURCES
     "src/Collection/*.cpp"
     "src/Encoding/*.cpp"
     "src/Execution/*.cpp"
+    "src/Execution/arch/*.S"
     "src/Security/*.cpp"
     "src/Resource/*.cpp"
     "src/Terminal/*.cpp"
@@ -178,6 +179,18 @@ endif()
 if(XI_BUILD_HARDWARE)
     file(GLOB HARDWARE_SOURCES "src/Hardware/*.cpp")
     target_sources(Xi PRIVATE ${HARDWARE_SOURCES})
+endif()
+
+# Tasker platform dependencies (Linux: pthread + rt for POSIX timers)
+if(UNIX AND NOT APPLE AND NOT ESP_PLATFORM)
+    find_library(PTHREAD_LIB pthread)
+    find_library(RT_LIB rt)
+    if(PTHREAD_LIB)
+        target_link_libraries(Xi PUBLIC ${PTHREAD_LIB})
+    endif()
+    if(RT_LIB)
+        target_link_libraries(Xi PUBLIC ${RT_LIB})
+    endif()
 endif()
 
 # Alias for consistent usage

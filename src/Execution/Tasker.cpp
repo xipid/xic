@@ -147,7 +147,7 @@ void Tasker::interrupts(usz coreId) {
     }
 
     // Wake sleeping tasks.
-    i64 now = Xi::micros();
+    u64 now = (u64)Xi::micros();
     for (usz i = 0; i < core.runQueue.size(); ++i) {
         usz tid = core.runQueue[i];
         if (tid < _tasks.size() && _tasks[tid]) {

@@ -6,6 +6,23 @@
 #include "../../include/Execution/Task.hpp"
 #include "../../include/Execution/Tasker.hpp"
 
+// Portable microsecond timestamp.
+#if defined(__x86_64__) || defined(_M_X64) || defined(__linux__)
+#include <ctime>
+static Xi::u64 xi_micros_now() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (Xi::u64)ts.tv_sec * 1000000ULL + (Xi::u64)(ts.tv_nsec / 1000);
+}
+#elif defined(ESP_PLATFORM)
+#include <esp_timer.h>
+static Xi::u64 xi_micros_now() {
+    return (Xi::u64)esp_timer_get_time();
+}
+#else
+static Xi::u64 xi_micros_now() { return 0; }
+#endif
+
 namespace Execution {
 
 // -------------------------------------------------------------------------
@@ -123,7 +140,7 @@ void Task::stop() {
 void Task::stop(u64 us) {
     if (!_state || !_tasker) return;
     _state->status = TaskStatus::Sleeping;
-    _state->sleepUntilUs = (u64)Xi::micros() + us;
+    _state->sleepUntilUs = xi_micros_now() + us;
     usz core = _state->currentCore;
     if (_tasker->currentTask(core) == _state) {
         _tasker->yield(core);
@@ -132,7 +149,11 @@ void Task::stop(u64 us) {
 
 void Task::jump(usz addr) {
     if (!_state) return;
+#if defined(__x86_64__) || defined(_M_X64)
+    _state->context.rip = (u64)addr;
+#else
     _state->context.pc = (decltype(_state->context.pc))addr;
+#endif
     // Invalidate AOT cache for this region — force re-AOT on next execution.
     AOT::invalidate(_state->aotCache, addr, 0);
 }
@@ -353,7 +374,12 @@ Task Task::child(usz index) {
 // Context Entry Trampoline (called by assembly)
 // -------------------------------------------------------------------------
 
+// The Xtensa-specific trampoline is in arch/Context_Xtensa.cpp.
+// This generic version is used by all other architectures.
+#if !defined(__XTENSA__)
+
 extern "C" void xi_context_entry_trampoline(void* arg) {
+    (void)arg;
     TaskState* state = xi_get_current_task();
     if (state && state->entryFn) {
         state->entryFn(state->entryArg);
@@ -371,5 +397,7 @@ extern "C" void xi_context_entry_trampoline(void* arg) {
     // Should never reach here. Spin if it does.
     for (;;) {}
 }
+
+#endif // !defined(__XTENSA__)
 
 } // namespace Execution
