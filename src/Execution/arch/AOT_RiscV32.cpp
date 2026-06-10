@@ -1,6 +1,6 @@
 /**
  * @file AOT_RiscV32.cpp
- * @brief RISC-V32 AOT SFI binary rewriter for Tasker.
+ * @brief RISC-V32 AOT SFI binary rewriter for the Task subsystem.
  *
  * Decodes RISC-V32 instructions (fixed 32-bit, with 16-bit compressed
  * extension support), identifies loads/stores, and inserts bounds-check
@@ -33,8 +33,31 @@ namespace Execution {
 // Bounds-check stub (RISC-V32)
 // -------------------------------------------------------------------------
 
-extern "C" void xi_sfi_bounds_check_rv32(void* /* addr */, usz /* size */) {
-    // Default no-op. Patched at runtime.
+extern "C" void xi_sfi_bounds_check_rv32(void* addr, usz size) {
+    TaskState* state = xi_get_current_task();
+    if (!state) return;
+
+    u8* target = static_cast<u8*>(addr);
+    bool ok = false;
+    for (usz i = 0; i < state->regions.size(); ++i) {
+        MemoryRegion& r = state->regions[i];
+        if (r.physical) {
+            if (target >= r.physical && target + size <= r.physical + r.size) {
+                ok = true;
+                break;
+            }
+        }
+    }
+
+    // Also allow access to the task's own stack.
+    if (!ok && state->stack && target >= state->stack &&
+        target + size <= state->stack + state->stackSize) {
+        ok = true;
+    }
+
+    if (!ok) {
+        std::abort();
+    }
 }
 
 // -------------------------------------------------------------------------

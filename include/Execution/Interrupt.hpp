@@ -3,7 +3,7 @@
  * @brief Portable timer interrupt interface for preemptive task scheduling.
  *
  * Each architecture backend implements these functions to set up
- * a periodic hardware timer that calls Tasker::interrupts(coreId)
+ * a periodic hardware timer that calls Task::yield(coreId)
  * on each tick.
  */
 
@@ -19,7 +19,7 @@ using namespace Xi;
 /**
  * @brief Starts a periodic timer interrupt on the given core.
  *
- * When the timer fires, it must call Tasker::interrupts(coreId)
+ * When the timer fires, it must call Task::yield(coreId)
  * in ISR context (or signal context on hosted platforms).
  *
  * @param coreId     The core to attach the timer to.

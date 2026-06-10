@@ -25,6 +25,7 @@
 
 * [🎨 Rich Formatting](docs/4-Terminal/Formatting.md)
 * [📟 Command Parser](docs/4-Terminal/Cli.md)
+* [💬 Interactive Prompts](docs/4-Terminal/Prompts.md)
 
 ## 🔐 Security
 
@@ -42,6 +43,7 @@
 
 ## 🚀 Execution & Tasks
 
+* [⚙️ Unified Tasks](docs/8-Execution/Tasks.md)
 * [🧵 Cooperative Routines](docs/8-Execution/Routines.md)
 * [⚡ Process Management](docs/8-Execution/Processes.md)
 

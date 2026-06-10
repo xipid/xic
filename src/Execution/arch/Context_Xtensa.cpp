@@ -11,7 +11,6 @@
 
 #include "../../include/Execution/Context.hpp"
 #include "../../include/Execution/Task.hpp"
-#include "../../include/Execution/Tasker.hpp"
 
 namespace Execution {
 
@@ -124,9 +123,7 @@ void xi_context_init(TaskContext* ctx, void (*entry)(void*), void* arg,
  *             On ESP32, this is typically the entryArg from TaskState.
  */
 extern "C" void xi_context_entry_trampoline(void* arg) {
-    /* Retrieve the current task via Tasker */
-    Tasker* tasker = Tasker::instance;
-    if (!tasker) {
+    if (!Task::instance) {
         /* No scheduler running — spin forever.
          * This should never happen in normal operation. */
         for (;;) {
@@ -136,7 +133,7 @@ extern "C" void xi_context_entry_trampoline(void* arg) {
 
     /* Get the current core ID and the running task */
     usz coreId = xi_current_core();
-    TaskState* task = tasker->currentTask(coreId);
+    TaskState* task = Task::currentTask(coreId);
 
     if (task && task->entryFn) {
         /* Call the actual entry function */
@@ -150,7 +147,7 @@ extern "C" void xi_context_entry_trampoline(void* arg) {
 
     /* Yield to the scheduler. This will context-switch away from this
      * task and it will never be scheduled again. */
-    tasker->yield(coreId);
+    Task::current().yield(coreId);
 
     /* Should never reach here, but just in case: */
     for (;;) {

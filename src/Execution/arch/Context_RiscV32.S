@@ -1,6 +1,6 @@
 /**
  * @file Context_RiscV32.S
- * @brief RISC-V32 context switch implementation for the Tasker subsystem.
+ * @brief RISC-V32 context switch implementation for the Task subsystem.
  *
  * Implements xi_context_switch(TaskContext* from, TaskContext* to) which
  * saves the full register state into 'from' and restores from 'to'.

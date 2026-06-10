@@ -1,6 +1,6 @@
 /**
  * @file Interrupt_RiscV32.cpp
- * @brief RISC-V32 (ESP32-C3/C6) timer interrupt implementation for Tasker.
+ * @brief RISC-V32 (ESP32-C3/C6) timer interrupt implementation for the Task subsystem.
  *
  * Uses ESP-IDF's esp_timer API. ESP32-C3 is single-core RISC-V,
  * ESP32-C6 is single-core RISC-V (with LP core, not managed here).
@@ -9,7 +9,7 @@
 #if defined(__riscv) && (__riscv_xlen == 32)
 
 #include "../../../include/Execution/Interrupt.hpp"
-#include "../../../include/Execution/Tasker.hpp"
+#include "../../../include/Execution/Task.hpp"
 
 #if defined(ESP_PLATFORM)
 #include <esp_timer.h>
@@ -33,8 +33,8 @@ static bool s_timerActive = false;
 
 #if defined(ESP_PLATFORM)
 static void xi_timer_callback(void* /* arg */) {
-    if (!Tasker::instance) return;
-    Tasker::instance->interrupts(0);
+    if (!Task::instance) return;
+    Task::current().yield(0);
 }
 #endif
 

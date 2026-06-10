@@ -1,6 +1,6 @@
 /**
  * @file Context_Amd64.S
- * @brief x86_64 (AMD64) context switch implementation for the Tasker subsystem.
+ * @brief x86_64 (AMD64) context switch implementation for the Task subsystem.
  *
  * Provides xi_context_switch which saves the current CPU state into a
  * TaskContext struct and restores state from another TaskContext.

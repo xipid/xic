@@ -1,6 +1,6 @@
 /**
  * @file test_tasker.cpp
- * @brief Functional test for the Tasker subsystem.
+ * @brief Functional test for the Task subsystem.
  *
  * Tests:
  *   1. Task creation and hierarchy.
@@ -13,14 +13,19 @@
 
 #include <cstdio>
 #include <cassert>
-#include "Execution/Tasker.hpp"
+#include "Execution/Task.hpp"
 
 using namespace Execution;
 using namespace Xi;
 using namespace Collection;
 
+namespace Execution {
+    extern void xi_set_current_task(TaskState* s);
+    extern void xi_reset_task_state_for_tests();
+}
+
 // -------------------------------------------------------------------------
-// CustomTask subclass test — must work with Tasker seamlessly.
+// CustomTask subclass test — must work with Task seamlessly.
 // -------------------------------------------------------------------------
 
 struct CustomTask : public Task {
@@ -28,8 +33,8 @@ struct CustomTask : public Task {
     String role;
 
     CustomTask() : Task(), permissions(0) {}
-    CustomTask(TaskState* state, Tasker* tasker)
-        : Task(state, tasker), permissions(0) {}
+    CustomTask(TaskState* state)
+        : Task(state), permissions(0) {}
 
     bool hasPermission(int perm) const {
         return (permissions & perm) != 0;
@@ -65,24 +70,24 @@ static int testsFailed = 0;
 void testTaskCreation() {
     std::printf("\n[Task Creation]\n");
 
-    Tasker tasker;
-    Task root = tasker.root();
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
 
     TEST("root is valid", root.valid());
     TEST("root id is 0", root.id() == 0);
     TEST("root has no parent (parentId == 0)", root.parentId() == 0);
-    TEST("taskCount starts at 1", tasker.taskCount() == 1);
+    TEST("taskCount starts at 1", Task::taskCount() == 1);
 
     Task child = root.spawn();
     TEST("child is valid", child.valid());
     TEST("child id is 1", child.id() == 1);
     TEST("child parentId is root", child.parentId() == 0);
-    TEST("taskCount is 2", tasker.taskCount() == 2);
+    TEST("taskCount is 2", Task::taskCount() == 2);
 
     Task grandchild = child.spawn();
     TEST("grandchild is valid", grandchild.valid());
     TEST("grandchild parentId is child", grandchild.parentId() == 1);
-    TEST("taskCount is 3", tasker.taskCount() == 3);
+    TEST("taskCount is 3", Task::taskCount() == 3);
 
     TEST("root has 1 child", root.childCount() == 1);
     TEST("child has 1 child", child.childCount() == 1);
@@ -91,14 +96,13 @@ void testTaskCreation() {
 void testCustomTask() {
     std::printf("\n[CustomTask Subclassing]\n");
 
-    Tasker tasker;
-    Task root = tasker.root();
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
 
     // Create a CustomTask from a spawned task.
     Task base = root.spawn();
     CustomTask ct;
     ct._state = base._state;
-    ct._tasker = base._tasker;
     ct.permissions = 0;
     ct.role = "worker";
 
@@ -123,8 +127,8 @@ void testCustomTask() {
 void testIPC() {
     std::printf("\n[IPC]\n");
 
-    Tasker tasker;
-    Task root = tasker.root();
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
     Task sender = root.spawn();
     Task receiver = root.spawn();
 
@@ -145,8 +149,8 @@ void testIPC() {
 void testMemory() {
     std::printf("\n[Memory]\n");
 
-    Tasker tasker;
-    Task root = tasker.root();
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
     Task task = root.spawn();
 
     // Auto-alloc happens on start(), but we can manually alloc.
@@ -172,15 +176,15 @@ void testMemory() {
 void testMemoryAutoAlloc() {
     std::printf("\n[Memory Auto-Alloc]\n");
 
-    Tasker tasker;
-    Task root = tasker.root();
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
     Task task = root.spawn();
 
-    // Don't call alloc — start() should auto-allocate.
-    task.setEntry([](void*) {}, nullptr);
-    // Can't actually run (would need scheduler), but start() should
+    // Don't call alloc — resume() should auto-allocate.
+    task._state->entryFn = [](void*) {};
+    // Can't actually run (would need scheduler), but resume() should
     // allocate memory and context.
-    task.start();
+    task.resume();
 
     TEST("auto-alloc created region", task._state->regions.size() > 0);
     TEST("auto-alloc size is 4KB", task._state->regions[0].size == 4096);
@@ -191,8 +195,8 @@ void testMemoryAutoAlloc() {
 void testScheduling() {
     std::printf("\n[Scheduling]\n");
 
-    Tasker tasker;
-    Task root = tasker.root();
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
 
     Task t1 = root.spawn();
     t1.setQuota(5000);
@@ -219,8 +223,8 @@ void testScheduling() {
 void testDestroy() {
     std::printf("\n[Destroy]\n");
 
-    Tasker tasker;
-    Task root = tasker.root();
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
 
     Task parent = root.spawn();
     Task child1 = parent.spawn();
@@ -231,21 +235,21 @@ void testDestroy() {
     usz child1Id = child1.id();
     usz grandchildId = grandchild.id();
 
-    TEST("4 tasks before destroy", tasker.taskCount() == 5); // root + 4
+    TEST("4 tasks before destroy", Task::taskCount() == 5); // root + 4
 
     // Destroy parent — should cascade to children and grandchildren.
     parent.destroy();
 
-    TEST("parent destroyed", tasker.findTask(parentId).valid() == false);
-    TEST("child1 destroyed", tasker.findTask(child1Id).valid() == false);
-    TEST("grandchild destroyed", tasker.findTask(grandchildId).valid() == false);
+    TEST("parent destroyed", Task::findTask(parentId).valid() == false);
+    TEST("child1 destroyed", Task::findTask(child1Id).valid() == false);
+    TEST("grandchild destroyed", Task::findTask(grandchildId).valid() == false);
 }
 
 void testLog() {
     std::printf("\n[Log]\n");
 
-    Tasker tasker;
-    Task root = tasker.root();
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
     Task task = root.spawn();
 
     task.log().push("output line 1");
@@ -259,25 +263,25 @@ void testLog() {
 void testFindTask() {
     std::printf("\n[FindTask]\n");
 
-    Tasker tasker;
-    Task root = tasker.root();
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
 
     Task t1 = root.spawn();
     Task t2 = root.spawn();
     Task t3 = root.spawn();
 
-    TEST("find root", tasker.findTask(0).valid());
-    TEST("find t1", tasker.findTask(t1.id()).id() == t1.id());
-    TEST("find t2", tasker.findTask(t2.id()).id() == t2.id());
-    TEST("find t3", tasker.findTask(t3.id()).id() == t3.id());
-    TEST("invalid id returns invalid", !tasker.findTask(999).valid());
+    TEST("find root", Task::findTask(0).valid());
+    TEST("find t1", Task::findTask(t1.id()).id() == t1.id());
+    TEST("find t2", Task::findTask(t2.id()).id() == t2.id());
+    TEST("find t3", Task::findTask(t3.id()).id() == t3.id());
+    TEST("invalid id returns invalid", !Task::findTask(999).valid());
 }
 
 void testSharing() {
     std::printf("\n[Sharing]\n");
 
-    Tasker tasker;
-    Task root = tasker.root();
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
 
     Task t1 = root.spawn();
     Task t2 = root.spawn();
@@ -297,12 +301,418 @@ void testSharing() {
     TEST("no duplicate shares", t1._state->sharedIds.size() == prevSize);
 }
 
+void testSharedQuota() {
+    std::printf("\n[Shared/Self Quota Block]\n");
+
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+    Task t1 = root.spawn();
+    Task t2 = root.spawn();
+
+    t1.setQuota(1000);
+    t2.setQuota(2000);
+
+    // Mock t1 as currently executing task.
+    xi_set_current_task(t1._state);
+
+    // t1 tries to change its own quota.
+    t1.setQuota(5000);
+    TEST("t1 cannot change its own quota", t1._state->quotaUs == 1000);
+
+    // t1 shares t2 (so t2 is shared with t1).
+    t1.share(t2);
+
+    // t1 tries to change t2's quota.
+    t2.setQuota(8000);
+    TEST("t1 cannot change quota of a shared task (t2)", t2._state->quotaUs == 2000);
+
+    // Clear mocked current task.
+    xi_set_current_task(nullptr);
+
+    // Now, without current task, we should be able to change quotas.
+    t1.setQuota(5000);
+    TEST("can change quota outside task context", t1._state->quotaUs == 5000);
+}
+
+void testSpoofPrevention() {
+    std::printf("\n[Spoof Prevention]\n");
+
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+    Task t1 = root.spawn();
+    Task t2 = root.spawn();
+    Task receiver = root.spawn();
+
+    // Mock t1 as currently executing.
+    xi_set_current_task(t1._state);
+
+    // Even if t2 calls send, the actual sender must be t1.
+    t2.send(receiver, "spoof attempt");
+
+    TEST("receiver inbox has 1 message", receiver.inbox().size() == 1);
+    TEST("message sender is actually t1 (the running task)", receiver.inbox()[0].senderId == t1.id());
+
+    xi_set_current_task(nullptr);
+}
+
+void testRefCountedMapping() {
+    std::printf("\n[Reference-Counted Memory Mapping]\n");
+
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+    
+    // Spawn task A and allocate memory in A.
+    Task taskA = root.spawn();
+    taskA.alloc(0x1000, 100);
+    u8* physA = taskA._state->regions[0].physical;
+    physA[0] = 0xAA;
+
+    // Spawn task B and map A's memory.
+    Task taskB = root.spawn();
+    taskB.share(taskA);
+    taskB.map(0x1000, 0x2000, 100);
+
+    // Verify mapping is working.
+    u8* physB = taskB._state->regions[0].physical;
+    TEST("mapping points to same physical memory", physB[0] == 0xAA);
+
+    TEST("tasker tracks 1 physical allocation", Task::_allocations.size() == 1);
+    TEST("refcount is initially 2 (owner + mapper)", Task::_allocations[0].refCount == 2);
+
+    // Destroy task A.
+    taskA.destroy();
+
+    // With reference counting, taskA's memory should still be alive because B is mapping it.
+    TEST("taskB's mapped pointer remains valid after A is destroyed", physB[0] == 0xAA);
+    TEST("tasker still tracks 1 physical allocation", Task::_allocations.size() == 1);
+    TEST("refcount is now 1 (mapper only)", Task::_allocations[0].refCount == 1);
+
+    // Destroy task B. Now the memory should be freed completely.
+    taskB.destroy();
+    TEST("tasker tracks 0 physical allocations after B is destroyed", Task::_allocations.size() == 0);
+}
+
+void testStarvationPrevention() {
+    std::printf("\n[Starvation Prevention]\n");
+
+    xi_reset_task_state_for_tests();
+    Task::enable<void>(0);
+
+    Task root = Task::root();
+
+    Task t1 = root.spawn();
+    t1.setQuota(5000);
+    t1.resume(); // Enqueues t1 on core 0
+
+    Task t2 = root.spawn();
+    t2.setQuota(1000);
+    t2.resume(); // Enqueues t2 on core 0
+
+    // Set remainingUs for t1 to 0 (simulating quota exhaustion).
+    t1._state->remainingUs = 0;
+    t2._state->remainingUs = 1000;
+
+    // Call pickNext. Since t1 is exhausted, it must pick t2, even though t1 has higher weight.
+    Task next = Task(Task::pickNext(0));
+    TEST("picks t2 because t1 is exhausted", next.id() == t2.id());
+
+    // Exhaust t2 as well.
+    t2._state->remainingUs = 0;
+
+    // Both are exhausted now. pickNext should reset the period, replenishing both.
+    next = Task(Task::pickNext(0));
+    TEST("resets period and picks highest weight (t1) again", next.id() == t1.id());
+    TEST("t1 remainingUs replenished", t1._state->remainingUs == 5000);
+    TEST("t2 remainingUs replenished", t2._state->remainingUs == 1000);
+}
+
+void testQuotaUnderflowSafety() {
+    std::printf("\n[Quota Underflow Safety]\n");
+
+    xi_reset_task_state_for_tests();
+    Task::enable<void>(0);
+
+    Task root = Task::root();
+    Task t1 = root.spawn();
+    t1.setQuota(0);
+    t1.resume(); // Enqueues t1. core.totalQuotaUs adds 0.
+
+    CoreState* core = Task::coreState(0);
+    TEST("initial totalQuotaUs is 0", core->totalQuotaUs == 0);
+
+    // Change quota while enqueued.
+    t1.setQuota(5000);
+    TEST("totalQuotaUs updated to 5000", core->totalQuotaUs == 5000);
+
+    // Destroy t1 to trigger dequeue.
+    t1.destroy();
+    TEST("totalQuotaUs is reset to 0 without underflow", core->totalQuotaUs == 0);
+}
+
+void testCoreControlPermissions() {
+    std::printf("\n[Core Control & Permissions via Task]\n");
+
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+    Task child = root.spawn();
+
+    // Verify root/kernel task can control cores.
+    root.enable(2);
+    TEST("root can enable core 2", Task::coreState(2) && Task::coreState(2)->enabled);
+
+    // Reset core 2
+    Task::disable<void>(2);
+
+    // Mock child task as currently running.
+    xi_set_current_task(child._state);
+
+    // Child tries to enable core 2.
+    child.enable(2);
+    TEST("child task cannot enable core", !Task::coreState(2) || !Task::coreState(2)->enabled);
+
+    // Child tries to disable core 0. Ensure core 0 is enabled under root context first.
+    xi_set_current_task(nullptr);
+    root.enable(0);
+    TEST("root enables core 0", Task::coreState(0)->enabled);
+
+    xi_set_current_task(child._state);
+    child.disable(0);
+    TEST("child task cannot disable core", Task::coreState(0)->enabled);
+
+    // Child tries to set frequency slider.
+    child.setFrequencySlider(0, 100, 200);
+    TEST("child cannot set frequency slider", Task::coreState(0)->minFreq == 0);
+
+    // Child tries to assign frequency callback.
+    bool callbackFired = false;
+    child.onChangeFrequency = [&](usz core, u32 freq) {
+        callbackFired = true;
+    };
+    // Root does it.
+    xi_set_current_task(nullptr);
+    root.onChangeFrequency = [&](usz core, u32 freq) {
+        callbackFired = true;
+    };
+    
+    // Simulate frequency proposal trigger.
+    if (Task::root().onChangeFrequency) {
+        Task::root().onChangeFrequency(0, 150);
+    }
+    TEST("root assigned frequency callback fires", callbackFired);
+
+    xi_set_current_task(nullptr);
+}
+
+static bool jumpRan = false;
+static void jumpedFunction(int val) {
+    jumpRan = (val == 42);
+}
+
+void testTaskJump() {
+    std::printf("\n[Task Jump]\n");
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+    Task child = root.spawn();
+    child.alloc(0x1000, 4096);
+    
+    jumpRan = false;
+    Task::enable<void>(0);
+    child.jump(jumpedFunction, 42); // Auto-starts
+    
+    for (int i = 0; i < 5; ++i) {
+        Task::yield<void>();
+    }
+    
+    TEST("child successfully executed jumped function", jumpRan);
+}
+
+static bool waitRan = false;
+static void waitTarget(int val) {
+    waitRan = (val == 100);
+}
+static void waitStarter(void* arg) {
+    Task::current().wait(waitTarget, 100);
+}
+
+void testTaskWaitAndWake() {
+    std::printf("\n[Task Wait & Message Wake]\n");
+    xi_reset_task_state_for_tests();
+    Task::enable<void>(0);
+    Task root = Task::root();
+    Task child = root.spawn(waitStarter, nullptr); // Auto-starts
+    
+    Task::yield<void>();
+    TEST("child is paused (waiting)", child._state->status == TaskStatus::Paused);
+    TEST("child is flagged as waiting for message", child._state->isWaitingForMessage);
+    
+    waitRan = false;
+    root.send(child, "Wake up!");
+    
+    TEST("child woke up and is Ready", child._state->status == TaskStatus::Ready);
+    TEST("child is no longer flagged as waiting", !child._state->isWaitingForMessage);
+    
+    Task::yield<void>(0);
+    TEST("child ran the wait-jump function", waitRan);
+}
+
+void testOwnershipWakeChecks() {
+    std::printf("\n[Ownership and Wake Authorization]\n");
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+    Task parent1 = root.spawn();
+    Task parent2 = root.spawn();
+    Task child = parent1.spawn();
+    
+    xi_set_current_task(parent2._state);
+    
+    child.resume();
+    TEST("unauthorized start() does not make child Ready", child._state->status == TaskStatus::Created);
+    
+    child.jump(jumpedFunction, 10);
+    TEST("unauthorized jump() does not run jumped function", !jumpRan || child._state->status == TaskStatus::Created);
+    
+    xi_set_current_task(nullptr);
+    
+    xi_set_current_task(parent1._state);
+    child.resume();
+    TEST("authorized start() makes child Ready", child._state->status == TaskStatus::Ready);
+    
+    xi_set_current_task(nullptr);
+}
+
+void testNormalMessageNoWake() {
+    std::printf("\n[Normal Message No Wake]\n");
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+    Task child = root.spawn();
+    child.resume();
+    
+    child.stop();
+    TEST("child is paused", child._state->status == TaskStatus::Paused);
+    TEST("child is not waiting for message", !child._state->isWaitingForMessage);
+    
+    root.send(child, "regular message");
+    
+    TEST("regular message does not wake child", child._state->status == TaskStatus::Paused);
+}
+
+static bool spawnOverloadFn1Ran = false;
+static void spawnOverloadFn1(int val) {
+    spawnOverloadFn1Ran = (val == 42);
+}
+
+static bool spawnOverloadFn2Ran = false;
+static void spawnOverloadFn2(int val) {
+    spawnOverloadFn2Ran = (val == 100);
+}
+
+void testSpawnOverloads() {
+    std::printf("\n[Spawn Overloads]\n");
+    xi_reset_task_state_for_tests();
+    Task::enable<void>(0);
+    Task root = Task::root();
+
+    spawnOverloadFn1Ran = false;
+    spawnOverloadFn2Ran = false;
+
+    // Test member spawn(Fn, Args...)
+    Task child1 = root.spawn(spawnOverloadFn1, 42);
+    TEST("member spawn created valid task", child1.valid());
+    TEST("member spawn task status is Ready", child1.status() == TaskStatus::Ready);
+
+    // Test global spawn(Fn, Args...)
+    Task child2 = ::spawn(spawnOverloadFn2, 100);
+    TEST("static spawn created valid task", child2.valid());
+    TEST("static spawn task status is Ready", child2.status() == TaskStatus::Ready);
+
+    // Run scheduler to execute them
+    for (int i = 0; i < 5; ++i) {
+        Task::yield<void>();
+    }
+
+    TEST("member spawn task executed", spawnOverloadFn1Ran);
+    TEST("static spawn task executed", spawnOverloadFn2Ran);
+}
+
+void testUnmapIsolation() {
+    std::printf("\n[Unmap Full Isolation]\n");
+
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+
+    Task task = root.spawn();
+    task.alloc(0x1000, 256);
+    task.alloc(0x2000, 512);
+
+    TEST("task has 2 regions before unmap()", task._state->regions.size() == 2);
+    TEST("task is not isolated initially", !task._state->isIsolated);
+
+    // Set an onFetch callback.
+    bool fetchSet = false;
+    task.setOnFetch([&](usz dest, usz length) { fetchSet = true; });
+    TEST("onFetch callback set", (bool)task._state->onFetch);
+
+    // Full isolation unmap.
+    task.unmap();
+
+    TEST("all regions removed", task._state->regions.size() == 0);
+    TEST("translations cleared", task._state->translations.size() == 0);
+    TEST("onFetch cleared", !(bool)task._state->onFetch);
+    TEST("task is now isolated", task._state->isIsolated);
+}
+
+void testSelfMapPrevention() {
+    std::printf("\n[Self Map Prevention]\n");
+
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+
+    Task task = root.spawn();
+    task.alloc(0x1000, 256);
+
+    // Mock task as currently executing.
+    xi_set_current_task(task._state);
+
+    // Task tries to map memory for itself — should be blocked.
+    usz regCountBefore = task._state->regions.size();
+    task.map(0x1000, 0x3000, 100);
+    TEST("self map is blocked", task._state->regions.size() == regCountBefore);
+
+    xi_set_current_task(nullptr);
+
+    // Parent (root) should be able to map for the child.
+    root.alloc(0x5000, 256);
+    task.share(root);
+    task.map(0x5000, 0x4000, 100);
+    TEST("parent can map for child", task._state->regions.size() == regCountBefore + 1);
+}
+
+void testIsolatedTaskContainment() {
+    std::printf("\n[Isolated Task Containment]\n");
+
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+
+    Task task = root.spawn();
+    task.alloc(0x1000, 256);
+
+    // Isolate the task.
+    task.unmap();
+    TEST("task is isolated", task._state->isIsolated);
+    TEST("no regions after isolation", task._state->regions.size() == 0);
+
+    // Parent can still allocate new memory for the isolated task.
+    task.alloc(0, 1024);
+    TEST("parent can alloc for isolated task", task._state->regions.size() == 1);
+    TEST("new region starts at 0", task._state->regions[0].base == 0);
+}
+
 // -------------------------------------------------------------------------
 // Main
 // -------------------------------------------------------------------------
 
 int main() {
-    std::printf("=== Tasker Functional Tests ===\n");
+    std::printf("=== Task Functional Tests ===\n");
 
     testTaskCreation();
     testCustomTask();
@@ -314,6 +724,20 @@ int main() {
     testLog();
     testFindTask();
     testSharing();
+    testSharedQuota();
+    testSpoofPrevention();
+    testRefCountedMapping();
+    testStarvationPrevention();
+    testQuotaUnderflowSafety();
+    testCoreControlPermissions();
+    testTaskJump();
+    testTaskWaitAndWake();
+    testOwnershipWakeChecks();
+    testNormalMessageNoWake();
+    testSpawnOverloads();
+    testUnmapIsolation();
+    testSelfMapPrevention();
+    testIsolatedTaskContainment();
 
     std::printf("\n=== Results: %d passed, %d failed ===\n",
                 testsPassed, testsFailed);

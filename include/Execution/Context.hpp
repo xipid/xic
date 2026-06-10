@@ -1,6 +1,6 @@
 /**
  * @file Context.hpp
- * @brief Portable context switch interface for the Tasker subsystem.
+ * @brief Portable context switch interface for the Task subsystem.
  *
  * Each architecture provides its own TaskContext layout and
  * xi_context_switch / xi_context_init implementations in assembly.

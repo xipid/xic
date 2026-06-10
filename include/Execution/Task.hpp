@@ -1,6 +1,6 @@
 /**
  * @file Task.hpp
- * @brief Task abstraction — the fundamental unit of execution in Tasker.
+ * @brief Task abstraction — the fundamental unit of execution in the Task subsystem.
  *
  * A Task unifies processes, threads, and functions under a single concept.
  * Tasks form a parent-child tree. Each task has its own inbox (IPC),
@@ -21,6 +21,7 @@
 #include "../Xi/Func.hpp"
 #include "AOT.hpp"
 #include "Context.hpp"
+#include <cstdlib>
 
 /// Default memory allocation for a task if alloc() is not called before start().
 static constexpr usz XI_DEFAULT_TASK_MEM = 4096;
@@ -30,7 +31,12 @@ namespace Execution {
 using namespace Xi;
 using namespace Collection;
 
-class Tasker; // Forward declaration.
+struct TaskState;
+
+// Thread-local current task accessors (defined in Task.cpp)
+TaskState* xi_get_current_task();
+void xi_set_current_task(TaskState* s);
+bool xi_validate_context_before_switch(TaskState* state);
 
 // -------------------------------------------------------------------------
 // Supporting Structures
@@ -88,7 +94,7 @@ enum class TaskStatus : u8 {
 
 /**
  * @struct TaskState
- * @brief Internal state managed by the Tasker. Not exposed to user code.
+ * @brief Internal state managed by Task. Not exposed to user code.
  */
 struct TaskState {
     usz id;
@@ -129,13 +135,45 @@ struct TaskState {
     // Entry point for raw tasks
     void (*entryFn)(void*);
     void* entryArg;
+    bool isWaitingForMessage;
+    bool isIsolated;        ///< If true, task is memory-isolated (sees own address space from 0).
+
+    struct InstructionHook {
+        String name;
+        Func<void()> callback;
+        bool banned;
+    };
+    Array<InstructionHook> instructionHooks;
 
     TaskState()
         : id(0), parentId(0), status(TaskStatus::Created),
           context{}, quotaUs(0), remainingUs(0), sleepUntilUs(0),
           pinnedCore(0), isPinned(false), currentCore(0),
           stack(nullptr), stackSize(0), stackOwned(false),
+          isWaitingForMessage(false), isIsolated(false),
           entryFn(nullptr), entryArg(nullptr) {}
+};
+
+/**
+ * @struct CoreState
+ * @brief Per-core scheduling state.
+ */
+struct CoreState {
+    usz id;                     ///< Core ID.
+    bool enabled;               ///< Whether this core is managed by Task.
+    u32 minFreq;                ///< Minimum proposed frequency (Hz). 0 = no control.
+    u32 maxFreq;                ///< Maximum proposed frequency (Hz). 0 = no control.
+    u32 currentProposedFreq;    ///< Last proposed frequency.
+    Array<usz> runQueue;        ///< Task IDs in the run queue for this core.
+    usz currentTaskId;          ///< ID of the currently executing task (0 = idle).
+    usz runQueueIndex;          ///< Current position in round-robin.
+    u64 totalQuotaUs;           ///< Sum of quotas of all tasks on this core.
+    TaskContext idleContext;    ///< Context to return to when no tasks are ready.
+
+    CoreState()
+        : id(0), enabled(false), minFreq(0), maxFreq(0),
+          currentProposedFreq(0), currentTaskId(0), runQueueIndex(0),
+          totalQuotaUs(0), idleContext{} {}
 };
 
 // -------------------------------------------------------------------------
@@ -149,16 +187,65 @@ struct TaskState {
  * A Task is a lightweight handle (pointer to internal TaskState).
  * Copying a Task copies the handle, not the task itself.
  *
- * Tasks are always created through Tasker or via an existing Task's
+ * Tasks are always created via Task::root() or via an existing Task's
  * spawn()/async() methods.
  */
 class XI_EXPORT Task {
 public:
-    TaskState* _state;  ///< Internal state (public for Tasker access).
-    Tasker* _tasker;    ///< Owning Tasker instance.
+    TaskState* _state;  ///< Internal state.
 
-    Task() : _state(nullptr), _tasker(nullptr) {}
-    Task(TaskState* state, Tasker* tasker) : _state(state), _tasker(tasker) {}
+    // Global Scheduling State (Static)
+    static Array<TaskState*> _tasks;
+    static Array<CoreState> _cores;
+    static usz _nextTaskId;
+    static u64 _schedulePeriodUs;
+    static u32 _interruptIntervalUs;
+    static Func<void(usz, u32)> _onChangeFrequency;
+    static Task* instance;
+    
+    struct PhysicalAllocation {
+        u8* ptr;
+        usz size;
+        usz refCount;
+    };
+    static Array<PhysicalAllocation> _allocations;
+
+    static void ensureInitialized();
+    static Task root();
+    static Task findTask(usz id);
+    static usz taskCount();
+
+    static void registerAllocation(u8* ptr, usz size);
+    static void retainAllocation(u8* ptr);
+    static void releaseAllocation(u8* ptr);
+
+    static TaskState* allocTask(usz parentId);
+    static void enqueue(usz taskId);
+    static void dequeue(usz taskId);
+    static void destroyTask(usz taskId);
+    static CoreState* coreState(usz coreId);
+    static TaskState* currentTask(usz coreId);
+    static TaskState* pickNext(usz coreId);
+    static void proposeFrequency(usz coreId);
+    static usz assignCore(usz taskId);
+    static void resetPeriod(usz coreId);
+
+    struct OnChangeFrequencyProxy {
+        Task* parent;
+        void operator=(Func<void(usz, u32)> cb);
+        operator bool() const;
+        void operator()(usz coreId, u32 proposedFreq) const;
+    };
+    OnChangeFrequencyProxy onChangeFrequency;
+
+    Task() : _state(nullptr), onChangeFrequency{this} {}
+    Task(TaskState* state) : _state(state), onChangeFrequency{this} {}
+    Task(const Task& other) : _state(other._state), onChangeFrequency{this} {}
+    Task(Task&& other) noexcept : _state(other._state), onChangeFrequency{this} {}
+    Task& operator=(const Task& other) {
+        _state = other._state;
+        return *this;
+    }
     ~Task() = default;
 
     // -- Identity --
@@ -175,10 +262,37 @@ public:
     }
 
     /** @brief Returns true if the task handle is valid. */
-    bool valid() const { return _state != nullptr && _tasker != nullptr; }
+    bool valid() const { return _state != nullptr; }
+
+    /** @brief Dynamic helper returning active stack size or querying mapped regions. */
+    usz getStackSize() const {
+        if (!_state) return 0;
+        if (_state->stackSize > 0) return _state->stackSize;
+        usz maxReg = 0;
+        for (usz i = 0; i < _state->regions.size(); ++i) {
+            if (_state->regions[i].size > maxReg) {
+                maxReg = _state->regions[i].size;
+            }
+        }
+        return maxReg > 0 ? maxReg : XI_DEFAULT_TASK_MEM;
+    }
 
     /** @brief Returns a handle to the currently executing task on this core. */
     static Task current();
+
+    // -- Core Management --
+    void enable(usz coreId);
+    void disable(usz coreId);
+    void setFrequencySlider(usz coreId, u32 minFreq, u32 maxFreq);
+
+    template <typename Dummy = void>
+    static void enable(usz coreId) { current().enable(coreId); }
+    template <typename Dummy = void>
+    static void disable(usz coreId) { current().disable(coreId); }
+    template <typename Dummy = void>
+    static void setFrequencySlider(usz coreId, u32 minFreq, u32 maxFreq) {
+        current().setFrequencySlider(coreId, minFreq, maxFreq);
+    }
 
     // -- Core Affinity --
 
@@ -201,6 +315,21 @@ public:
     Task spawn();
 
     /**
+     * @brief Spawns a child task under this task, initializing it to execute fn(args...).
+     *        The task is automatically started/enqueued.
+     */
+    template <typename Fn, typename... Args>
+    Task spawn(Fn fn, Args... args) {
+        Task child = spawn();
+        if (child.valid()) {
+            child.jump(fn, args...);
+        }
+        return child;
+    }
+
+
+
+    /**
      * @brief Spawns a child task wrapping a C++ function.
      *
      * The wrapper:
@@ -211,12 +340,16 @@ public:
     template <typename Fn, typename... Args>
     Task async(Fn fn, Args... args);
 
-    /**
-     * @brief Sets the entry point for a raw (non-async) task.
-     *
-     * The entry function receives a void* argument and runs until return.
-     */
-    void setEntry(void (*fn)(void*), void* arg);
+    template <typename Fn, typename... Args>
+    void jump(Fn fn, Args... args);
+
+    template <typename Fn, typename... Args>
+    void wait(Fn fn, Args... args);
+
+    void jump(void (*fn)(void*), void* arg = nullptr);
+    void wait(void (*fn)(void*), void* arg = nullptr);
+    void wait();
+    void wait(usz addr);
 
     /**
      * @brief Starts or resumes execution.
@@ -225,7 +358,7 @@ public:
      * XI_DEFAULT_TASK_MEM (4KB) at virtual address 0 for the task to use
      * as stack, heap, or however it sees fit.
      */
-    void start();
+    void resume();
 
     /** @brief Pauses execution indefinitely (cooperative yield). */
     void stop();
@@ -238,6 +371,15 @@ public:
 
     /** @brief Destroys this task and all its children. Frees all memory. */
     void destroy();
+
+    /** @brief Cooperatively yields execution time on the specified core. */
+    void yield(usz coreId = 0);
+
+    /** @brief Hook an instruction execution. */
+    void onInstruction(const String& instruction, Func<void()> callback);
+
+    /** @brief Ban an instruction and remove callback. */
+    void offInstruction(const String& instruction);
 
     // -- Memory --
 
@@ -256,11 +398,22 @@ public:
 
     /**
      * @brief Maps existing physical memory from `source` to `dest`.
+     *
+     * When a parent maps memory for a child, it maps from the caller's
+     * (parent's) own memory, not from arbitrary/top memory.
+     * A task cannot map memory for itself (Task::current() == self is blocked).
      */
-    void mmap(usz source, usz dest, usz length);
+    void map(usz source, usz dest, usz length);
 
     /** @brief Unmaps a virtual region. */
     void unmap(usz dest, usz length);
+
+    /**
+     * @brief Removes all memory maps, memory handlers, and activates
+     *        memory isolation. The task sees its own address space from 0.
+     *        After this call, the task must never escape its container.
+     */
+    void unmap();
 
     // -- IPC --
 
@@ -318,7 +471,109 @@ public:
 
     /** @brief Returns a handle to the i-th child. */
     Task child(usz index);
+
+    // -- Static API (forwarding to current()) --
+    template <typename Dummy = void>
+    static void resume() { current().resume(); }
+
+    static void resume(Task t) { t.resume(); }
+
+    template <typename Dummy = void>
+    static void stop() { current().stop(); }
+
+    template <typename Dummy = void>
+    static void stop(u64 us) { current().stop(us); }
+
+    template <typename Dummy = void>
+    static void destroy() { current().destroy(); }
+
+    template <typename Dummy = void>
+    static void translate(const MemoryTranslation& mt) { current().translate(mt); }
+    template <typename Dummy = void>
+    static void copy(usz source, usz dest, usz length) { current().copy(source, dest, length); }
+    template <typename Dummy = void>
+    static void alloc(usz dest, usz length) { current().alloc(dest, length); }
+    template <typename Dummy = void>
+    static void map(usz source, usz dest, usz length) { current().map(source, dest, length); }
+    template <typename Dummy = void>
+    static void unmap(usz dest, usz length) { current().unmap(dest, length); }
+    template <typename Dummy = void>
+    static void unmap() { current().unmap(); }
+    template <typename Dummy = void>
+    static void send(Task& receiver, const String& payload) { current().send(receiver, payload); }
+    template <typename Dummy = void>
+    static void share(Task& taskObj) { current().share(taskObj); }
+    template <typename Dummy = void>
+    static void setQuota(u64 us) { current().setQuota(us); }
+    template <typename Dummy = void>
+    static void setMemorySize(usz bytes) { current().setMemorySize(bytes); }
+    template <typename Dummy = void>
+    static void setOnFetch(Func<void(usz, usz)> cb) { current().setOnFetch(cb); }
+    template <typename Dummy = void>
+    static void onInstruction(const String& instruction, Func<void()> callback) {
+        current().onInstruction(instruction, callback);
+    }
+    template <typename Dummy = void>
+    static void offInstruction(const String& instruction) {
+        current().offInstruction(instruction);
+    }
+    template <typename Dummy = void>
+    static void setPin(usz coreId) { current().setPin(coreId); }
+    template <typename Dummy = void>
+    static void clearPin() { current().clearPin(); }
+
+    template <typename Dummy = void>
+    static Task spawn() { return current().spawn(); }
+
+
+    template <typename Dummy = void>
+    static void jump(void (*fn)(void*), void* arg = nullptr) {
+        current().jump(fn, arg);
+    }
+
+    template <typename Dummy = void>
+    static void wait(void (*fn)(void*), void* arg = nullptr) {
+        current().wait(fn, arg);
+    }
+
+    template <typename Dummy = void>
+    static void wait() {
+        current().wait();
+    }
+
+    template <typename Dummy = void>
+    static void wait(usz addr) {
+        current().wait(addr);
+    }
+
+    template <typename Dummy = void>
+    static void jump(usz addr) {
+        current().jump(addr);
+    }
+
+    template <typename Dummy = void>
+    static void yield(usz coreId = 0) {
+        current().yield(coreId);
+    }
+
+    template <typename Dummy = void>
+    static usz childCount() { return current().childCount(); }
+
+    template <typename Dummy = void>
+    static Task child(usz index) { return current().child(index); }
+
+    template <typename Dummy = void> static usz id() { return current().id(); }
+    template <typename Dummy = void> static usz parentId() { return current().parentId(); }
+    template <typename Dummy = void> static TaskStatus status() { return current().status(); }
+    template <typename Dummy = void> static bool valid() { return current().valid(); }
+    template <typename Dummy = void> static bool isPinned() { return current().isPinned(); }
+
+private:
+    static void reset();
+    friend void xi_reset_task_state_for_tests();
 };
+
+
 
 // -------------------------------------------------------------------------
 // async() Implementation
@@ -328,6 +583,20 @@ public:
  * @brief Internal wrapper used by Task::async to bridge C++ functions
  *        into the task entry point convention.
  */
+struct TaskTrampoline {
+    virtual ~TaskTrampoline() = default;
+    virtual void run() = 0;
+};
+
+template <typename Lambda>
+struct TaskTrampolineImpl : public TaskTrampoline {
+    Lambda lambda;
+    TaskTrampolineImpl(Lambda&& l) : lambda(Xi::Move(l)) {}
+    void run() override {
+        lambda();
+    }
+};
+
 template <typename Fn, typename... Args>
 struct AsyncWrapper {
     Fn fn;
@@ -366,6 +635,155 @@ Task Task::async(Fn fn, Args... args) {
     return child;
 }
 
+template <typename Fn, typename... Args>
+void Task::jump(Fn fn, Args... args) {
+    if (!_state) return;
+
+    Task caller = Task::current();
+    if (caller.valid()) {
+        if (_state->id != caller.id() && _state->parentId != caller.id()) {
+            return; // Blocked: not self and not child.
+        }
+    }
+
+    if (_state->status == TaskStatus::Running && (!caller.valid() || _state->id != caller.id())) {
+        _state->status = TaskStatus::Paused;
+        while (_state->status == TaskStatus::Running) {
+            if (caller.valid()) {
+                Task::current().yield(caller._state->currentCore);
+            }
+        }
+    }
+
+    if (!_state->stack) {
+        usz stackSz = getStackSize();
+        _state->stack = new u8[stackSz];
+        _state->stackSize = stackSz;
+        _state->stackOwned = true;
+    }
+
+    auto lambda = [fn, args...]() {
+        fn(args...);
+    };
+
+    using Impl = TaskTrampolineImpl<decltype(lambda)>;
+    auto* trampoline = new Impl(Xi::Move(lambda));
+
+    _state->entryFn = [](void* arg) {
+        auto* tramp = static_cast<TaskTrampoline*>(arg);
+        tramp->run();
+        delete tramp;
+    };
+    _state->entryArg = trampoline;
+
+    xi_context_init(&_state->context, _state->entryFn, _state->entryArg, _state->stack, _state->stackSize);
+
+    if (caller.valid() && _state->id == caller.id()) {
+        if (!xi_validate_context_before_switch(_state)) {
+            std::abort();
+        }
+        _state->status = TaskStatus::Running;
+        TaskContext dummyContext;
+        xi_context_switch(&dummyContext, &_state->context);
+    } else {
+        _state->status = TaskStatus::Ready;
+        Task::enqueue(_state->id);
+    }
+}
+
+template <typename Fn, typename... Args>
+void Task::wait(Fn fn, Args... args) {
+    if (!_state) return;
+
+    Task caller = Task::current();
+    if (caller.valid()) {
+        if (_state->id != caller.id() && _state->parentId != caller.id()) {
+            return; // Blocked: not self and not child.
+        }
+    }
+
+    if (_state->status == TaskStatus::Running && (!caller.valid() || _state->id != caller.id())) {
+        _state->status = TaskStatus::Paused;
+        while (_state->status == TaskStatus::Running) {
+            if (caller.valid()) {
+                Task::current().yield(caller._state->currentCore);
+            }
+        }
+    }
+
+    if (!_state->stack) {
+        usz stackSz = getStackSize();
+        _state->stack = new u8[stackSz];
+        _state->stackSize = stackSz;
+        _state->stackOwned = true;
+    }
+
+    auto lambda = [fn, args...]() {
+        fn(args...);
+    };
+
+    using Impl = TaskTrampolineImpl<decltype(lambda)>;
+    auto* trampoline = new Impl(Xi::Move(lambda));
+
+    _state->entryFn = [](void* arg) {
+        auto* tramp = static_cast<TaskTrampoline*>(arg);
+        tramp->run();
+        delete tramp;
+    };
+    _state->entryArg = trampoline;
+
+    xi_context_init(&_state->context, _state->entryFn, _state->entryArg, _state->stack, _state->stackSize);
+
+    if (caller.valid() && _state->id == caller.id()) {
+        _state->isWaitingForMessage = true;
+        _state->status = TaskStatus::Paused;
+        usz coreId = _state->currentCore;
+        if (coreId < Task::_cores.size()) {
+            CoreState& core = Task::_cores[coreId];
+            TaskState* next = Task::pickNext(coreId);
+            if (!next && Task::_tasks.size() > 0 && Task::_tasks[0]) {
+                next = Task::_tasks[0];
+            }
+            if (next) {
+                if (!xi_validate_context_before_switch(next)) {
+                    next->status = TaskStatus::Destroyed;
+                    core.currentTaskId = 0;
+                    xi_set_current_task(nullptr);
+                    TaskContext dummyContext;
+                    xi_context_switch(&dummyContext, &core.idleContext);
+                } else {
+                    next->status = TaskStatus::Running;
+                    core.currentTaskId = next->id;
+                    xi_set_current_task(next);
+                    TaskContext dummyContext;
+                    xi_context_switch(&dummyContext, &next->context);
+                }
+            } else {
+                core.currentTaskId = 0;
+                xi_set_current_task(nullptr);
+                TaskContext dummyContext;
+                xi_context_switch(&dummyContext, &core.idleContext);
+            }
+        }
+    } else {
+        _state->isWaitingForMessage = true;
+        _state->status = TaskStatus::Paused;
+    }
+}
+
 } // namespace Execution
+
+/**
+ * @brief Spawns a task under the currently executing task (or root if none),
+ *        initializing it to execute fn(args...). Auto-starts.
+ */
+template <typename Fn, typename... Args>
+Execution::Task spawn(Fn fn, Args... args) {
+    Execution::Task parent = Execution::Task::current();
+    if (!parent.valid()) {
+        parent = Execution::Task::root();
+    }
+    return parent.spawn(fn, args...);
+}
 
 #endif // XI_EXECUTION_TASK_HPP

@@ -3,7 +3,7 @@
  * @brief Linux x86_64 timer interrupt implementation using POSIX timers.
  *
  * Uses timer_create(CLOCK_MONOTONIC) with SIGALRM to drive periodic
- * preemption ticks. The signal handler invokes Tasker::instance->interrupts()
+ * preemption ticks. The signal handler invokes Task::yield()
  * to perform context switching and scheduling decisions.
  *
  * Platform functions:
@@ -16,7 +16,7 @@
 #if defined(__x86_64__) || defined(_M_X64)
 
 #include "../../../include/Execution/Interrupt.hpp"
-#include "../../../include/Execution/Tasker.hpp"
+#include "../../../include/Execution/Task.hpp"
 
 #include <csignal>
 #include <cstring>
@@ -44,10 +44,10 @@ static bool s_timerActive[kMaxCores] = {};
 // -------------------------------------------------------------------------
 
 /**
- * @brief SIGALRM handler that dispatches to Tasker::interrupts.
+ * @brief SIGALRM handler that dispatches to Task::yield.
  *
  * The signal is delivered with si_value.sival_int set to the core ID
- * that created the timer. We forward this to the Tasker instance
+ * that created the timer. We forward this to the Task instance
  * for scheduling decisions.
  *
  * Note: On Linux, POSIX timer signals are delivered to the thread that
@@ -58,7 +58,7 @@ static bool s_timerActive[kMaxCores] = {};
 static void xi_timer_signal_handler(int sig, siginfo_t* info, void* /* ucontext */) {
     (void)sig;
 
-    if (!Tasker::instance) {
+    if (!Task::instance) {
         return;
     }
 
@@ -68,7 +68,7 @@ static void xi_timer_signal_handler(int sig, siginfo_t* info, void* /* ucontext 
         coreId = static_cast<usz>(info->si_value.sival_int);
     }
 
-    Tasker::instance->interrupts(coreId);
+    Task::current().yield(coreId);
 }
 
 // -------------------------------------------------------------------------

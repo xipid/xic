@@ -2,6 +2,9 @@
 
 The **Execution::Routine** module provides a high-performance coroutine and task scheduling system. It allows you to write asynchronous logic that looks and feels like synchronous code, without the heavy overhead of OS-level threads.
 
+> [!NOTE]
+> In the current version of the `xic` codebase, cooperative execution and sandboxed scheduling are fully unified and implemented under the [Execution::Task](Tasks.md) module. The `Routine` concepts documented here represent the high-level coroutine design, while `Task` provides the concrete stackful, SFI-isolated, and quota-governed execution environment.
+
 ---
 
 ## The Routine System

@@ -1,15 +1,15 @@
 /**
  * @file Interrupt_Xtensa.cpp
- * @brief ESP32 (Xtensa) timer interrupt implementation for Tasker.
+ * @brief ESP32 (Xtensa) timer interrupt implementation for the Task subsystem.
  *
  * Uses ESP-IDF's esp_timer API for periodic tick delivery.
- * The callback invokes Tasker::instance->interrupts() for scheduling.
+ * The callback invokes Task::yield() for scheduling.
  */
 
 #if defined(__XTENSA__)
 
 #include "../../../include/Execution/Interrupt.hpp"
-#include "../../../include/Execution/Tasker.hpp"
+#include "../../../include/Execution/Task.hpp"
 
 #if defined(ESP_PLATFORM)
 #include <esp_timer.h>
@@ -37,9 +37,9 @@ static bool s_timerActive[kMaxCores] = {};
 
 #if defined(ESP_PLATFORM)
 static void xi_timer_callback(void* arg) {
-    if (!Tasker::instance) return;
+    if (!Task::instance) return;
     usz coreId = reinterpret_cast<usz>(arg);
-    Tasker::instance->interrupts(coreId);
+    Task::current().yield(coreId);
 }
 #endif
 
