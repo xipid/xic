@@ -51,6 +51,7 @@
 
 * [🕹️ Peripheral Drivers](docs/9-Hardware/Sensors.md)
 * [🌎 Source of Truth](docs/9-Hardware/Spatial.md)
+* [🔌 Input Devices](docs/9-Hardware/Input.md)
 
 ## 🎨 Graphics & Engine
 

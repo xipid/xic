@@ -1,18 +1,18 @@
 # Window and Screen Management
 
-The **Graphics** module provides a high-level, vendor-neutral interface for creating OS windows and managing display screens. It abstracts the complexities of GLFW and Diligent Engine behind a simple `Device`-based architecture.
+The **Graphics** module provides a high-level, vendor-neutral interface for creating OS windows and managing display screens. It abstracts the complexities of GLFW and Diligent Engine behind a simple architecture.
 
 ---
 
 ## Requesting a Window
 
-Creating a native window is handled by the `requestWindow()` factory. This returns a standard xic `Device` that represents the application window.
+Creating a native window is handled by the `requestWindow()` factory. This returns a pointer to a `GLFWDiligentWindow` that represents the application window.
 
 ```cpp
 using namespace Graphics;
 
 // Create a native window (GLFW + Diligent Context)
-Device *win = requestWindow();
+GLFWDiligentWindow *win = requestWindow();
 
 // Main poll loop
 while (!win->shouldRelease) {
@@ -24,10 +24,10 @@ while (!win->shouldRelease) {
 
 ## Screen Configuration
 
-The `DeviceScreen` represents the drawable area of the window. You can retrieve it from the window device to configure titles, dimensions, and rendering hardware.
+The `Screen` class represents the drawable area of the window. You can retrieve it from the window device to configure titles, dimensions, and query the rendering hardware interface.
 
 ```cpp
-DeviceScreen *screen = win->screen();
+Screen *screen = win->screen();
 
 // Configuration
 screen->title = "Xi Universe Viewer";
@@ -35,14 +35,14 @@ screen->width = 1920;
 screen->height = 1080;
 
 // The Hardware Rendering Device (Diligent)
-IMemoryDevice *gpu = screen->renderingDevice;
+Xi::MemoryDevice *gpu = screen->gpu;
 ```
 
 ---
 
 ## The Screen Surface
 
-A critical component of the `DeviceScreen` is its `surface`. This is a pointer to the pixel data that will be presented to the display. By linking a camera's output surface to the screen's surface entry, you create a direct bridge from the 3D scene to the OS window.
+A critical component of the `Screen` is its `surface`. This is a pointer to a string (`Collection::String*`) containing the pixel data that will be presented to the display. By linking a camera's output surface to the screen's surface entry, you create a direct bridge from the 3D scene to the OS window.
 
 ```cpp
 // Direct linkage

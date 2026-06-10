@@ -67,5 +67,57 @@ while (true) {
 
 ---
 
+## Ground Station (GS) Interface
+
+For remote sensing and telemetry, the framework provides **SoftwareGS** and **HardwareGS** interfaces. These classes collect physical sensor inputs, perform mathematical state synchronization, and can register themselves as the global location provider.
+
+```cpp
+#include <Hardware/GS.hpp>
+using namespace Xi;
+
+// Create a hardware ground station
+HardwareGS gs;
+
+// Register physical sensors
+gs.mpus.push(myMpu);
+gs.dht.push(myDht);
+gs.setGPS(myGps);
+
+// Claim the global location singleton so that 'location' macro accesses this GS
+gs.take();
+
+while (true) {
+    gs.update(); // Polls sensors, runs Mahony fusion, updates global position
+    Xi::sleep(20);
+}
+```
+
+### SoftwareGS Reference
+
+* **Properties**:
+  * `bool gps`: True if GPS synchronization is active.
+  * `bool motion`: True if motion/inertial tracking is active.
+  * `bool enviro`: True if environmental sensing is active.
+* **Methods**:
+  * `bool gpsAvailable() const`: Returns true if a valid GPS signal is found.
+  * `bool motionAvailable() const`: Returns true if inertial data is available.
+  * `bool enviroAvailable() const`: Returns true if temp/humidity data is available.
+  * `virtual void update()`: Updates internal clocks and synchronizes telemetry.
+  * `void take()`: Assigns this ground station instance as the primary system location source of truth.
+
+### HardwareGS Reference
+
+Inherits from `SoftwareGS` and coordinates physical sensors.
+
+* **Properties**:
+  * `Collection::InlineArray<MPUDevice *> mpus`: Registered inertial measurement units.
+  * `Collection::InlineArray<DHTDevice *> dht`: Registered temperature and humidity sensors.
+  * `Collection::InlineArray<GPSDevice *> gpsList`: Registered GPS receivers.
+* **Methods**:
+  * `void setGPS(GPSDevice *g)`: Registers a GPS receiver.
+  * `void update() override`: Polls all connected sensors, runs a Mahony sensor fusion filter to compute orientation quaternions, converts orientation to Euler angles, syncs time, and averages environmental inputs.
+
+---
+
 > [!NOTE]
-> `HardwareSpatial` is designed to be fault-tolerant. If multiple MPUs are connected, it will automatically failover to a healthy sensor if the primary fails to provide noise or interrupts.
+> `HardwareSpatial` and `HardwareGS` are designed to be fault-tolerant. If multiple sensors of the same type are connected, they will automatically average reading values or failover to active sensors.

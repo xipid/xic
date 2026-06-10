@@ -17,7 +17,7 @@ Camera3 camera;
 camera.root = &mySceneRoot;
 
 // 2. Link to the hardware
-camera.device = screen->renderingDevice;
+camera.device = screen->gpu;
 
 // 3. Link to the output window
 screen->surface = &camera.surface;
