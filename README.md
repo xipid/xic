@@ -34,7 +34,7 @@ While the internals are optimized for the metal, the external API is designed fo
 | **Encoding** | Native high-speed YAML/JSON parsing and structured logging. |
 | **Hardware** | Standardized drivers for IMUs, GPS, and sensors with geodetic math. |
 | **Graphics** | Mesh-ready 3D rendering pipeline and window management. |
-| **Execution** | Stackless cooperative `Routines` and high-level `Process` management. |
+| **Execution** | Unified sandboxed `Tasks` and high-level `Process` management. |
 
 ---
 

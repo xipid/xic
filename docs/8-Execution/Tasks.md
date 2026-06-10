@@ -1,6 +1,6 @@
 # Unified Tasks
 
-The **Execution::Task** subsystem is the fundamental unit of execution in the `xic` kernel. It unifies the traditional, fragmented OS concepts of **processes**, **threads**, **coroutines (routines)**, and **functions** into a single, unified execution abstraction.
+The **Execution::Task** subsystem is the fundamental unit of execution in the `xic` kernel. It unifies the traditional, fragmented OS concepts of **processes**, **threads**, **coroutines**, and **functions** into a single, unified execution abstraction.
 
 By combining **Software Fault Isolation (SFI)** with **Ahead-of-Time (AOT)** binary rewriting and dynamic, demand-based scheduling, `Execution::Task` allows you to run isolated, sandboxed containers with the overhead and speed of user-space threads—even on bare-metal microcontrollers without physical Memory Management Units (MMUs).
 

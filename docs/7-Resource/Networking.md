@@ -75,6 +75,6 @@ server.listen(443);
 
 ## Best Practices
 
-1.  **Non-Blocking Logic**: All network bindings in xic are non-blocking by default. Use a routine or a main loop `update()` call to drive the network stack.
+1.  **Non-Blocking Logic**: All network bindings in xic are non-blocking by default. Use a task or a main loop `update()` call to drive the network stack.
 2.  **Filter Loopback**: In mesh networking scenarios, set `filterLoopback = true` to avoid processing your own broadcast traffic.
 3.  **Path Re-use**: Use the `Path` class to store remote endpoints. It is significantly more efficient than re-parsing strings for every `send()` call.
