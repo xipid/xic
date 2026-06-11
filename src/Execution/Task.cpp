@@ -125,8 +125,8 @@ bool xi_validate_context_before_switch(TaskState* state) {
     // Allow the task's entry function (set by the scheduler).
     if (state->entryFn) {
         u8* entryAddr = reinterpret_cast<u8*>(state->entryFn);
-        if (ipPtr >= entryAddr && ipPtr < entryAddr + 65536) {
-            return true; // Entry function range is valid.
+        if (ipPtr >= entryAddr && ipPtr < entryAddr + 256) {
+            return true; // Entry function range is valid (tight bound).
         }
     }
 
@@ -150,10 +150,45 @@ bool xi_validate_context_before_switch(TaskState* state) {
         }
     }
 
-    // For non-isolated tasks (inheriting parent memory), allow broader
-    // execution since they share the parent's address space.
+    // For non-isolated tasks, walk parent chain and check their regions.
     if (!state->isIsolated) {
-        return true; // Non-isolated tasks inherit parent execution context.
+        usz parentId = state->parentId;
+        while (parentId < Task::_tasks.size() && Task::_tasks[parentId]) {
+            TaskState* parent = Task::_tasks[parentId];
+            for (usz i = 0; i < parent->regions.size(); ++i) {
+                MemoryRegion& r = parent->regions[i];
+                if (r.physical && r.executable) {
+                    if (ipPtr >= r.physical && ipPtr < r.physical + r.size) {
+                        return true;
+                    }
+                }
+            }
+            for (usz i = 0; i < parent->aotCache.size(); ++i) {
+                AOTRegion& aot = parent->aotCache[i];
+                if (aot.patchedCode && ipPtr >= aot.patchedCode &&
+                    ipPtr < aot.patchedCode + aot.patchedSize) {
+                    return true;
+                }
+            }
+            // Allow parent's entry function too.
+            if (parent->entryFn) {
+                u8* parentEntry = reinterpret_cast<u8*>(parent->entryFn);
+                if (ipPtr >= parentEntry && ipPtr < parentEntry + 256) {
+                    return true;
+                }
+            }
+            if (parentId == parent->parentId) break; // root
+            parentId = parent->parentId;
+        }
+        // Also allow stack-based trampolines (the task runs on host stack).
+        if (state->stack && ipPtr >= state->stack &&
+            ipPtr < state->stack + state->stackSize) {
+            return true;
+        }
+        // Non-isolated C++ function tasks: allow the host code range.
+        // These are trusted tasks (the parent explicitly gave them a C++ function).
+        // The entry function + its entire compilation unit is accessible.
+        return true;
     }
 
     // Isolated task with IP outside all valid regions — violation.
@@ -215,10 +250,30 @@ Task Task::spawn() {
         }
     }
 
+    // Fork bomb protection: if parent has limited quota, check capacity.
+    u64 childQuota = _state->minChildQuotaUs;
+    if (_state->quotaUs > 0 && childQuota > 0) {
+        // Parent has limited quota — child quota is subtracted from parent capacity.
+        if (_state->childQuotaUsed + childQuota > _state->quotaUs) {
+            return child; // Blocked: parent quota exhausted by children.
+        }
+    }
+
     TaskState* cs = Task::allocTask(_state->id);
     if (!cs) return child;
 
     child._state = cs;
+
+    // Apply fork bomb protection: child gets minimum quota.
+    if (childQuota > 0) {
+        cs->quotaUs = childQuota;
+        if (_state->quotaUs > 0) {
+            _state->childQuotaUsed += childQuota;
+        }
+    }
+
+    // Inherit parent's minChildQuotaUs — cascading protection.
+    cs->minChildQuotaUs = _state->minChildQuotaUs;
 
     _state->childIds.push(cs->id);
 
@@ -300,269 +355,155 @@ void Task::stop(u64 us) {
     }
 }
 
-void Task::jump(usz addr) {
-    if (!_state) return;
-
-    Task caller = Task::current();
-    if (caller.valid()) {
-        if (_state->id != caller.id() && _state->parentId != caller.id()) {
-            return; // Blocked: not self and not child.
-        }
-    }
-
-    if (caller.valid() && _state->id == caller.id()) {
-        if (!_state->stack) {
-            usz stackSz = getStackSize();
-            _state->stack = new u8[stackSz];
-            _state->stackSize = stackSz;
-            _state->stackOwned = true;
-        }
-        xi_context_init(&_state->context, (void(*)(void*))addr, nullptr, _state->stack, _state->stackSize);
-        TaskContext dummyContext;
-        xi_context_switch_validated(&dummyContext, _state);
-        return;
-    }
-
-    if (!_state->stack) {
-        usz stackSz = getStackSize();
-        _state->stack = new u8[stackSz];
-        _state->stackSize = stackSz;
-        _state->stackOwned = true;
-    }
-
-    xi_context_init(&_state->context, (void(*)(void*))addr, nullptr, _state->stack, _state->stackSize);
-
-#if defined(__x86_64__) || defined(_M_X64)
-    _state->context.rip = (u64)addr;
-#else
-    _state->context.pc = (decltype(_state->context.pc))addr;
-#endif
-    // Invalidate AOT cache for this region — force re-AOT on next execution.
-    AOT::invalidate(_state->aotCache, addr, 0);
-
-    // Auto started: enqueue immediately!
-    _state->status = TaskStatus::Ready;
-    Task::enqueue(_state->id);
-}
-
-void Task::jump(void (*fn)(void*), void* arg) {
-    if (!_state) return;
-
-    Task caller = Task::current();
-    if (caller.valid()) {
-        if (_state->id != caller.id() && _state->parentId != caller.id()) {
-            return; // Blocked: not self and not child.
-        }
-    }
-
-    if (_state->status == TaskStatus::Running && (!caller.valid() || _state->id != caller.id())) {
-        _state->status = TaskStatus::Paused;
-        while (_state->status == TaskStatus::Running) {
-            if (caller.valid()) {
-                Task::current().yield(caller._state->currentCore);
+bool xi_is_task_dead_recursive(usz tid) {
+    if (tid >= Task::_tasks.size()) return true;
+    TaskState* ts = Task::_tasks[tid];
+    if (!ts) return true;
+    if (ts->status == TaskStatus::Finished || ts->status == TaskStatus::Destroyed) {
+        for (usz i = 0; i < ts->childIds.size(); ++i) {
+            if (!xi_is_task_dead_recursive(ts->childIds[i])) {
+                return false;
             }
         }
+        return true;
     }
+    return false;
+}
 
-    if (!_state->stack) {
-        usz stackSz = getStackSize();
-        _state->stack = new u8[stackSz];
-        _state->stackSize = stackSz;
-        _state->stackOwned = true;
-    }
-
-    _state->entryFn = fn;
-    _state->entryArg = arg;
-
-    xi_context_init(&_state->context, _state->entryFn, _state->entryArg, _state->stack, _state->stackSize);
-
-    if (caller.valid() && _state->id == caller.id()) {
-        _state->status = TaskStatus::Running;
-        TaskContext dummyContext;
-        xi_context_switch_validated(&dummyContext, _state);
+static bool xi_check_wait_dead_condition(TaskState* ts) {
+    if (!ts || ts->waitDeadTarget == 0) return false;
+    if (ts->waitDeadTarget == (usz)-2) {
+        for (usz i = 0; i < ts->childIds.size(); ++i) {
+            if (!xi_is_task_dead_recursive(ts->childIds[i])) {
+                return false;
+            }
+        }
+        return true;
+    } else if (ts->waitDeadTarget == (usz)-1) {
+        for (usz i = 1; i < Task::_tasks.size(); ++i) {
+            if (i == ts->id) continue;
+            if (Task::_tasks[i] && !xi_is_task_dead_recursive(i)) {
+                return false;
+            }
+        }
+        return true;
     } else {
-        _state->status = TaskStatus::Ready;
-        Task::enqueue(_state->id);
+        return xi_is_task_dead_recursive(ts->waitDeadTarget);
     }
 }
 
-void Task::wait(void (*fn)(void*), void* arg) {
+void Task::_execute_impl_raw(int mode, usz targetId, void (*fn)(void*), void* arg) {
     if (!_state) return;
 
     Task caller = Task::current();
+    bool insideTask = (xi_get_current_task() != nullptr);
+
     if (caller.valid()) {
         if (_state->id != caller.id() && _state->parentId != caller.id()) {
             return; // Blocked: not self and not child.
         }
     }
 
-    if (_state->status == TaskStatus::Running && (!caller.valid() || _state->id != caller.id())) {
+    if (_state->status == TaskStatus::Running && (!insideTask || _state->id != caller.id())) {
         _state->status = TaskStatus::Paused;
         while (_state->status == TaskStatus::Running) {
-            if (caller.valid()) {
+            if (insideTask) {
                 Task::current().yield(caller._state->currentCore);
             }
         }
     }
 
-    if (!_state->stack) {
+    if (!_state->stack && fn) {
         usz stackSz = getStackSize();
         _state->stack = new u8[stackSz];
         _state->stackSize = stackSz;
         _state->stackOwned = true;
     }
 
-    _state->entryFn = fn;
-    _state->entryArg = arg;
+    if (fn) {
+        _state->entryFn = fn;
+        _state->entryArg = arg;
+        xi_context_init(&_state->context, _state->entryFn, _state->entryArg, _state->stack, _state->stackSize);
+    }
 
-    xi_context_init(&_state->context, _state->entryFn, _state->entryArg, _state->stack, _state->stackSize);
-
-    if (caller.valid() && _state->id == caller.id()) {
+    if (mode == 1) {
         _state->isWaitingForMessage = true;
         _state->status = TaskStatus::Paused;
-        usz coreId = _state->currentCore;
-        if (coreId < Task::_cores.size()) {
-            CoreState& core = Task::_cores[coreId];
-            TaskState* next = Task::pickNext(coreId);
-            if (!next && Task::_tasks.size() > 0 && Task::_tasks[0]) {
-                next = Task::_tasks[0];
+    } else if (mode == 2) {
+        _state->waitDeadTarget = targetId;
+        _state->status = TaskStatus::Paused;
+    }
+
+    if (insideTask && _state->id == caller.id()) {
+        if (mode == 0) {
+            if (!xi_validate_context_before_switch(_state)) {
+                std::abort();
             }
-            if (next) {
-                if (!xi_validate_context_before_switch(next)) {
-                    next->status = TaskStatus::Destroyed;
-                    core.currentTaskId = 0;
-                    xi_set_current_task(nullptr);
-                    TaskContext dummyContext;
-                    xi_context_switch(&dummyContext, &core.idleContext);
-                } else {
-                    next->status = TaskStatus::Running;
-                    core.currentTaskId = next->id;
-                    xi_set_current_task(next);
-                    TaskContext dummyContext;
-                    xi_context_switch(&dummyContext, &next->context);
+            _state->status = TaskStatus::Running;
+            TaskContext dummyContext;
+            xi_context_switch(&dummyContext, &_state->context);
+        } else {
+            usz coreId = _state->currentCore;
+            if (coreId < Task::_cores.size()) {
+                CoreState& core = Task::_cores[coreId];
+                TaskState* next = Task::pickNext(coreId);
+                if (!next && Task::_tasks.size() > 0 && Task::_tasks[0]) {
+                    next = Task::_tasks[0];
                 }
-            } else {
-                core.currentTaskId = 0;
-                xi_set_current_task(nullptr);
-                TaskContext dummyContext;
-                xi_context_switch(&dummyContext, &core.idleContext);
-            }
-        }
-    } else {
-        _state->isWaitingForMessage = true;
-        _state->status = TaskStatus::Paused;
-    }
-}
-
-void Task::wait(usz addr) {
-    if (!_state) return;
-
-    Task caller = Task::current();
-    if (caller.valid()) {
-        if (_state->id != caller.id() && _state->parentId != caller.id()) {
-            return; // Blocked: not self and not child.
-        }
-    }
-
-    if (_state->status == TaskStatus::Running && (!caller.valid() || _state->id != caller.id())) {
-        _state->status = TaskStatus::Paused;
-        while (_state->status == TaskStatus::Running) {
-            if (caller.valid()) {
-                Task::current().yield(caller._state->currentCore);
-            }
-        }
-    }
-
-    _state->isWaitingForMessage = true;
-    _state->status = TaskStatus::Paused;
-
-#if defined(__x86_64__) || defined(_M_X64)
-    _state->context.rip = (u64)addr;
-#else
-    _state->context.pc = (decltype(_state->context.pc))addr;
-#endif
-    AOT::invalidate(_state->aotCache, addr, 0);
-
-    if (caller.valid() && _state->id == caller.id()) {
-        usz coreId = _state->currentCore;
-        if (coreId < Task::_cores.size()) {
-            CoreState& core = Task::_cores[coreId];
-            TaskState* next = Task::pickNext(coreId);
-            if (!next && Task::_tasks.size() > 0 && Task::_tasks[0]) {
-                next = Task::_tasks[0];
-            }
-            if (next) {
-                if (!xi_validate_context_before_switch(next)) {
-                    next->status = TaskStatus::Destroyed;
-                    core.currentTaskId = 0;
-                    xi_set_current_task(nullptr);
-                    TaskContext dummyContext;
-                    xi_context_switch(&dummyContext, &core.idleContext);
-                } else {
-                    next->status = TaskStatus::Running;
-                    core.currentTaskId = next->id;
-                    xi_set_current_task(next);
-                    if (!_state->stack) {
-                        usz stackSz = getStackSize();
-                        _state->stack = new u8[stackSz];
-                        _state->stackSize = stackSz;
-                        _state->stackOwned = true;
+                if (next) {
+                    if (!xi_validate_context_before_switch(next)) {
+                        next->status = TaskStatus::Destroyed;
+                        core.currentTaskId = 0;
+                        xi_set_current_task(nullptr);
+                        TaskContext dummyContext;
+                        xi_context_switch(&dummyContext, &core.idleContext);
+                    } else {
+                        next->status = TaskStatus::Running;
+                        core.currentTaskId = next->id;
+                        xi_set_current_task(next);
+                        TaskContext dummyContext;
+                        xi_context_switch(&dummyContext, &next->context);
                     }
-                    xi_context_init(&_state->context, (void(*)(void*))addr, nullptr, _state->stack, _state->stackSize);
+                } else {
+                    core.currentTaskId = 0;
+                    xi_set_current_task(nullptr);
                     TaskContext dummyContext;
-                    xi_context_switch(&dummyContext, &next->context);
+                    xi_context_switch(&dummyContext, &core.idleContext);
                 }
-            } else {
-                core.currentTaskId = 0;
-                xi_set_current_task(nullptr);
-                if (!_state->stack) {
-                    usz stackSz = getStackSize();
-                    _state->stack = new u8[stackSz];
-                    _state->stackSize = stackSz;
-                    _state->stackOwned = true;
-                }
-                xi_context_init(&_state->context, (void(*)(void*))addr, nullptr, _state->stack, _state->stackSize);
-                TaskContext dummyContext;
-                xi_context_switch(&dummyContext, &core.idleContext);
             }
         }
-    }
-}
-
-void Task::wait() {
-    if (!_state) return;
-
-    Task caller = Task::current();
-    if (caller.valid() && _state->id != caller.id()) {
-        return; // wait() without arguments can only be called on self
-    }
-
-    _state->isWaitingForMessage = true;
-    _state->status = TaskStatus::Paused;
-
-    usz coreId = _state->currentCore;
-    if (coreId < Task::_cores.size()) {
-        CoreState& core = Task::_cores[coreId];
-        TaskState* next = Task::pickNext(coreId);
-        if (!next && Task::_tasks.size() > 0 && Task::_tasks[0]) {
-            next = Task::_tasks[0];
+    } else {
+        if (mode == 0) {
+            _state->status = TaskStatus::Ready;
+            Task::enqueue(_state->id);
         }
-        if (next) {
-            if (!xi_validate_context_before_switch(next)) {
-                next->status = TaskStatus::Destroyed;
-                core.currentTaskId = 0;
-                xi_set_current_task(nullptr);
-                xi_context_switch(&_state->context, &core.idleContext);
-            } else {
-                next->status = TaskStatus::Running;
-                core.currentTaskId = next->id;
-                xi_set_current_task(next);
-                xi_context_switch(&_state->context, &next->context);
+    }
+
+    if (!insideTask && mode == 2) {
+        if (_state->id == 0) {
+            while (true) {
+                bool anyAlive = false;
+                for (usz i = 1; i < Task::_tasks.size(); ++i) {
+                    if (Task::_tasks[i] && Task::_tasks[i]->status != TaskStatus::Finished && Task::_tasks[i]->status != TaskStatus::Destroyed) {
+                        anyAlive = true;
+                        break;
+                    }
+                }
+                if (!anyAlive) break;
+                for (usz c = 0; c < Task::_cores.size(); ++c) {
+                    if (Task::_cores[c].enabled) {
+                        Task::yield(c);
+                    }
+                }
             }
         } else {
-            core.currentTaskId = 0;
-            xi_set_current_task(nullptr);
-            xi_context_switch(&_state->context, &core.idleContext);
+            while (!xi_is_task_dead_recursive(_state->id)) {
+                for (usz c = 0; c < Task::_cores.size(); ++c) {
+                    if (Task::_cores[c].enabled) {
+                        Task::yield(c);
+                    }
+                }
+            }
         }
     }
 }
@@ -646,7 +587,6 @@ void Task::alloc(usz dest, usz length) {
     }
 
     u8* mem = new u8[length];
-    // Zero-initialize.
     for (usz i = 0; i < length; ++i) mem[i] = 0;
 
     Task::registerAllocation(mem, length);
@@ -656,6 +596,31 @@ void Task::alloc(usz dest, usz length) {
     region.size = length;
     region.physical = mem;
     region.writable = true;
+    region.executable = false; // W^X: writable regions are NOT executable.
+    region.owned = true;
+
+    _state->regions.push(region);
+}
+
+void Task::allocExecutable(usz dest, usz length) {
+    if (!_state || length == 0) return;
+    Task caller = Task::current();
+    if (caller.valid() && caller.id() != 0) {
+        if (_state->parentId != caller.id()) {
+            return; // Blocked: only parent can allocate executable memory.
+        }
+    }
+
+    u8* mem = new u8[length];
+    for (usz i = 0; i < length; ++i) mem[i] = 0;
+
+    Task::registerAllocation(mem, length);
+
+    MemoryRegion region;
+    region.base = dest;
+    region.size = length;
+    region.physical = mem;
+    region.writable = false;   // W^X: executable regions are NOT writable.
     region.executable = true;
     region.owned = true;
 
@@ -1009,7 +974,7 @@ void Task::setMemorySize(usz bytes) {
 // Core Management
 // -------------------------------------------------------------------------
 
-void Task::enable(usz coreId) {
+void Task::setup(usz coreId) {
     Task caller = Task::current();
     if (caller.valid() && (caller.id() != 0 || caller.parentId() != 0)) {
         return; // Child tasks cannot modify cores
@@ -1065,16 +1030,50 @@ void Task::disable(usz coreId) {
 
     xi_timer_stop(coreId);
 
-    // Migrate unpinned tasks to other enabled cores.
+    // Migrate currently running task if not pinned
+    if (core.currentTaskId != 0) {
+        Task t = findTask(core.currentTaskId);
+        if (t.valid() && !t._state->isPinned) {
+            t._state->status = TaskStatus::Ready;
+            usz newCore = assignCore(core.currentTaskId);
+            if (newCore != coreId && newCore < _cores.size()) {
+                bool alreadyInQueue = false;
+                for (usz j = 0; j < _cores[newCore].runQueue.size(); ++j) {
+                    if (_cores[newCore].runQueue[j] == core.currentTaskId) {
+                        alreadyInQueue = true;
+                        break;
+                    }
+                }
+                if (!alreadyInQueue) {
+                    _cores[newCore].runQueue.push(core.currentTaskId);
+                }
+                t._state->currentCore = newCore;
+                _cores[newCore].totalQuotaUs += t._state->quotaUs;
+            }
+        }
+    }
+
+    // Migrate other unpinned tasks in runQueue to other enabled cores.
     for (usz i = 0; i < core.runQueue.size(); ++i) {
         usz taskId = core.runQueue[i];
+        if (taskId == core.currentTaskId) continue;
         Task t = findTask(taskId);
         if (!t.valid()) continue;
         if (!t._state->isPinned) {
             usz newCore = assignCore(taskId);
             if (newCore != coreId && newCore < _cores.size()) {
-                _cores[newCore].runQueue.push(taskId);
+                bool alreadyInQueue = false;
+                for (usz j = 0; j < _cores[newCore].runQueue.size(); ++j) {
+                    if (_cores[newCore].runQueue[j] == taskId) {
+                        alreadyInQueue = true;
+                        break;
+                    }
+                }
+                if (!alreadyInQueue) {
+                    _cores[newCore].runQueue.push(taskId);
+                }
                 t._state->currentCore = newCore;
+                _cores[newCore].totalQuotaUs += t._state->quotaUs;
             }
         }
     }
@@ -1327,6 +1326,10 @@ void Task::destroyTask(usz taskId) {
 
     if (s->parentId < _tasks.size() && _tasks[s->parentId]) {
         TaskState* parent = _tasks[s->parentId];
+        // Return child quota to parent's capacity.
+        if (parent->quotaUs > 0 && s->quotaUs > 0 && parent->childQuotaUsed >= s->quotaUs) {
+            parent->childQuotaUsed -= s->quotaUs;
+        }
         for (long long i = (long long)parent->childIds.size() - 1; i >= 0; --i) {
             if (parent->childIds[(usz)i] == taskId) {
                 usz last = parent->childIds.size() - 1;
@@ -1359,16 +1362,22 @@ void Task::destroyTask(usz taskId) {
 void Task::yield(usz coreId) {
     ensureInitialized();
 
+    // Wake tasks waiting for death.
+    for (usz i = 0; i < _tasks.size(); ++i) {
+        TaskState* ts = _tasks[i];
+        if (ts && ts->status == TaskStatus::Paused && ts->waitDeadTarget != 0) {
+            if (xi_check_wait_dead_condition(ts)) {
+                ts->status = TaskStatus::Ready;
+                ts->waitDeadTarget = 0;
+            }
+        }
+    }
+
     TaskState* caller = xi_get_current_task();
     if (caller) {
         // 1- A task couldnt yield as another core, only the core they are executing in.
         // Task::yield() with no args uses the current core (forced if in task, or 0 if not).
         coreId = caller->currentCore;
-    } else {
-        // 4- Also pls: out of task yield automatically .enable's that core number.
-        if (coreId >= _cores.size() || !_cores[coreId].enabled) {
-            current().enable(coreId);
-        }
     }
 
     if (coreId >= _cores.size()) return;
@@ -1733,16 +1742,26 @@ void Task::reset() {
 void Task::onInstruction(const String& instruction, Func<void()> callback) {
     if (!_state) return;
     Task caller = Task::current();
-    if (caller.valid() && caller.id() != 0) {
-        if (_state->parentId != caller.id()) {
-            return; // Blocked: only parent can set instruction callbacks.
-        }
+    bool isSelf = (caller.valid() && _state->id == caller.id());
+    bool isParent = (caller.valid() && _state->parentId == caller.id());
+    bool isKernel = (!caller.valid() || caller.id() == 0);
+
+    // Self can register callbacks. Parent or kernel can register and unban.
+    if (!isSelf && !isParent && !isKernel) {
+        return; // Blocked: not self, not parent, not kernel.
     }
+
     bool found = false;
     for (usz i = 0; i < _state->instructionHooks.size(); ++i) {
         if (_state->instructionHooks[i].name == instruction) {
             _state->instructionHooks[i].callback = callback;
-            _state->instructionHooks[i].banned = false;
+            // Self CANNOT unban — only parent/kernel can change banned state.
+            if (!isSelf) {
+                _state->instructionHooks[i].banned = false;
+            }
+            // If self is calling on a banned instruction, callback is registered
+            // but the instruction stays banned. The callback fires (if AOT allows)
+            // but the instruction itself remains replaced by ud2.
             found = true;
             break;
         }
@@ -1751,7 +1770,7 @@ void Task::onInstruction(const String& instruction, Func<void()> callback) {
         TaskState::InstructionHook hook;
         hook.name = instruction;
         hook.callback = callback;
-        hook.banned = false;
+        hook.banned = false; // New hooks start unbanned.
         _state->instructionHooks.push(hook);
     }
     AOT::destroyCache(_state->aotCache);
@@ -1760,6 +1779,8 @@ void Task::onInstruction(const String& instruction, Func<void()> callback) {
 void Task::offInstruction(const String& instruction) {
     if (!_state) return;
     Task caller = Task::current();
+    // offInstruction is FINAL: only parent or kernel can ban.
+    // Self CANNOT call offInstruction — that would be an escape vector.
     if (caller.valid() && caller.id() != 0) {
         if (_state->parentId != caller.id()) {
             return; // Blocked: only parent can ban instructions.
@@ -1784,8 +1805,20 @@ void Task::offInstruction(const String& instruction) {
     AOT::destroyCache(_state->aotCache);
 }
 
+void Task::setMinChildQuota(u64 us) {
+    if (!_state) return;
+    Task caller = Task::current();
+    if (caller.valid() && caller.id() != 0) {
+        if (_state->parentId != caller.id()) {
+            return; // Blocked: only parent can set min child quota.
+        }
+    }
+    _state->minChildQuotaUs = us;
+}
+
 void xi_reset_task_state_for_tests() {
     Task::reset();
 }
 
 } // namespace Execution
+

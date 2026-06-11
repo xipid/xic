@@ -31,12 +31,28 @@ namespace Execution {
 using namespace Xi;
 using namespace Collection;
 
+#define XI_DECLARE_EXECUTION_OVERLOADS(name, mode, targetId) \
+    template <typename Fn, typename... Args> \
+    void name(Fn fn, Args... args) { \
+        _execute_impl(mode, targetId, fn, args...); \
+    } \
+    void name(void (*fn)(void*), void* arg = nullptr) { \
+        _execute_impl_raw(mode, targetId, fn, arg); \
+    } \
+    void name(usz addr) { \
+        _execute_impl_raw(mode, targetId, (void(*)(void*))addr, nullptr); \
+    } \
+    void name() { \
+        _execute_impl_raw(mode, targetId, nullptr, nullptr); \
+    }
+
 struct TaskState;
 
 // Thread-local current task accessors (defined in Task.cpp)
 TaskState* xi_get_current_task();
 void xi_set_current_task(TaskState* s);
 bool xi_validate_context_before_switch(TaskState* state);
+bool xi_is_task_dead_recursive(usz tid);
 
 // -------------------------------------------------------------------------
 // Supporting Structures
@@ -137,6 +153,12 @@ struct TaskState {
     void* entryArg;
     bool isWaitingForMessage;
     bool isIsolated;        ///< If true, task is memory-isolated (sees own address space from 0).
+    usz waitDeadTarget;     ///< Target task ID to wait for death (0 = none, -1 = all, -2 = children).
+
+    // Fork bomb protection: minimum quota each child inherits, subtracted from parent.
+    // If parent quota is limited and insufficient for minChildQuotaUs, spawn fails.
+    u64 minChildQuotaUs;    ///< Min quota forced on children. 0 = inherit parent default.
+    u64 childQuotaUsed;     ///< Sum of quota allocated to living children (when parent quota > 0).
 
     struct InstructionHook {
         String name;
@@ -151,7 +173,8 @@ struct TaskState {
           pinnedCore(0), isPinned(false), currentCore(0),
           stack(nullptr), stackSize(0), stackOwned(false),
           isWaitingForMessage(false), isIsolated(false),
-          entryFn(nullptr), entryArg(nullptr) {}
+          entryFn(nullptr), entryArg(nullptr), waitDeadTarget(0),
+          minChildQuotaUs(0), childQuotaUsed(0) {}
 };
 
 /**
@@ -281,18 +304,9 @@ public:
     static Task current();
 
     // -- Core Management --
-    void enable(usz coreId);
-    void disable(usz coreId);
-    void setFrequencySlider(usz coreId, u32 minFreq, u32 maxFreq);
-
-    template <typename Dummy = void>
-    static void enable(usz coreId) { current().enable(coreId); }
-    template <typename Dummy = void>
-    static void disable(usz coreId) { current().disable(coreId); }
-    template <typename Dummy = void>
-    static void setFrequencySlider(usz coreId, u32 minFreq, u32 maxFreq) {
-        current().setFrequencySlider(coreId, minFreq, maxFreq);
-    }
+    static void setup(usz coreId);
+    static void disable(usz coreId);
+    static void setFrequencySlider(usz coreId, u32 minFreq, u32 maxFreq);
 
     // -- Core Affinity --
 
@@ -340,16 +354,9 @@ public:
     template <typename Fn, typename... Args>
     Task async(Fn fn, Args... args);
 
-    template <typename Fn, typename... Args>
-    void jump(Fn fn, Args... args);
-
-    template <typename Fn, typename... Args>
-    void wait(Fn fn, Args... args);
-
-    void jump(void (*fn)(void*), void* arg = nullptr);
-    void wait(void (*fn)(void*), void* arg = nullptr);
-    void wait();
-    void wait(usz addr);
+    XI_DECLARE_EXECUTION_OVERLOADS(jump, 0, 0)
+    XI_DECLARE_EXECUTION_OVERLOADS(wait, 1, 0)
+    XI_DECLARE_EXECUTION_OVERLOADS(waitDead, 2, (usz)-2)
 
     /**
      * @brief Starts or resumes execution.
@@ -366,14 +373,13 @@ public:
     /** @brief Pauses execution for the given number of microseconds. */
     void stop(u64 us);
 
-    /** @brief Sets the program counter to a new address. Triggers AOT. */
-    void jump(usz addr);
+
 
     /** @brief Destroys this task and all its children. Frees all memory. */
     void destroy();
 
     /** @brief Cooperatively yields execution time on the specified core. */
-    void yield(usz coreId = 0);
+    static void yield(usz coreId = 0);
 
     /** @brief Hook an instruction execution. */
     void onInstruction(const String& instruction, Func<void()> callback);
@@ -393,8 +399,20 @@ public:
 
     /**
      * @brief Allocates physical memory and maps it at the given virtual address.
+     *
+     * For child tasks: allocates within the parent's memory space. The parent
+     * owns all child memory — this is the fundamental ownership model.
+     * Created regions are writable but NOT executable (W^X policy).
      */
     void alloc(usz dest, usz length);
+
+    /**
+     * @brief Allocates executable (read-only) memory at the given virtual address.
+     *
+     * W^X policy: executable regions are NOT writable. To modify code, the parent
+     * must unmap, write to a writable region, then map as executable.
+     */
+    void allocExecutable(usz dest, usz length);
 
     /**
      * @brief Maps existing physical memory from `source` to `dest`.
@@ -441,6 +459,18 @@ public:
      * A quota of 0 means unlimited (background priority / as much as possible).
      */
     void setQuota(u64 us);
+
+    /**
+     * @brief Sets the minimum quota that each child task is forced to have.
+     *
+     * Fork bomb protection: when a parent spawns a child, the child gets
+     * at least this much quota. If the parent's own quota is limited,
+     * the child's quota is subtracted from the parent's remaining capacity.
+     * If insufficient capacity, spawn fails.
+     *
+     * @param us  Minimum child quota in microseconds. 0 = no minimum.
+     */
+    void setMinChildQuota(u64 us);
 
     /**
      * @brief Overrides the default memory size for auto-allocation.
@@ -494,11 +524,15 @@ public:
     template <typename Dummy = void>
     static void alloc(usz dest, usz length) { current().alloc(dest, length); }
     template <typename Dummy = void>
+    static void allocExecutable(usz dest, usz length) { current().allocExecutable(dest, length); }
+    template <typename Dummy = void>
     static void map(usz source, usz dest, usz length) { current().map(source, dest, length); }
     template <typename Dummy = void>
     static void unmap(usz dest, usz length) { current().unmap(dest, length); }
     template <typename Dummy = void>
     static void unmap() { current().unmap(); }
+    template <typename Dummy = void>
+    static void setMinChildQuota(u64 us) { current().setMinChildQuota(us); }
     template <typename Dummy = void>
     static void send(Task& receiver, const String& payload) { current().send(receiver, payload); }
     template <typename Dummy = void>
@@ -526,35 +560,9 @@ public:
     static Task spawn() { return current().spawn(); }
 
 
-    template <typename Dummy = void>
-    static void jump(void (*fn)(void*), void* arg = nullptr) {
-        current().jump(fn, arg);
-    }
 
-    template <typename Dummy = void>
-    static void wait(void (*fn)(void*), void* arg = nullptr) {
-        current().wait(fn, arg);
-    }
 
-    template <typename Dummy = void>
-    static void wait() {
-        current().wait();
-    }
 
-    template <typename Dummy = void>
-    static void wait(usz addr) {
-        current().wait(addr);
-    }
-
-    template <typename Dummy = void>
-    static void jump(usz addr) {
-        current().jump(addr);
-    }
-
-    template <typename Dummy = void>
-    static void yield(usz coreId = 0) {
-        current().yield(coreId);
-    }
 
     template <typename Dummy = void>
     static usz childCount() { return current().childCount(); }
@@ -569,6 +577,11 @@ public:
     template <typename Dummy = void> static bool isPinned() { return current().isPinned(); }
 
 private:
+    template <typename Fn, typename... Args>
+    void _execute_impl(int mode, usz targetId, Fn fn, Args... args);
+
+    void _execute_impl_raw(int mode, usz targetId, void (*fn)(void*), void* arg);
+
     static void reset();
     friend void xi_reset_task_state_for_tests();
 };
@@ -636,20 +649,22 @@ Task Task::async(Fn fn, Args... args) {
 }
 
 template <typename Fn, typename... Args>
-void Task::jump(Fn fn, Args... args) {
+void Task::_execute_impl(int mode, usz targetId, Fn fn, Args... args) {
     if (!_state) return;
 
     Task caller = Task::current();
+    bool insideTask = (xi_get_current_task() != nullptr);
+
     if (caller.valid()) {
         if (_state->id != caller.id() && _state->parentId != caller.id()) {
             return; // Blocked: not self and not child.
         }
     }
 
-    if (_state->status == TaskStatus::Running && (!caller.valid() || _state->id != caller.id())) {
+    if (_state->status == TaskStatus::Running && (!insideTask || _state->id != caller.id())) {
         _state->status = TaskStatus::Paused;
         while (_state->status == TaskStatus::Running) {
-            if (caller.valid()) {
+            if (insideTask) {
                 Task::current().yield(caller._state->currentCore);
             }
         }
@@ -678,100 +693,114 @@ void Task::jump(Fn fn, Args... args) {
 
     xi_context_init(&_state->context, _state->entryFn, _state->entryArg, _state->stack, _state->stackSize);
 
-    if (caller.valid() && _state->id == caller.id()) {
-        if (!xi_validate_context_before_switch(_state)) {
-            std::abort();
-        }
-        _state->status = TaskStatus::Running;
-        TaskContext dummyContext;
-        xi_context_switch(&dummyContext, &_state->context);
-    } else {
-        _state->status = TaskStatus::Ready;
-        Task::enqueue(_state->id);
-    }
-}
-
-template <typename Fn, typename... Args>
-void Task::wait(Fn fn, Args... args) {
-    if (!_state) return;
-
-    Task caller = Task::current();
-    if (caller.valid()) {
-        if (_state->id != caller.id() && _state->parentId != caller.id()) {
-            return; // Blocked: not self and not child.
-        }
-    }
-
-    if (_state->status == TaskStatus::Running && (!caller.valid() || _state->id != caller.id())) {
-        _state->status = TaskStatus::Paused;
-        while (_state->status == TaskStatus::Running) {
-            if (caller.valid()) {
-                Task::current().yield(caller._state->currentCore);
-            }
-        }
-    }
-
-    if (!_state->stack) {
-        usz stackSz = getStackSize();
-        _state->stack = new u8[stackSz];
-        _state->stackSize = stackSz;
-        _state->stackOwned = true;
-    }
-
-    auto lambda = [fn, args...]() {
-        fn(args...);
-    };
-
-    using Impl = TaskTrampolineImpl<decltype(lambda)>;
-    auto* trampoline = new Impl(Xi::Move(lambda));
-
-    _state->entryFn = [](void* arg) {
-        auto* tramp = static_cast<TaskTrampoline*>(arg);
-        tramp->run();
-        delete tramp;
-    };
-    _state->entryArg = trampoline;
-
-    xi_context_init(&_state->context, _state->entryFn, _state->entryArg, _state->stack, _state->stackSize);
-
-    if (caller.valid() && _state->id == caller.id()) {
+    if (mode == 1) {
         _state->isWaitingForMessage = true;
         _state->status = TaskStatus::Paused;
-        usz coreId = _state->currentCore;
-        if (coreId < Task::_cores.size()) {
-            CoreState& core = Task::_cores[coreId];
-            TaskState* next = Task::pickNext(coreId);
-            if (!next && Task::_tasks.size() > 0 && Task::_tasks[0]) {
-                next = Task::_tasks[0];
+    } else if (mode == 2) {
+        _state->waitDeadTarget = targetId;
+        _state->status = TaskStatus::Paused;
+    }
+
+    if (insideTask && _state->id == caller.id()) {
+        if (mode == 0) {
+            if (!xi_validate_context_before_switch(_state)) {
+                std::abort();
             }
-            if (next) {
-                if (!xi_validate_context_before_switch(next)) {
-                    next->status = TaskStatus::Destroyed;
+            _state->status = TaskStatus::Running;
+            TaskContext dummyContext;
+            xi_context_switch(&dummyContext, &_state->context);
+        } else {
+            usz coreId = _state->currentCore;
+            if (coreId < Task::_cores.size()) {
+                CoreState& core = Task::_cores[coreId];
+                TaskState* next = Task::pickNext(coreId);
+                if (!next && Task::_tasks.size() > 0 && Task::_tasks[0]) {
+                    next = Task::_tasks[0];
+                }
+                if (next) {
+                    if (!xi_validate_context_before_switch(next)) {
+                        next->status = TaskStatus::Destroyed;
+                        core.currentTaskId = 0;
+                        xi_set_current_task(nullptr);
+                        TaskContext dummyContext;
+                        xi_context_switch(&dummyContext, &core.idleContext);
+                    } else {
+                        next->status = TaskStatus::Running;
+                        core.currentTaskId = next->id;
+                        xi_set_current_task(next);
+                        TaskContext dummyContext;
+                        xi_context_switch(&dummyContext, &next->context);
+                    }
+                } else {
                     core.currentTaskId = 0;
                     xi_set_current_task(nullptr);
                     TaskContext dummyContext;
                     xi_context_switch(&dummyContext, &core.idleContext);
-                } else {
-                    next->status = TaskStatus::Running;
-                    core.currentTaskId = next->id;
-                    xi_set_current_task(next);
-                    TaskContext dummyContext;
-                    xi_context_switch(&dummyContext, &next->context);
                 }
-            } else {
-                core.currentTaskId = 0;
-                xi_set_current_task(nullptr);
-                TaskContext dummyContext;
-                xi_context_switch(&dummyContext, &core.idleContext);
             }
         }
     } else {
-        _state->isWaitingForMessage = true;
-        _state->status = TaskStatus::Paused;
+        if (mode == 0) {
+            _state->status = TaskStatus::Ready;
+            Task::enqueue(_state->id);
+        }
+    }
+
+    if (!insideTask && mode == 2) {
+        if (_state->id == 0) {
+            while (true) {
+                bool anyAlive = false;
+                for (usz i = 1; i < Task::_tasks.size(); ++i) {
+                    if (Task::_tasks[i] && Task::_tasks[i]->status != TaskStatus::Finished && Task::_tasks[i]->status != TaskStatus::Destroyed) {
+                        anyAlive = true;
+                        break;
+                    }
+                }
+                if (!anyAlive) break;
+                for (usz c = 0; c < Task::_cores.size(); ++c) {
+                    if (Task::_cores[c].enabled) {
+                        Task::yield(c);
+                    }
+                }
+            }
+        } else {
+            while (!xi_is_task_dead_recursive(_state->id)) {
+                for (usz c = 0; c < Task::_cores.size(); ++c) {
+                    if (Task::_cores[c].enabled) {
+                        Task::yield(c);
+                    }
+                }
+            }
+        }
     }
 }
 
 } // namespace Execution
+
+#define XI_DECLARE_GLOBAL_EXECUTION_CONVENIENCE(name) \
+    template <typename Fn, typename... Args> \
+    void name(Fn fn, Args... args) { \
+        Execution::Task::current().name(fn, args...); \
+    } \
+    inline void name(void (*fn)(void*), void* arg = nullptr) { \
+        Execution::Task::current().name(fn, arg); \
+    } \
+    inline void name(usz addr) { \
+        Execution::Task::current().name(addr); \
+    } \
+    inline void name() { \
+        Execution::Task::current().name(); \
+    }
+
+namespace Execution {
+    XI_DECLARE_GLOBAL_EXECUTION_CONVENIENCE(jump)
+    XI_DECLARE_GLOBAL_EXECUTION_CONVENIENCE(wait)
+    XI_DECLARE_GLOBAL_EXECUTION_CONVENIENCE(waitDead)
+
+    inline void yield(usz coreId = 0) {
+        Execution::Task::yield(coreId);
+    }
+}
 
 /**
  * @brief Spawns a task under the currently executing task (or root if none),

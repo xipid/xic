@@ -111,8 +111,24 @@ xi_context_switch:
     /* Restore rdi (the 'to' context may have set rdi for trampoline arg). */
     movq    CTX_RDI(%rsi), %rdi
 
-    /* Push the target rip onto the new stack and ret into it. */
-    pushq   CTX_RIP(%rsi)
+    /* Save target RIP before we lose access to rsi. */
+    movq    CTX_RIP(%rsi), %rax
+
+    /* Zero volatile registers to prevent information leakage.
+       A task must not be able to read kernel/scheduler addresses
+       left in scratch registers from the previous context. */
+    xorq    %rcx, %rcx
+    xorq    %rdx, %rdx
+    xorq    %rsi, %rsi
+    xorq    %r8,  %r8
+    xorq    %r9,  %r9
+    xorq    %r10, %r10
+    xorq    %r11, %r11
+
+    /* Push the target rip onto the new stack and ret into it.
+       rax holds the target RIP. */
+    pushq   %rax
+    xorq    %rax, %rax  /* Zero rax too — the ret will pop the pushed value. */
     ret
 
 .size xi_context_switch, . - xi_context_switch

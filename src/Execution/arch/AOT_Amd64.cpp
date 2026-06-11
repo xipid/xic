@@ -52,8 +52,6 @@ extern "C" void xi_sfi_bounds_check(void* addr, usz size) {
     for (usz i = 0; i < state->regions.size(); ++i) {
         MemoryRegion& r = state->regions[i];
         if (r.physical) {
-            // Validate against ALL regions (readable and writable).
-            // The AOT rewriter inserts this before every memory operation.
             if (target >= r.physical && target + size <= r.physical + r.size) {
                 return; // Access is within a valid region.
             }
@@ -67,6 +65,36 @@ extern "C" void xi_sfi_bounds_check(void* addr, usz size) {
     }
 
     // Out-of-bounds access: trap.
+    __asm__ volatile("ud2");
+}
+
+/**
+ * @brief Validates that a WRITE access falls within a writable region.
+ *
+ * Separate from bounds_check because read-only regions (executable code,
+ * parent's read-only mappings) must not be written to.
+ */
+extern "C" void xi_sfi_write_check(void* addr, usz size) {
+    TaskState* state = xi_get_current_task();
+    if (!state) return;
+
+    u8* target = static_cast<u8*>(addr);
+    for (usz i = 0; i < state->regions.size(); ++i) {
+        MemoryRegion& r = state->regions[i];
+        if (r.physical && r.writable) {
+            if (target >= r.physical && target + size <= r.physical + r.size) {
+                return; // Write is within a writable region.
+            }
+        }
+    }
+
+    // Stack is always writable.
+    if (state->stack && target >= state->stack &&
+        target + size <= state->stack + state->stackSize) {
+        return;
+    }
+
+    // Write to non-writable region: trap.
     __asm__ volatile("ud2");
 }
 
@@ -180,6 +208,13 @@ static bool isUnconditionallyBanned(const u8* code, usz len) {
         case 0xED: return true; // IN AX/EAX, DX
         case 0xEE: return true; // OUT DX, AL
         case 0xEF: return true; // OUT DX, AX/EAX
+        case 0xCB: return true; // RETF — far return, banned unconditionally
+        case 0xCA: return true; // RETF imm16 — far return, banned unconditionally
+        // VEX prefix — ban all AVX/AVX2 instructions in sandboxed code.
+        case 0xC4: return true; // 3-byte VEX prefix
+        case 0xC5: return true; // 2-byte VEX prefix
+        // EVEX prefix — ban all AVX-512 instructions.
+        case 0x62: return true; // EVEX prefix
         default: break;
     }
 
@@ -726,8 +761,8 @@ static usz xi_x86_insn_length(const u8* code, usz maxLen,
                     hasModRM = true;
                     immSize = 0;
                 } else {
-                    // Unknown opcode — assume 1 byte instruction for safety.
-                    return pos;
+                    // Unknown opcode — NOT SAFE to pass through. Return 0 to signal decode failure.
+                    return 0;
                 }
                 break;
         }
@@ -901,7 +936,7 @@ static constexpr usz kJumpCheckStubSize = 2; // ud2 for banned indirect jumps
  *   ret                               ; 1 byte — execute the validated ret
  *                                Total: 17 bytes
  */
-static constexpr usz kRetCheckStubSize = 17;
+static constexpr usz kRetCheckStubSize = 20;
 
 static void emitRetCheckStub(u8*& out, u64 jumpCheckAddr) {
     // pop rdi (return address into rdi — first arg for jump check)
@@ -910,6 +945,8 @@ static void emitRetCheckStub(u8*& out, u64 jumpCheckAddr) {
     *out++ = 0x57;
     // push rax (save rax)
     *out++ = 0x50;
+    // push rdi (save rdi — will be clobbered by function call)
+    *out++ = 0x57;
     // movabs rax, <xi_sfi_jump_check>
     *out++ = 0x48;
     *out++ = 0xB8;
@@ -918,6 +955,8 @@ static void emitRetCheckStub(u8*& out, u64 jumpCheckAddr) {
     // call rax
     *out++ = 0xFF;
     *out++ = 0xD0;
+    // pop rdi (restore rdi)
+    *out++ = 0x5F;
     // pop rax (restore rax)
     *out++ = 0x58;
     // ret (now validated)
@@ -983,7 +1022,7 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         usz len = xi_x86_insn_length(code + pos, codeSize - pos,
                                       hasMem, isRelJmp, relOffset, relSize);
         if (len == 0) {
-            // Decoding failed — copy remaining bytes verbatim.
+            // Decoding failed — unknown instruction. Trap it.
             len = 1;
             hasMem = false;
             isRelJmp = false;
@@ -994,6 +1033,17 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         bool isHooked = isInstructionBannedOrHooked(code + pos, len, hookBanned, callbackPtr);
 
         bool isBannedPrivileged = isUnconditionallyBanned(code + pos, len);
+        // Also trap decode failures (len was 0, we forced it to 1).
+        if (len == 1 && pos + 1 <= codeSize) {
+            // Re-check: was the original decode a failure?
+            bool dummy1, dummy2;
+            usz dummy3, dummy4;
+            usz recheck = xi_x86_insn_length(code + pos, codeSize - pos,
+                                             dummy1, dummy2, dummy3, dummy4);
+            if (recheck == 0) {
+                isBannedPrivileged = true; // Force trap for undecoded instruction.
+            }
+        }
 
         bool isIndirectJump = false;
         bool isRet = false;

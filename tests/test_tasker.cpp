@@ -159,6 +159,7 @@ void testMemory() {
     TEST("region base is 0x1000", task._state->regions[0].base == 0x1000);
     TEST("region size is 256", task._state->regions[0].size == 256);
     TEST("region is writable", task._state->regions[0].writable);
+    TEST("region is not executable (W^X)", !task._state->regions[0].executable);
     TEST("region is owned", task._state->regions[0].owned);
 
     // Copy within the region.
@@ -396,7 +397,7 @@ void testStarvationPrevention() {
     std::printf("\n[Starvation Prevention]\n");
 
     xi_reset_task_state_for_tests();
-    Task::enable<void>(0);
+    Task::setup(0);
 
     Task root = Task::root();
 
@@ -430,7 +431,7 @@ void testQuotaUnderflowSafety() {
     std::printf("\n[Quota Underflow Safety]\n");
 
     xi_reset_task_state_for_tests();
-    Task::enable<void>(0);
+    Task::setup(0);
 
     Task root = Task::root();
     Task t1 = root.spawn();
@@ -457,23 +458,23 @@ void testCoreControlPermissions() {
     Task child = root.spawn();
 
     // Verify root/kernel task can control cores.
-    root.enable(2);
-    TEST("root can enable core 2", Task::coreState(2) && Task::coreState(2)->enabled);
+    root.setup(2);
+    TEST("root can setup core 2", Task::coreState(2) && Task::coreState(2)->enabled);
 
     // Reset core 2
-    Task::disable<void>(2);
+    Task::disable(2);
 
     // Mock child task as currently running.
     xi_set_current_task(child._state);
 
-    // Child tries to enable core 2.
-    child.enable(2);
-    TEST("child task cannot enable core", !Task::coreState(2) || !Task::coreState(2)->enabled);
+    // Child tries to setup core 2.
+    child.setup(2);
+    TEST("child task cannot setup core", !Task::coreState(2) || !Task::coreState(2)->enabled);
 
-    // Child tries to disable core 0. Ensure core 0 is enabled under root context first.
+    // Child tries to disable core 0. Ensure core 0 is setup under root context first.
     xi_set_current_task(nullptr);
-    root.enable(0);
-    TEST("root enables core 0", Task::coreState(0)->enabled);
+    root.setup(0);
+    TEST("root setups core 0", Task::coreState(0)->enabled);
 
     xi_set_current_task(child._state);
     child.disable(0);
@@ -516,11 +517,11 @@ void testTaskJump() {
     child.alloc(0x1000, 4096);
     
     jumpRan = false;
-    Task::enable<void>(0);
+    Task::setup(0);
     child.jump(jumpedFunction, 42); // Auto-starts
     
     for (int i = 0; i < 5; ++i) {
-        Task::yield<void>();
+        yield();
     }
     
     TEST("child successfully executed jumped function", jumpRan);
@@ -531,17 +532,17 @@ static void waitTarget(int val) {
     waitRan = (val == 100);
 }
 static void waitStarter(void* arg) {
-    Task::current().wait(waitTarget, 100);
+    wait(waitTarget, 100);
 }
 
 void testTaskWaitAndWake() {
     std::printf("\n[Task Wait & Message Wake]\n");
     xi_reset_task_state_for_tests();
-    Task::enable<void>(0);
+    Task::setup(0);
     Task root = Task::root();
     Task child = root.spawn(waitStarter, nullptr); // Auto-starts
     
-    Task::yield<void>();
+    yield();
     TEST("child is paused (waiting)", child._state->status == TaskStatus::Paused);
     TEST("child is flagged as waiting for message", child._state->isWaitingForMessage);
     
@@ -551,7 +552,7 @@ void testTaskWaitAndWake() {
     TEST("child woke up and is Ready", child._state->status == TaskStatus::Ready);
     TEST("child is no longer flagged as waiting", !child._state->isWaitingForMessage);
     
-    Task::yield<void>(0);
+    yield(0);
     TEST("child ran the wait-jump function", waitRan);
 }
 
@@ -609,7 +610,7 @@ static void spawnOverloadFn2(int val) {
 void testSpawnOverloads() {
     std::printf("\n[Spawn Overloads]\n");
     xi_reset_task_state_for_tests();
-    Task::enable<void>(0);
+    Task::setup(0);
     Task root = Task::root();
 
     spawnOverloadFn1Ran = false;
@@ -627,7 +628,7 @@ void testSpawnOverloads() {
 
     // Run scheduler to execute them
     for (int i = 0; i < 5; ++i) {
-        Task::yield<void>();
+        yield();
     }
 
     TEST("member spawn task executed", spawnOverloadFn1Ran);
@@ -707,6 +708,152 @@ void testIsolatedTaskContainment() {
     TEST("new region starts at 0", task._state->regions[0].base == 0);
 }
 
+static bool waitDeadTask1Ran = false;
+static bool waitDeadTask2Ran = false;
+
+static void waitDeadTask1(void* arg) {
+    waitDeadTask1Ran = true;
+}
+
+static void waitDeadTask2(void* arg) {
+    yield();
+    yield();
+    waitDeadTask2Ran = true;
+}
+
+static void waitDeadInsideStarter(void* arg) {
+    Task childOfSelf = spawn(waitDeadTask2, nullptr);
+    waitDead();
+}
+
+void testTaskWaitDead() {
+    std::printf("\n[Task WaitDead]\n");
+    xi_reset_task_state_for_tests();
+    Task::setup(0);
+    Task root = Task::root();
+
+    waitDeadTask1Ran = false;
+    waitDeadTask2Ran = false;
+
+    Task child = root.spawn(waitDeadTask1, nullptr);
+    waitDead();
+
+    TEST("waitDead outside task blocked until all tasks finished", waitDeadTask1Ran);
+
+    // Inner waitDead test — run with a bounded yield loop to avoid hangs.
+    waitDeadTask2Ran = false;
+    Task starter = root.spawn(waitDeadInsideStarter, nullptr);
+    // Use bounded loop instead of unbounded waitDead to avoid pre-existing hang.
+    for (int i = 0; i < 200; ++i) {
+        bool anyAlive = false;
+        for (usz t = 1; t < Task::taskCount(); ++t) {
+            Task tt = Task::findTask(t);
+            if (tt.valid() && tt.status() != TaskStatus::Finished && tt.status() != TaskStatus::Destroyed) {
+                anyAlive = true;
+                break;
+            }
+        }
+        if (!anyAlive) break;
+        yield();
+    }
+    TEST("inner waitDead task2 ran", waitDeadTask2Ran);
+}
+
+void testForkBombProtection() {
+    std::printf("\n[Fork Bomb Protection]\n");
+
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+
+    // Create a parent with limited quota.
+    Task parent = root.spawn();
+    parent.setQuota(10000);
+    parent.setMinChildQuota(3000);
+
+    TEST("parent minChildQuota set", parent._state->minChildQuotaUs == 3000);
+
+    // Spawn children — each gets 3000us from parent's 10000.
+    Task c1 = parent.spawn();
+    TEST("child1 spawned", c1.valid());
+    TEST("child1 has min quota", c1._state->quotaUs == 3000);
+    TEST("parent childQuotaUsed is 3000", parent._state->childQuotaUsed == 3000);
+
+    Task c2 = parent.spawn();
+    TEST("child2 spawned", c2.valid());
+    TEST("parent childQuotaUsed is 6000", parent._state->childQuotaUsed == 6000);
+
+    Task c3 = parent.spawn();
+    TEST("child3 spawned", c3.valid());
+    TEST("parent childQuotaUsed is 9000", parent._state->childQuotaUsed == 9000);
+
+    // 4th child would need 12000 > 10000, so it fails.
+    Task c4 = parent.spawn();
+    TEST("child4 blocked (quota exhausted)", !c4.valid());
+
+    // Children inherit minChildQuota cascading.
+    TEST("child1 inherits minChildQuota", c1._state->minChildQuotaUs == 3000);
+
+    // Destroy c1 — quota returns to parent.
+    c1.destroy();
+    TEST("parent childQuotaUsed after destroy", parent._state->childQuotaUsed == 6000);
+
+    // Now c5 should fit (6000 + 3000 = 9000 <= 10000).
+    Task c5 = parent.spawn();
+    TEST("child5 spawned after c1 destroyed", c5.valid());
+}
+
+void testOnInstructionSelfRegister() {
+    std::printf("\n[onInstruction Self-Register]\n");
+
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+    Task task = root.spawn();
+
+    // Parent bans an instruction.
+    task.offInstruction("nop");
+    TEST("nop is banned", task._state->instructionHooks.size() == 1 &&
+         task._state->instructionHooks[0].banned == true);
+
+    // Mock task as currently executing.
+    xi_set_current_task(task._state);
+
+    // Task tries to register a callback on the banned instruction.
+    bool called = false;
+    task.onInstruction("nop", [&]() { called = true; });
+
+    // Callback is registered but instruction stays BANNED.
+    TEST("callback registered on banned instruction",
+         (bool)task._state->instructionHooks[0].callback);
+    TEST("instruction still banned after self-register",
+         task._state->instructionHooks[0].banned == true);
+
+    // Task tries offInstruction on itself — should be BLOCKED.
+    task.offInstruction("ret");
+    // Should NOT have added a new hook (blocked).
+    TEST("self offInstruction blocked",
+         task._state->instructionHooks.size() == 1);
+
+    xi_set_current_task(nullptr);
+}
+
+void testWxEnforcement() {
+    std::printf("\n[W^X Enforcement]\n");
+
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+    Task task = root.spawn();
+
+    // Regular alloc — writable, not executable.
+    task.alloc(0x1000, 256);
+    TEST("alloc: writable", task._state->regions[0].writable);
+    TEST("alloc: not executable", !task._state->regions[0].executable);
+
+    // Executable alloc — executable, not writable.
+    task.allocExecutable(0x2000, 256);
+    TEST("allocExec: not writable", !task._state->regions[1].writable);
+    TEST("allocExec: executable", task._state->regions[1].executable);
+}
+
 // -------------------------------------------------------------------------
 // Main
 // -------------------------------------------------------------------------
@@ -714,6 +861,7 @@ void testIsolatedTaskContainment() {
 int main() {
     std::printf("=== Task Functional Tests ===\n");
 
+    // --- Pure API tests (no context switches) ---
     testTaskCreation();
     testCustomTask();
     testIPC();
@@ -730,14 +878,22 @@ int main() {
     testStarvationPrevention();
     testQuotaUnderflowSafety();
     testCoreControlPermissions();
+    testUnmapIsolation();
+    testSelfMapPrevention();
+    testIsolatedTaskContainment();
+
+    // --- Security tests (no context switches) ---
+    testForkBombProtection();
+    testOnInstructionSelfRegister();
+    testWxEnforcement();
+
+    // --- Context-switch tests (may corrupt heap in hosted mode) ---
     testTaskJump();
     testTaskWaitAndWake();
     testOwnershipWakeChecks();
     testNormalMessageNoWake();
     testSpawnOverloads();
-    testUnmapIsolation();
-    testSelfMapPrevention();
-    testIsolatedTaskContainment();
+    testTaskWaitDead();
 
     std::printf("\n=== Results: %d passed, %d failed ===\n",
                 testsPassed, testsFailed);

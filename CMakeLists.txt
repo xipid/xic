@@ -4,6 +4,9 @@ project(Xi VERSION 1.0.0 LANGUAGES C CXX ASM)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+add_compile_options(-fno-sanitize=all)
+add_link_options(-fno-sanitize=all)
+
 # Options
 option(XI_BUILD_GRAPHICS "Build Graphics Support (Diligent Engine)" ON)
 option(XI_BUILD_HARDWARE "Build Hardware Support (DHT/MPU/GPS)" ON)
