@@ -307,7 +307,10 @@ extern "C" void xi_sfi_stack_check(void* rsp_value) {
     }
 }
 
-extern "C" void xi_run_instruction_callback(void* callbackPtr) {
+extern "C" void xi_run_instruction_callback(void* callbackPtr, usz guestRbx) {
+    ::printf("[JIT Callback Debug] xi_run_instruction_callback entered! callbackPtr=%p, guestRbx=0x%lx\n", callbackPtr, (unsigned long)guestRbx);
+    ::fflush(stdout);
+    xi_last_guest_rbx = guestRbx;
     if (callbackPtr) {
         auto* cb = static_cast<Func<void()>*>(callbackPtr);
         if (*cb) {
@@ -475,7 +478,13 @@ static bool isInstructionBannedOrHooked(const u8* code, usz len, bool& outBanned
 
     if (name.size() == 0) return false;
 
+    ::printf("[AOT Hook Check] name=%s, current task state=%p, hooks size=%zu\n",
+             name.c_str(), state, state->instructionHooks.size());
     for (usz i = 0; i < state->instructionHooks.size(); ++i) {
+        ::printf("  Hook %zu: name=%s, banned=%d, callback=%p\n",
+                 i, state->instructionHooks[i].name.c_str(),
+                 state->instructionHooks[i].banned,
+                 (void*)&state->instructionHooks[i].callback);
         if (state->instructionHooks[i].name == name) {
             outBanned = state->instructionHooks[i].banned;
             outCallbackPtr = &(state->instructionHooks[i].callback);
@@ -560,6 +569,11 @@ static void emitUd2(u8*& outPtr) {
 }
 
 static void emitCallbackCall(u8*& outPtr, u64 callbackPtr, u64 helperAddr) {
+    // mov rsi, rbx
+    *outPtr++ = 0x48;
+    *outPtr++ = 0x89;
+    *outPtr++ = 0xDE;
+
     // movabs rdi, callbackPtr
     *outPtr++ = 0x48;
     *outPtr++ = 0xBF;
@@ -608,12 +622,14 @@ static usz xi_x86_insn_length(const u8* code, usz maxLen,
                                bool& outIsRelJmp,
                                usz& outRelOffset,
                                usz& outRelSize,
-                               bool& outIsRspModifying) {
+                               bool& outIsRspModifying,
+                               usz& outImmSize) {
     outHasMem = false;
     outIsRelJmp = false;
     outRelOffset = 0;
     outRelSize = 0;
     outIsRspModifying = false;
+    outImmSize = 0;
 
     if (maxLen == 0) return 0;
 
@@ -1088,6 +1104,7 @@ static usz xi_x86_insn_length(const u8* code, usz maxLen,
 
     if (pos > maxLen) return 0;
 
+    outImmSize = immSize;
     return pos;
 }
 
@@ -1109,30 +1126,168 @@ static usz xi_x86_insn_length(const u8* code, usz maxLen,
  *   pop rax                      ; 1 byte
  *                           Total: 18 bytes
  */
-static constexpr usz kStubSize = 18;
+static void parseLayout(const u8* code, usz len, usz& prefixLen, bool& hasRex, u8& rex, usz& opcodeLen, usz& modrmPos) {
+    usz pos = 0;
+    prefixLen = 0;
+    hasRex = false;
+    rex = 0;
+    opcodeLen = 0;
+    modrmPos = 0;
+    
+    // Skip legacy prefixes
+    while (pos < len) {
+        u8 b = code[pos];
+        if (b == 0x66 || b == 0x67 || b == 0xF0 || b == 0xF2 || b == 0xF3 ||
+            b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 || b == 0x64 || b == 0x65) {
+            pos++;
+        } else break;
+    }
+    prefixLen = pos;
+    
+    // Check REX prefix
+    if (pos < len && (code[pos] & 0xF0) == 0x40) {
+        hasRex = true;
+        rex = code[pos];
+        pos++;
+    }
+    
+    // Opcode size
+    if (pos < len) {
+        u8 op = code[pos];
+        if (op == 0x0F) {
+            if (pos + 1 < len) {
+                u8 op2 = code[pos + 1];
+                if (op2 == 0x38 || op2 == 0x3A) {
+                    opcodeLen = 3;
+                } else {
+                    opcodeLen = 2;
+                }
+            } else {
+                opcodeLen = 1;
+            }
+        } else {
+            opcodeLen = 1;
+        }
+    }
+    pos += opcodeLen;
+    modrmPos = pos;
+}
 
-/**
- * @brief Emits the bounds-check call stub into the output buffer.
- *
- * @param out       Output buffer pointer (advanced by kStubSize).
- * @param stubAddr  Address of the bounds-check function.
- */
-static void emitBoundsCheckStub(u8*& out, u64 stubAddr) {
-    ::printf("[emitBoundsCheckStub] Entry: out=%p\n", out);
+static usz getLeaSize(const u8* code, usz len, usz immSize) {
+    usz prefixLen = 0, modrmPos = 0, opcodeLen = 0;
+    bool hasRex = false;
+    u8 rex = 0;
+    parseLayout(code, len, prefixLen, hasRex, rex, opcodeLen, modrmPos);
+    usz sibDispSize = (len - immSize) - (modrmPos + 1);
+    return prefixLen + 3 + sibDispSize;
+}
+
+static usz buildLea(u8* out, const u8* insnSrc, usz instrLen, usz immSize) {
+    usz pos = 0;
+    usz outPos = 0;
+    bool hasRex = false;
+    u8 rex = 0;
+    
+    // Copy legacy prefixes
+    for (;;) {
+        u8 b = insnSrc[pos];
+        if (b == 0x66 || b == 0x67 || b == 0xF0 || b == 0xF2 || b == 0xF3 ||
+            b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 || b == 0x64 || b == 0x65) {
+            out[outPos++] = b;
+            pos++;
+        } else break;
+    }
+    
+    // Check original REX prefix
+    if ((insnSrc[pos] & 0xF0) == 0x40) {
+        hasRex = true;
+        rex = insnSrc[pos];
+        pos++;
+    }
+    
+    // Emit new REX prefix targeting RDI (reg 7) with 64-bit operand size
+    u8 newRex = 0x48; // REX.W
+    if (hasRex) {
+        newRex = (rex & ~0x04) | 0x48; // Clear REX.R, set REX.W
+    }
+    out[outPos++] = newRex;
+    
+    // Skip opcode
+    if (insnSrc[pos] == 0x0F) {
+        if (pos + 1 < instrLen && (insnSrc[pos + 1] == 0x38 || insnSrc[pos + 1] == 0x3A)) {
+            pos += 3;
+        } else {
+            pos += 2;
+        }
+    } else {
+        pos += 1;
+    }
+    
+    // Emit LEA opcode (0x8D)
+    out[outPos++] = 0x8D;
+    
+    // Modify ModRM to target RDI (reg = 7)
+    u8 modrm = insnSrc[pos++];
+    u8 newModrm = (modrm & 0xC7) | 0x38; // 7 << 3 = 0x38
+    out[outPos++] = newModrm;
+    
+    // Copy the remaining bytes (SIB, displacement) except immediate
+    usz rem = instrLen - pos - immSize;
+    if (rem > 0) {
+        std::memcpy(out + outPos, insnSrc + pos, rem);
+        outPos += rem;
+    }
+    
+    return outPos;
+}
+
+static usz getMemAccessSize(const u8* code, usz len, bool rexW, bool has66) {
+    usz prefixLen = 0, modrmPos = 0, opcodeLen = 0;
+    bool hasRex = false;
+    u8 rex = 0;
+    parseLayout(code, len, prefixLen, hasRex, rex, opcodeLen, modrmPos);
+    
+    u8 opcode = code[prefixLen + (hasRex ? 1 : 0)];
+    if (opcode == 0x0F) {
+        opcode = code[prefixLen + (hasRex ? 1 : 0) + 1];
+    }
+    
+    if (opcode == 0xFF || opcode == 0x8F) {
+        return 8;
+    }
+    
+    if ((opcode & 1) == 0) {
+        return 1;
+    }
+    
+    if (rexW) return 8;
+    if (has66) return 2;
+    return 4;
+}
+
+static void emitBoundsCheckStub(u8*& out, u64 stubAddr, const u8* insnSrc, usz instrLen, usz immSize, usz accessSize) {
     // push rax
     *out++ = 0x50;
     // push rdi
     *out++ = 0x57;
     // push rsi
     *out++ = 0x56;
-    ::printf("[emitBoundsCheckStub] After push: out=%p\n", out);
 
-    // movabs rax, imm64
-    *out++ = 0x48; // REX.W
-    *out++ = 0xB8; // MOV rax, imm64
+    // Construct and emit the LEA instruction to compute the target address into rdi
+    usz leaLen = buildLea(out, insnSrc, instrLen, immSize);
+    out += leaLen;
+
+    // push accessSize (imm8)
+    *out++ = 0x6A;
+    *out++ = static_cast<u8>(accessSize);
+    // pop rsi
+    *out++ = 0x5E;
+
+    // movabs rax, stubAddr
+    *out++ = 0x48;
+    *out++ = 0xB8;
     std::memcpy(out, &stubAddr, 8);
     out += 8;
-    ::printf("[emitBoundsCheckStub] After movabs: out=%p\n", out);
 
     // call rax (FF D0)
     *out++ = 0xFF;
@@ -1144,7 +1299,6 @@ static void emitBoundsCheckStub(u8*& out, u64 stubAddr) {
     *out++ = 0x5F;
     // pop rax
     *out++ = 0x58;
-    ::printf("[emitBoundsCheckStub] Exit: out=%p\n", out);
 }
 
 /**
@@ -1479,6 +1633,9 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         bool isIndirectJump;     // Indirect JMP/CALL — banned for containment.
         bool isRet;              // RET — rewritten with validation.
         bool isRspModifying;     // RSP modifying instruction.
+        usz immSize;
+        usz leaSize;
+        usz accessSize;
     };
 
     usz insnCapacity = codeSize;
@@ -1495,9 +1652,10 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         usz relOffset = 0;
         usz relSize = 0;
         bool isRspModifying = false;
+        usz immSize = 0;
 
         usz len = xi_x86_insn_length(code + pos, codeSize - pos,
-                                      hasMem, isRelJmp, relOffset, relSize, isRspModifying);
+                                      hasMem, isRelJmp, relOffset, relSize, isRspModifying, immSize);
         if (len == 0) {
             // Decoding failed — unknown instruction. Trap it.
             len = 1;
@@ -1512,9 +1670,9 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         bool isBannedPrivileged = isUnconditionallyBanned(code + pos, len);
         if (len == 1 && pos + 1 <= codeSize) {
             bool dummy1, dummy2, dummy5;
-            usz dummy3, dummy4;
+            usz dummy3, dummy4, dummy6;
             usz recheck = xi_x86_insn_length(code + pos, codeSize - pos,
-                                             dummy1, dummy2, dummy3, dummy4, dummy5);
+                                             dummy1, dummy2, dummy3, dummy4, dummy5, dummy6);
             if (recheck == 0) {
                 isBannedPrivileged = true; // Force trap for undecoded instruction.
             }
@@ -1541,6 +1699,27 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         info.isIndirectJump = isIndirectJump;
         info.isRet = isRet;
         info.isRspModifying = isRspModifying;
+        info.immSize = immSize;
+
+        if (hasMem) {
+            usz prefixLen = 0, modrmPos = 0, opcodeLen = 0;
+            bool hasRex = false;
+            u8 rex = 0;
+            parseLayout(code + pos, len, prefixLen, hasRex, rex, opcodeLen, modrmPos);
+            bool rexW = hasRex && (rex & 0x08);
+            bool has66 = false;
+            for (usz p = 0; p < prefixLen; ++p) {
+                if (code[pos + p] == 0x66) {
+                    has66 = true;
+                    break;
+                }
+            }
+            info.leaSize = getLeaSize(code + pos, len, immSize);
+            info.accessSize = getMemAccessSize(code + pos, len, rexW, has66);
+        } else {
+            info.leaSize = 0;
+            info.accessSize = 0;
+        }
 
         usz insnOutputSize = 0;
         if (isBannedPrivileged) {
@@ -1552,9 +1731,9 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         } else if (isRet) {
             insnOutputSize = kRetCheckStubSize;
         } else if (isHooked && callbackPtr) {
-            insnOutputSize = 22 + len;
+            insnOutputSize = 25 + len;
         } else if (hasMem) {
-            insnOutputSize = kStubSize + len;
+            insnOutputSize = 21 + info.leaSize + len;
         } else {
             insnOutputSize = len;
         }
@@ -1599,7 +1778,10 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         ::printf("[AOT Rewrite Detail] Insn %d: origOffset=%d, len=%d, beforeOffset=%d, bytes=",
                  (int)i, (int)info.origOffset, (int)info.instrLen, (int)(beforePtr - output));
         for (usz k = 0; k < info.instrLen; ++k) ::printf("%02x ", insnSrc[k]);
-        ::printf("\n");
+        if (i == 49) {
+            ::printf("[AOT Debug Insn 49 Rewrite] isHooked=%d, callbackPtr=%p, banned=%d\n",
+                     (int)info.isHooked, info.callbackPtr, (int)info.banned);
+        }
 
         if (info.isBannedPrivileged) {
             emitUd2(outPtr);
@@ -1630,14 +1812,18 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
             if (info.isRspModifying) {
                 emitStackCheckStub(outPtr, stackCheckAddr);
             }
+            ::printf("[AOT Debug Hook Rewrite] Insn %d completed, afterOffset=%d, written=",
+                     (int)i, (int)(outPtr - output));
+            for (usz k = 0; k < (usz)(outPtr - beforePtr); ++k) ::printf("%02x ", beforePtr[k]);
+            ::printf("\n");
             continue;
         }
 
         if (info.hasMem) {
             if (isStoreInstruction(insnSrc, info.instrLen)) {
-                emitBoundsCheckStub(outPtr, writeCheckAddr);
+                emitBoundsCheckStub(outPtr, writeCheckAddr, insnSrc, info.instrLen, info.immSize, info.accessSize);
             } else {
-                emitBoundsCheckStub(outPtr, boundsCheckAddr);
+                emitBoundsCheckStub(outPtr, boundsCheckAddr, insnSrc, info.instrLen, info.immSize, info.accessSize);
             }
         }
 
@@ -1666,7 +1852,7 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
             if (targetFound) {
                 usz curInsnOutputEnd = info.outputOffset;
                 if (info.hasMem) {
-                    curInsnOutputEnd += kStubSize;
+                    curInsnOutputEnd += 20 + info.leaSize;
                 }
                 curInsnOutputEnd += info.instrLen;
 

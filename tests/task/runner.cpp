@@ -17,6 +17,10 @@ struct GuestMessage {
 };
 
 void* translate_guest_addr(Task& task, usz virtAddr) {
+    if (task._state->stack && virtAddr >= reinterpret_cast<usz>(task._state->stack) &&
+        virtAddr < reinterpret_cast<usz>(task._state->stack) + task._state->stackSize) {
+        return reinterpret_cast<void*>(virtAddr);
+    }
     for (usz i = 0; i < task._state->regions.size(); ++i) {
         MemoryRegion& r = task._state->regions[i];
         if (virtAddr >= r.base && virtAddr < r.base + r.size) {
@@ -124,12 +128,19 @@ int main() {
 
     // Register CPUID instruction hook callback to service API calls from guest
     task.onInstruction("cpuid", [&]() {
-        // Read guest rbx register via inline assembly
-        usz msgVirt = 0;
-        asm volatile("mov %%rbx, %0" : "=r"(msgVirt));
+        // Read guest rbx register via thread-local storage saved in JIT helper
+        usz msgVirt = xi_last_guest_rbx;
+        std::printf("[Runner Hook] CPUID hook called! msgVirt=0x%llx\n", (unsigned long long)msgVirt);
+        std::fflush(stdout);
 
         GuestMessage* msg = (GuestMessage*)translate_guest_addr(task, msgVirt);
-        if (!msg) return;
+        if (!msg) {
+            std::printf("[Runner Hook] msg is null!\n");
+            std::fflush(stdout);
+            return;
+        }
+        std::printf("[Runner Hook] msg->cmd=%u\n", msg->cmd);
+        std::fflush(stdout);
 
         if (msg->cmd == 1) {
             // Command 1: Get Current Task ID

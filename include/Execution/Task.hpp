@@ -54,6 +54,8 @@ void xi_set_current_task(TaskState* s);
 bool xi_validate_context_before_switch(TaskState* state);
 bool xi_is_task_dead_recursive(usz tid);
 
+extern thread_local usz xi_last_guest_rbx;
+
 // -------------------------------------------------------------------------
 // Supporting Structures
 // -------------------------------------------------------------------------

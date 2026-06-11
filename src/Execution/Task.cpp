@@ -44,6 +44,7 @@ Task* Task::instance = nullptr;
 // -------------------------------------------------------------------------
 
 static thread_local TaskState* tl_currentTask = nullptr;
+thread_local usz xi_last_guest_rbx = 0;
 
 Task Task::current() {
     ensureInitialized();
@@ -68,6 +69,9 @@ TaskState* xi_get_current_task() {
 static void xi_aot_rewrite_task_regions(TaskState* state) {
     if (!state || !state->isIsolated) return;
 
+    TaskState* prev = xi_get_current_task();
+    xi_set_current_task(state);
+
     for (usz i = 0; i < state->regions.size(); ++i) {
         MemoryRegion& r = state->regions[i];
         if (r.physical && r.executable) {
@@ -80,7 +84,7 @@ static void xi_aot_rewrite_task_regions(TaskState* state) {
                     reg.originalSize = r.size;
                     reg.patchedCode = res.patchedCode;
                     reg.patchedSize = res.patchedSize;
-                    // state->aotCache.push(reg);
+                    state->aotCache.push(reg);
                     // //::printf("[AOT Debug] Cached physical=0x%lx size=0x%lx to patchedCode=%p size=0x%lx\n",
                     //          (long)reg.originalAddr, (long)reg.originalSize, reg.patchedCode, reg.patchedSize);
                     // //::printf("[AOT Debug] Patched bytes:\n");
@@ -93,6 +97,8 @@ static void xi_aot_rewrite_task_regions(TaskState* state) {
             }
         }
     }
+
+    xi_set_current_task(prev);
 }
 
 static void* xi_translate_to_patched_address(TaskState* state, void* addr) {
@@ -373,16 +379,23 @@ static void xi_context_switch_validated(TaskContext* from, TaskState* toState) {
 
 static void xi_context_switch_validated_core(TaskContext* from, TaskState* toState, CoreState& core) {
     if (!toState) {
+        ::printf("[Context Switch] Switching to idle context\n"); ::fflush(stdout);
         xi_context_switch(from, &core.idleContext);
         return;
     }
+    ::printf("[Context Switch] Validating toState id=%lu, rip=0x%lx, rsp=0x%lx\n", 
+              (unsigned long)toState->id, (unsigned long)toState->context.rip, (unsigned long)toState->context.rsp);
+    ::fflush(stdout);
     if (!xi_validate_context_before_switch(toState)) {
+        ::printf("[Context Switch] Validation failed for task %lu!\n", (unsigned long)toState->id); ::fflush(stdout);
         toState->status = TaskStatus::Destroyed;
         core.currentTaskId = 0;
         xi_set_current_task(nullptr);
         xi_context_switch(from, &core.idleContext);
         return;
     }
+    ::printf("[Context Switch] Switching to task %lu, rip=0x%lx\n", (unsigned long)toState->id, (unsigned long)toState->context.rip);
+    ::fflush(stdout);
     xi_context_switch(from, &toState->context);
 }
 
@@ -653,6 +666,8 @@ void Task::_execute_impl_raw(int mode, usz targetId, void (*fn)(void*), void* ar
             Task::enqueue(_state->id);
         }
     }
+    ::printf("[_execute_impl_raw] Completed! target status=%d\n", (int)_state->status);
+    ::fflush(stdout);
 
     if (!insideTask && mode == 2) {
         if (_state->id == 0) {
@@ -1601,6 +1616,8 @@ void Task::destroyTask(usz taskId) {
 }
 
 void Task::yield(usz coreId) {
+    ::printf("[Task::yield] entered coreId=%lu\n", (unsigned long)coreId);
+    ::fflush(stdout);
     ensureInitialized();
 
     // Wake tasks waiting for death.
