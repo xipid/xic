@@ -80,7 +80,15 @@ static void xi_aot_rewrite_task_regions(TaskState* state) {
                     reg.originalSize = r.size;
                     reg.patchedCode = res.patchedCode;
                     reg.patchedSize = res.patchedSize;
-                    state->aotCache.push(reg);
+                    // state->aotCache.push(reg);
+                    // //::printf("[AOT Debug] Cached physical=0x%lx size=0x%lx to patchedCode=%p size=0x%lx\n",
+                    //          (long)reg.originalAddr, (long)reg.originalSize, reg.patchedCode, reg.patchedSize);
+                    // //::printf("[AOT Debug] Patched bytes:\n");
+                    // for (int j = 0; j < 1024 && j < (int)reg.patchedSize; ++j) {
+                    //     ::printf("%02x ", reg.patchedCode[j]);
+                    //     if ((j + 1) % 16 == 0) ::printf("\n");
+                    // }
+                    // ::printf("\n");
                 }
             }
         }
@@ -93,6 +101,15 @@ static void* xi_translate_to_patched_address(TaskState* state, void* addr) {
     for (usz i = 0; i < state->regions.size(); ++i) {
         MemoryRegion& r = state->regions[i];
         if (r.physical && r.executable) {
+            // Check virtual address space
+            if (target >= r.base && target < r.base + r.size) {
+                AOTRegion* cached = AOT::findCached(state->aotCache, reinterpret_cast<usz>(r.physical), r.size);
+                if (cached && cached->patchedCode) {
+                    usz offset = target - r.base;
+                    return cached->patchedCode + offset;
+                }
+            }
+            // Check physical address space
             if (target >= reinterpret_cast<usz>(r.physical) &&
                 target < reinterpret_cast<usz>(r.physical) + r.size) {
                 AOTRegion* cached = AOT::findCached(state->aotCache, reinterpret_cast<usz>(r.physical), r.size);
@@ -578,7 +595,9 @@ void Task::_execute_impl_raw(int mode, usz targetId, void (*fn)(void*), void* ar
     if (fn) {
         if (_state->isIsolated) {
             xi_aot_rewrite_task_regions(_state);
+            void* origFn = (void*)fn;
             fn = (void(*)(void*))xi_translate_to_patched_address(_state, (void*)fn);
+            //::printf("[AOT Debug] Translated entry point %p to %p\n", origFn, fn);
         }
         _state->entryFn = fn;
         _state->entryArg = arg;
@@ -737,8 +756,8 @@ void Task::alloc(usz dest, usz length) {
     if (!_state || length == 0) return;
     Task caller = Task::current();
     if (caller.valid() && caller.id() != 0) {
-        if (_state->parentId != caller.id()) {
-            return; // Blocked: only parent can allocate memory.
+        if (_state->parentId != caller.id() && _state->id != caller.id()) {
+            return; // Blocked: only parent or self can allocate memory.
         }
     }
 
@@ -750,34 +769,13 @@ void Task::alloc(usz dest, usz length) {
     region.size = length;
     region.physical = mem;
     region.writable = true;
-    region.executable = false; // W^X: writable regions are NOT executable.
+    region.executable = true; // All memory is writable and executable
     region.owned = true;
 
     _state->regions.push(region);
 }
 
-void Task::allocExecutable(usz dest, usz length) {
-    if (!_state || length == 0) return;
-    Task caller = Task::current();
-    if (caller.valid() && caller.id() != 0) {
-        if (_state->parentId != caller.id()) {
-            return; // Blocked: only parent can allocate executable memory.
-        }
-    }
 
-    u8* mem = xi_allocate_and_carve(_state, length, true);
-    if (!mem) return;
-
-    MemoryRegion region;
-    region.base = dest;
-    region.size = length;
-    region.physical = mem;
-    region.writable = false;   // W^X: executable regions are NOT writable.
-    region.executable = true;
-    region.owned = true;
-
-    _state->regions.push(region);
-}
 
 void Task::map(usz source, usz dest, usz length) {
     if (!_state || length == 0) return;
@@ -968,8 +966,8 @@ void Task::unmap() {
     // Clear all memory translations.
     _state->translations.clear();
 
-    // Clear the onFetch callback (memory handler).
-    _state->onFetch._clear();
+    // Clear all registered fetch ranges.
+    _state->fetchRanges.clear();
 
     // Invalidate AOT cache since memory layout changed.
     AOT::destroyCache(_state->aotCache);
@@ -1126,7 +1124,7 @@ void Task::setMemorySize(usz bytes) {
 // Core Management
 // -------------------------------------------------------------------------
 
-void Task::setup(usz coreId) {
+void Task::setup(usz coreId, bool startTimer) {
     Task caller = Task::current();
     if (caller.valid() && (caller.id() != 0 || caller.parentId() != 0)) {
         return; // Child tasks cannot modify cores
@@ -1145,7 +1143,9 @@ void Task::setup(usz coreId) {
     core.enabled = true;
     core.currentTaskId = 0; // Root task.
 
-    xi_timer_start(coreId, _interruptIntervalUs);
+    if (startTimer) {
+        xi_timer_start(coreId, _interruptIntervalUs);
+    }
 
     // Auto-enqueue any Ready tasks that are not yet enqueued
     for (usz i = 1; i < _tasks.size(); ++i) {
@@ -1275,14 +1275,103 @@ void Task::OnChangeFrequencyProxy::operator()(usz coreId, u32 proposedFreq) cons
 // -------------------------------------------------------------------------
 
 void Task::setOnFetch(Func<void(usz, usz)> cb) {
+    setOnFetch(0, (usz)-1, cb);
+}
+
+void Task::setOnFetch(usz start, usz end, Func<void(usz, usz)> cb) {
     if (!_state) return;
     Task caller = Task::current();
     if (caller.valid() && caller.id() != 0) {
         if (_state->parentId != caller.id()) {
-            return; // Blocked: only parent can set onFetch callback.
+            return; // Blocked: only parent can set callbacks.
         }
     }
-    _state->onFetch = cb;
+    TaskState::FetchRange fr;
+    fr.start = start;
+    fr.end = end;
+    fr.callback = cb;
+    fr.cached = false;
+    fr.resolved = false;
+    _state->fetchRanges.push(fr);
+}
+
+void Task::setOnFetchCached(usz start, usz end, Func<void(usz, usz)> cb) {
+    if (!_state) return;
+    Task caller = Task::current();
+    if (caller.valid() && caller.id() != 0) {
+        if (_state->parentId != caller.id()) {
+            return; // Blocked: only parent can set callbacks.
+        }
+    }
+    TaskState::FetchRange fr;
+    fr.start = start;
+    fr.end = end;
+    fr.callback = cb;
+    fr.cached = true;
+    fr.resolved = false;
+    _state->fetchRanges.push(fr);
+}
+
+void Task::uncache(usz start, usz end) {
+    if (!_state) return;
+    Task caller = Task::current();
+    if (caller.valid() && caller.id() != 0) {
+        if (_state->parentId != caller.id() && _state->id != caller.id()) {
+            return; // Blocked: only self or parent can uncache.
+        }
+    }
+    // Reset resolved state in fetchRanges
+    for (usz i = 0; i < _state->fetchRanges.size(); ++i) {
+        TaskState::FetchRange& fr = _state->fetchRanges[i];
+        if (fr.start >= start && fr.end <= end) {
+            fr.resolved = false;
+        }
+    }
+    // Unmap the region directly (bypassing parent check in Task::unmap)
+    usz length = end - start;
+    for (long long i = (long long)_state->regions.size() - 1; i >= 0; --i) {
+        MemoryRegion& r = _state->regions[(usz)i];
+        if (r.base < start + length && r.base + r.size > start) {
+            if (r.physical) {
+                Task::releaseAllocation(r.physical);
+            }
+            usz last = _state->regions.size() - 1;
+            if ((usz)i != last) {
+                _state->regions[(usz)i] = _state->regions[last];
+            }
+            _state->regions.pop();
+        }
+    }
+}
+
+void Task::uncache() {
+    if (!_state) return;
+    Task caller = Task::current();
+    if (caller.valid() && caller.id() != 0) {
+        if (_state->parentId != caller.id() && _state->id != caller.id()) {
+            return; // Blocked: only self or parent can uncache.
+        }
+    }
+    for (usz i = 0; i < _state->fetchRanges.size(); ++i) {
+        TaskState::FetchRange& fr = _state->fetchRanges[i];
+        fr.resolved = false;
+        // Unmap range directly
+        usz start = fr.start;
+        usz length = fr.end - fr.start;
+        for (long long j = (long long)_state->regions.size() - 1; j >= 0; --j) {
+            MemoryRegion& r = _state->regions[(usz)j];
+            if (r.base < start + length && r.base + r.size > start) {
+                if (r.physical) {
+                    Task::releaseAllocation(r.physical);
+                }
+                usz last = _state->regions.size() - 1;
+                if ((usz)j != last) {
+                    _state->regions[(usz)j] = _state->regions[last];
+                }
+                _state->regions.pop();
+            }
+        }
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -1527,6 +1616,28 @@ void Task::yield(usz coreId) {
 
     TaskState* caller = xi_get_current_task();
     if (caller) {
+        // Auto-uncaching: unmap any regions corresponding to non-cached onFetch ranges
+        for (usz i = 0; i < caller->fetchRanges.size(); ++i) {
+            TaskState::FetchRange& fr = caller->fetchRanges[i];
+            if (!fr.cached) {
+                // Unmap this range directly
+                usz start = fr.start;
+                usz length = fr.end - fr.start;
+                for (long long j = (long long)caller->regions.size() - 1; j >= 0; --j) {
+                    MemoryRegion& r = caller->regions[(usz)j];
+                    if (r.base < start + length && r.base + r.size > start) {
+                        if (r.physical) {
+                            Task::releaseAllocation(r.physical);
+                        }
+                        usz last = caller->regions.size() - 1;
+                        if ((usz)j != last) {
+                            caller->regions[(usz)j] = caller->regions[last];
+                        }
+                        caller->regions.pop();
+                    }
+                }
+            }
+        }
         // 1- A task couldnt yield as another core, only the core they are executing in.
         // Task::yield() with no args uses the current core (forced if in task, or 0 if not).
         coreId = caller->currentCore;
@@ -1864,6 +1975,7 @@ void Task::ensureInitialized() {
 }
 
 void Task::reset() {
+    tl_currentTask = nullptr;
     for (usz i = 0; i < 64; ++i) {
         xi_timer_stop(i);
     }

@@ -209,3 +209,16 @@ foreach(TEST_SRC ${TEST_SOURCES})
     target_link_libraries(${TEST_NAME} PRIVATE Xi::Xi)
     set_target_properties(${TEST_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
 endforeach()
+
+# --- Additional Task ELF Loading/IPC Tests ---
+# Build internal guest binary (statically linked, freestanding, no libc)
+add_executable(internal tests/task/internal.cpp)
+target_compile_options(internal PRIVATE -nostdlib -fno-exceptions -fno-rtti -fno-pie -fno-stack-protector)
+target_link_options(internal PRIVATE -nostdlib -static -fno-exceptions -fno-rtti -no-pie -T ${CMAKE_CURRENT_SOURCE_DIR}/tests/task/internal.ld)
+set_target_properties(internal PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
+
+# Build runner host executable (which loads the internal binary)
+add_executable(runner tests/task/runner.cpp)
+target_link_libraries(runner PRIVATE Xi::Xi)
+set_target_properties(runner PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
+

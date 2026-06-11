@@ -159,7 +159,7 @@ void testMemory() {
     TEST("region base is 0x1000", task._state->regions[0].base == 0x1000);
     TEST("region size is 256", task._state->regions[0].size == 256);
     TEST("region is writable", task._state->regions[0].writable);
-    TEST("region is not executable (W^X)", !task._state->regions[0].executable);
+    TEST("region is executable", task._state->regions[0].executable);
     TEST("region is owned", task._state->regions[0].owned);
 
     // Copy within the region.
@@ -397,7 +397,7 @@ void testStarvationPrevention() {
     std::printf("\n[Starvation Prevention]\n");
 
     xi_reset_task_state_for_tests();
-    Task::setup(0);
+    Task::setup(0, false);
 
     Task root = Task::root();
 
@@ -431,7 +431,7 @@ void testQuotaUnderflowSafety() {
     std::printf("\n[Quota Underflow Safety]\n");
 
     xi_reset_task_state_for_tests();
-    Task::setup(0);
+    Task::setup(0, false);
 
     Task root = Task::root();
     Task t1 = root.spawn();
@@ -517,7 +517,7 @@ void testTaskJump() {
     child.alloc(0x1000, 4096);
     
     jumpRan = false;
-    Task::setup(0);
+    Task::setup(0, false);
     child.jump(jumpedFunction, 42); // Auto-starts
     
     for (int i = 0; i < 5; ++i) {
@@ -538,7 +538,7 @@ static void waitStarter(void* arg) {
 void testTaskWaitAndWake() {
     std::printf("\n[Task Wait & Message Wake]\n");
     xi_reset_task_state_for_tests();
-    Task::setup(0);
+    Task::setup(0, false);
     Task root = Task::root();
     Task child = root.spawn(waitStarter, nullptr); // Auto-starts
     
@@ -610,7 +610,7 @@ static void spawnOverloadFn2(int val) {
 void testSpawnOverloads() {
     std::printf("\n[Spawn Overloads]\n");
     xi_reset_task_state_for_tests();
-    Task::setup(0);
+    Task::setup(0, false);
     Task root = Task::root();
 
     spawnOverloadFn1Ran = false;
@@ -651,14 +651,14 @@ void testUnmapIsolation() {
     // Set an onFetch callback.
     bool fetchSet = false;
     task.setOnFetch([&](usz dest, usz length) { fetchSet = true; });
-    TEST("onFetch callback set", (bool)task._state->onFetch);
+    TEST("onFetch callback set", task._state->fetchRanges.size() > 0);
 
     // Full isolation unmap.
     task.unmap();
 
     TEST("all regions removed", task._state->regions.size() == 0);
     TEST("translations cleared", task._state->translations.size() == 0);
-    TEST("onFetch cleared", !(bool)task._state->onFetch);
+    TEST("onFetch cleared", task._state->fetchRanges.size() == 0);
     TEST("task is now isolated", task._state->isIsolated);
 }
 
@@ -729,7 +729,7 @@ static void waitDeadInsideStarter(void* arg) {
 void testTaskWaitDead() {
     std::printf("\n[Task WaitDead]\n");
     xi_reset_task_state_for_tests();
-    Task::setup(0);
+    Task::setup(0, false);
     Task root = Task::root();
 
     waitDeadTask1Ran = false;
@@ -837,21 +837,187 @@ void testOnInstructionSelfRegister() {
 }
 
 void testWxEnforcement() {
-    std::printf("\n[W^X Enforcement]\n");
+    std::printf("\n[RWX Enforcement]\n");
 
     xi_reset_task_state_for_tests();
     Task root = Task::root();
     Task task = root.spawn();
 
-    // Regular alloc — writable, not executable.
+    // Regular alloc — writable and executable.
     task.alloc(0x1000, 256);
     TEST("alloc: writable", task._state->regions[0].writable);
-    TEST("alloc: not executable", !task._state->regions[0].executable);
+    TEST("alloc: executable", task._state->regions[0].executable);
+}
 
-    // Executable alloc — executable, not writable.
-    task.allocExecutable(0x2000, 256);
-    TEST("allocExec: not writable", !task._state->regions[1].writable);
-    TEST("allocExec: executable", task._state->regions[1].executable);
+void testJitExecution() {
+    std::printf("\n[JIT Execution]\n");
+
+    xi_reset_task_state_for_tests();
+    Task::setup(0, false);
+    Task root = Task::root();
+    Task task = root.spawn();
+
+    // Isolate the task.
+    task.unmap();
+
+    // Allocate writable-executable memory at virtual address 0x1000.
+    task.alloc(0x1000, 256);
+
+    // Write some basic machine code: "mov eax, 123; ret"
+    // Opcode for mov eax, 123 is B8 7B 00 00 00.
+    // Opcode for ret is C3.
+    u8* phys = task._state->regions[0].physical;
+    phys[0] = 0xB8;
+    phys[1] = 0x7B;
+    phys[2] = 0x00;
+    phys[3] = 0x00;
+    phys[4] = 0x00;
+    phys[5] = 0xC3;
+
+    // Start/execute the task starting at virtual address 0x1000.
+    task.jump((usz)0x1000);
+    std::printf("Task enqueued. currentCore: %d, status: %d, runQueue size for core %d: %d\n",
+                (int)task._state->currentCore, (int)task._state->status,
+                (int)task._state->currentCore, (int)Task::coreState(task._state->currentCore)->runQueue.size());
+    // Let's run it by yielding (running the scheduler).
+    for (int i = 0; i < 20; ++i) {
+        yield();
+    }
+
+    // Verify task finished successfully!
+    std::printf("JIT task status: %d\n", (int)task.status());
+    TEST("JIT task finished", task.status() == TaskStatus::Finished);
+}
+
+void testDynamicJitExecution() {
+    std::printf("\n[Dynamic Indirect JIT Execution]\n");
+
+    xi_reset_task_state_for_tests();
+    Task::setup(0, false);
+    Task root = Task::root();
+    Task task = root.spawn();
+
+    // Isolate the task.
+    task.unmap();
+
+    // Allocate two regions inside the virtual address space.
+    task.alloc(0x1000, 256); // Region 0 at virtual address 0x1000
+    task.alloc(0x2000, 256); // Region 1 at virtual address 0x2000
+
+    u8* phys1 = task._state->regions[0].physical;
+    u8* phys2 = task._state->regions[1].physical;
+
+    // Write "mov rax, 0x2000; jmp rax" in region 0
+    // mov rax, imm64 is 48 B8 [8 bytes]
+    phys1[0] = 0x48;
+    phys1[1] = 0xB8;
+    u64 targetVirt = 0x2000;
+    std::memcpy(&phys1[2], &targetVirt, 8);
+    // jmp rax is FF E0
+    phys1[10] = 0xFF;
+    phys1[11] = 0xE0;
+
+    // Write "mov eax, 456; ret" in region 1 (phys2)
+    phys2[0] = 0xB8;
+    phys2[1] = 0xC8;
+    phys2[2] = 0x01;
+    phys2[3] = 0x00;
+    phys2[4] = 0x00;
+    phys2[5] = 0xC3;
+
+    // Run the task starting at virtual address 0x1000
+    task.jump((usz)0x1000);
+    for (int i = 0; i < 20; ++i) {
+        yield();
+    }
+
+    std::printf("Dynamic JIT task status: %d\n", (int)task.status());
+    TEST("Dynamic JIT task finished", task.status() == TaskStatus::Finished);
+}
+
+extern "C" void xi_sfi_bounds_check(void* addr, usz size);
+
+void testDemandPaging() {
+    std::printf("\n[Demand Paging: onFetch / onFetchCached]\n");
+
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+    Task task = root.spawn();
+
+    task.unmap(); // Isolate the task
+
+    // 1. Test onFetchCached (caching demand-paging)
+    int fetchCachedCount = 0;
+    // We register onFetchCached for range [0x1000, 0x2000)
+    task.setOnFetchCached(0x1000, 0x2000, [&](usz start, usz end) {
+        fetchCachedCount++;
+        // The resolver maps the region
+        task.alloc(start, end - start);
+    });
+
+    TEST("onFetchCached initially unresolved", task._state->fetchRanges[0].resolved == false);
+
+    // Trigger bounds check directly to simulate memory access at 0x1200
+    // Set active task context so bounds_check runs on this task
+    xi_set_current_task(task._state);
+    xi_sfi_bounds_check((void*)0x1200, 4);
+
+    TEST("onFetchCached resolved after access", task._state->fetchRanges[0].resolved == true);
+    TEST("onFetchCached callback called exactly once", fetchCachedCount == 1);
+    TEST("onFetchCached region mapped", task._state->regions.size() == 1);
+
+    // Access again — should not call the callback since it's cached/native now
+    xi_sfi_bounds_check((void*)0x1500, 4);
+    TEST("onFetchCached callback not called again", fetchCachedCount == 1);
+
+    // 2. Test explicit uncache
+    task.uncache(0x1000, 0x2000);
+    TEST("onFetchCached unresolved after explicit uncache", task._state->fetchRanges[0].resolved == false);
+    TEST("onFetchCached region unmapped", task._state->regions.size() == 0);
+
+    // Access again — should call callback again!
+    xi_sfi_bounds_check((void*)0x1200, 4);
+    TEST("onFetchCached callback called after uncache", fetchCachedCount == 2);
+
+    // 3. Test onFetch (non-caching demand-paging)
+    int fetchCount = 0;
+    // We must clear the current task to register the parent callback!
+    xi_set_current_task(nullptr);
+    task.setOnFetch(0x3000, 0x4000, [&](usz start, usz end) {
+        fetchCount++;
+        task.alloc(start, end - start);
+    });
+    // Restore child task context
+    xi_set_current_task(task._state);
+
+    xi_sfi_bounds_check((void*)0x3500, 4);
+    TEST("onFetch callback called on access", fetchCount == 1);
+    TEST("onFetch region mapped", task._state->regions.size() == 2); // 0x1000 region + 0x3000 region
+
+    // Access again — onFetch always calls resolver
+    xi_sfi_bounds_check((void*)0x3500, 4);
+    TEST("onFetch callback not called on back-to-back access in same slice", fetchCount == 1);
+
+    // Run scheduler / yield to simulate time slice end
+    Task::yield();
+
+    // Now the non-cached region at 0x3000 should be auto-uncached!
+    // But the cached region at 0x1000 should still be resident!
+    bool region3000Found = false;
+    bool region1000Found = false;
+    for (usz i = 0; i < task._state->regions.size(); ++i) {
+        if (task._state->regions[i].base == 0x3000) region3000Found = true;
+        if (task._state->regions[i].base == 0x1000) region1000Found = true;
+    }
+    TEST("onFetch region auto-uncached on yield", region3000Found == false);
+    TEST("onFetchCached region remains resident on yield", region1000Found == true);
+
+    // Access onFetch range again after yield — should trigger callback again!
+    xi_sfi_bounds_check((void*)0x3500, 4);
+    TEST("onFetch callback called again after yield", fetchCount == 2);
+
+    // Clean up current task
+    xi_set_current_task(nullptr);
 }
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -884,50 +1050,50 @@ void testSecurityHardening() {
     AOTResult res = AOT::rewrite(repSyscall, 3, regions, 0);
     TEST("REP SYSCALL rewrite success", res.success);
     TEST("REP SYSCALL trapped with ud2", res.patchedSize == 2 && res.patchedCode[0] == 0x0F && res.patchedCode[1] == 0x0B);
-    std::free(res.patchedCode);
+    AOT::freePatchedCode(res.patchedCode, res.patchedSize);
 
     // Test IRET (\xCF)
     u8 iret[] = { 0xCF };
     res = AOT::rewrite(iret, 1, regions, 0);
     TEST("IRET trapped with ud2", res.patchedSize == 2 && res.patchedCode[0] == 0x0F && res.patchedCode[1] == 0x0B);
-    std::free(res.patchedCode);
+    AOT::freePatchedCode(res.patchedCode, res.patchedSize);
 
     // Test MOV SS, EAX (\x8E\xD0)
     u8 movss[] = { 0x8E, 0xD0 };
     res = AOT::rewrite(movss, 2, regions, 0);
     TEST("MOV SS trapped with ud2", res.patchedSize == 2 && res.patchedCode[0] == 0x0F && res.patchedCode[1] == 0x0B);
-    std::free(res.patchedCode);
+    AOT::freePatchedCode(res.patchedCode, res.patchedSize);
 
     // Test LSS (\x0F\xB2\xC0)
     u8 lss[] = { 0x0F, 0xB2, 0xC0 };
     res = AOT::rewrite(lss, 3, regions, 0);
     TEST("LSS trapped with ud2", res.patchedSize == 2 && res.patchedCode[0] == 0x0F && res.patchedCode[1] == 0x0B);
-    std::free(res.patchedCode);
+    AOT::freePatchedCode(res.patchedCode, res.patchedSize);
 
     // Test RDFSBASE (\xF3\x0F\xAE\xC0)
     u8 rdfsbase[] = { 0xF3, 0x0F, 0xAE, 0xC0 };
     res = AOT::rewrite(rdfsbase, 4, regions, 0);
     TEST("RDFSBASE trapped with ud2", res.patchedSize == 2 && res.patchedCode[0] == 0x0F && res.patchedCode[1] == 0x0B);
-    std::free(res.patchedCode);
+    AOT::freePatchedCode(res.patchedCode, res.patchedSize);
 
     // Test indirect far call (FF /3 -> \xFF\x18)
     u8 farcall[] = { 0xFF, 0x18 };
     res = AOT::rewrite(farcall, 2, regions, 0);
     TEST("Indirect far call trapped with ud2", res.patchedSize == 2 && res.patchedCode[0] == 0x0F && res.patchedCode[1] == 0x0B);
-    std::free(res.patchedCode);
+    AOT::freePatchedCode(res.patchedCode, res.patchedSize);
 
     // 3. RSP modifications (XCHG, POPFQ)
     // Test XCHG RSP, RAX (\x48\x94)
     u8 xchgRsp[] = { 0x48, 0x94 };
     res = AOT::rewrite(xchgRsp, 2, regions, 0);
     TEST("XCHG RSP includes stack check", res.patchedSize == 21);
-    std::free(res.patchedCode);
+    AOT::freePatchedCode(res.patchedCode, res.patchedSize);
 
     // Test POPFQ (\x9D)
     u8 popfq[] = { 0x9D };
     res = AOT::rewrite(popfq, 1, regions, 0);
     TEST("POPFQ includes stack check", res.patchedSize == 20);
-    std::free(res.patchedCode);
+    AOT::freePatchedCode(res.patchedCode, res.patchedSize);
 #endif
 }
 
@@ -963,6 +1129,9 @@ int main() {
     testForkBombProtection();
     testOnInstructionSelfRegister();
     testWxEnforcement();
+    testJitExecution();
+    testDynamicJitExecution();
+    testDemandPaging();
     testSecurityHardening();
 
     // --- Context-switch tests (may corrupt heap in hosted mode) ---

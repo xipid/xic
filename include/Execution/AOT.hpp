@@ -101,6 +101,14 @@ public:
      * @param cache  The AOT cache to destroy.
      */
     static void destroyCache(Array<AOTRegion>& cache);
+
+    /**
+     * @brief Frees a patched code buffer.
+     *
+     * @param patchedCode  The buffer to free.
+     * @param patchedSize  The size of the patched code.
+     */
+    static void freePatchedCode(u8* patchedCode, usz patchedSize);
 };
 
 } // namespace Execution

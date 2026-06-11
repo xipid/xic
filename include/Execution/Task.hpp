@@ -146,7 +146,14 @@ struct TaskState {
     Array<usz> sharedIds;   ///< IDs of tasks shared to this one.
 
     // Callbacks (stored here, proxied through Task handle)
-    Func<void(usz dest, usz length)> onFetch;
+    struct FetchRange {
+        usz start;
+        usz end;
+        Func<void(usz start, usz end)> callback;
+        bool cached;
+        bool resolved;
+    };
+    Array<FetchRange> fetchRanges;
 
     // Entry point for raw tasks
     void (*entryFn)(void*);
@@ -297,14 +304,15 @@ public:
                 maxReg = _state->regions[i].size;
             }
         }
-        return maxReg > 0 ? maxReg : XI_DEFAULT_TASK_MEM;
+        usz size = maxReg > 0 ? maxReg : XI_DEFAULT_TASK_MEM;
+        return size < XI_DEFAULT_TASK_MEM ? XI_DEFAULT_TASK_MEM : size;
     }
 
     /** @brief Returns a handle to the currently executing task on this core. */
     static Task current();
 
     // -- Core Management --
-    static void setup(usz coreId);
+    static void setup(usz coreId, bool startTimer = true);
     static void disable(usz coreId);
     static void setFrequencySlider(usz coreId, u32 minFreq, u32 maxFreq);
 
@@ -406,13 +414,7 @@ public:
      */
     void alloc(usz dest, usz length);
 
-    /**
-     * @brief Allocates executable (read-only) memory at the given virtual address.
-     *
-     * W^X policy: executable regions are NOT writable. To modify code, the parent
-     * must unmap, write to a writable region, then map as executable.
-     */
-    void allocExecutable(usz dest, usz length);
+
 
     /**
      * @brief Maps existing physical memory from `source` to `dest`.
@@ -493,6 +495,10 @@ public:
      * @param cb  Callback receiving (dest address, requested length).
      */
     void setOnFetch(Func<void(usz, usz)> cb);
+    void setOnFetch(usz start, usz end, Func<void(usz, usz)> cb);
+    void setOnFetchCached(usz start, usz end, Func<void(usz, usz)> cb);
+    void uncache(usz start, usz end);
+    void uncache();
 
     // -- Children --
 
@@ -523,8 +529,7 @@ public:
     static void copy(usz source, usz dest, usz length) { current().copy(source, dest, length); }
     template <typename Dummy = void>
     static void alloc(usz dest, usz length) { current().alloc(dest, length); }
-    template <typename Dummy = void>
-    static void allocExecutable(usz dest, usz length) { current().allocExecutable(dest, length); }
+
     template <typename Dummy = void>
     static void map(usz source, usz dest, usz length) { current().map(source, dest, length); }
     template <typename Dummy = void>
@@ -543,6 +548,14 @@ public:
     static void setMemorySize(usz bytes) { current().setMemorySize(bytes); }
     template <typename Dummy = void>
     static void setOnFetch(Func<void(usz, usz)> cb) { current().setOnFetch(cb); }
+    template <typename Dummy = void>
+    static void setOnFetch(usz start, usz end, Func<void(usz, usz)> cb) { current().setOnFetch(start, end, cb); }
+    template <typename Dummy = void>
+    static void setOnFetchCached(usz start, usz end, Func<void(usz, usz)> cb) { current().setOnFetchCached(start, end, cb); }
+    template <typename Dummy = void>
+    static void uncache(usz start, usz end) { current().uncache(start, end); }
+    template <typename Dummy = void>
+    static void uncache() { current().uncache(); }
     template <typename Dummy = void>
     static void onInstruction(const String& instruction, Func<void()> callback) {
         current().onInstruction(instruction, callback);

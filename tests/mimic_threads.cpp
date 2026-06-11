@@ -25,7 +25,7 @@ int main() {
     std::printf("=== Mimicking 6 Threads Waiting Use-Case ===\n");
 
     // Call setup() to setup core 0 before spawning threads
-    Task::setup(0);
+    Task::setup(0, false);
 
     Task root = Task::root();
     Task threads[6];

@@ -26,13 +26,10 @@ If any validation check fails, the task's status is changed to `TaskStatus::Dest
 
 When switching context from the kernel/scheduler to a task, volatile registers can leak sensitive data (such as kernel stack pointers, task registry structures, or cryptographic keys). To prevent this information leakage, the context switch assembly (`xi_context_switch` in `Context_Amd64.S`) zeroes all volatile registers (`rax`, `rcx`, `rdx`, `rsi`, `r8`, `r9`, `r10`, `r11`) before jumping to the task.
 
-## W^X (Write XOR Execute) Policy
+## Writable and Executable Memory (No W^X)
 
-To prevent tasks from dynamically writing code and executing it to bypass SFI checks, the task subsystem enforces a strict W^X policy:
-- **Writable Memory**: Allocated via `alloc()`. These regions are mapped as writable but non-executable.
-- **Executable Memory**: Allocated via `allocExecutable()`. These regions are mapped as executable but read-only (non-writable).
-
-Any attempt by a task to execute code from a writable region or write code to an executable region will cause a validation failure.
+To support dynamic code generation (such as JIT compilation) within tasks, memory allocated via `alloc()` is mapped as both writable and executable.
+The task subsystem relies on SFI and Ahead-of-Time (AOT) binary rewriting to instrument the instruction stream of any executable region (including dynamically written memory) before execution, ensuring that dynamic code cannot bypass sandbox containment boundaries.
 
 ## Instruction Hooking, Banning, and Prefix Bypass Prevention
 

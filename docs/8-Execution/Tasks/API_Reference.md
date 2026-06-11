@@ -105,10 +105,7 @@ Suspends the current task and registers the function `fn(args...)` to execute up
 ## Memory and Sandboxing
 
 ### `void alloc(usz dest, usz length)`
-Allocates physical memory of `length` bytes and maps it to the task's virtual address space starting at `dest`. Maps the region as writable but non-executable (W^X).
-
-### `void allocExecutable(usz dest, usz length)`
-Allocates physical memory of `length` bytes and maps it to the task's virtual address space starting at `dest` as executable but read-only (W^X).
+Allocates physical memory of `length` bytes and maps it to the task's virtual address space starting at `dest`. Maps the region as both writable and executable.
 
 ### `void map(usz source, usz dest, usz length)`
 Maps virtual memory from the caller's space (`source`) into the target task's virtual space (`dest`). Mapped memory is read-only.

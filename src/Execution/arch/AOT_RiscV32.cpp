@@ -258,6 +258,12 @@ AOTRegion* AOT::findCached(Array<AOTRegion>& cache, usz addr, usz size) {
     return nullptr;
 }
 
+void AOT::freePatchedCode(u8* patchedCode, usz /*patchedSize*/) {
+    if (patchedCode) {
+        std::free(patchedCode);
+    }
+}
+
 void AOT::invalidate(Array<AOTRegion>& cache, usz addr, usz size) {
     usz end = (size == 0) ? (usz)-1 : addr + size;
     for (usz i = cache.size(); i > 0; --i) {
@@ -265,7 +271,7 @@ void AOT::invalidate(Array<AOTRegion>& cache, usz addr, usz size) {
         usz rEnd = cache[idx].originalAddr + cache[idx].originalSize;
         if (cache[idx].originalAddr < end && rEnd > addr) {
             if (cache[idx].patchedCode) {
-                std::free(cache[idx].patchedCode);
+                freePatchedCode(cache[idx].patchedCode, cache[idx].patchedSize);
             }
             for (usz j = idx; j + 1 < cache.size(); ++j) {
                 cache[j] = cache[j + 1];
@@ -278,7 +284,7 @@ void AOT::invalidate(Array<AOTRegion>& cache, usz addr, usz size) {
 void AOT::destroyCache(Array<AOTRegion>& cache) {
     for (usz i = 0; i < cache.size(); ++i) {
         if (cache[i].patchedCode) {
-            std::free(cache[i].patchedCode);
+            freePatchedCode(cache[i].patchedCode, cache[i].patchedSize);
             cache[i].patchedCode = nullptr;
         }
     }

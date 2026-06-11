@@ -50,7 +50,7 @@ int main() {
     std::printf("=== Realistic Developer Use-Case Test ===\n");
 
     // Initialize core 0 for scheduling
-    Task::setup(0);
+    Task::setup(0, false);
 
     // Get handle to current task (root)
     Task root = Task::current();
