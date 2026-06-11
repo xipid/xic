@@ -65,6 +65,131 @@ TaskState* xi_get_current_task() {
     return tl_currentTask;
 }
 
+static void xi_aot_rewrite_task_regions(TaskState* state) {
+    if (!state || !state->isIsolated) return;
+
+    for (usz i = 0; i < state->regions.size(); ++i) {
+        MemoryRegion& r = state->regions[i];
+        if (r.physical && r.executable) {
+            AOTRegion* cached = AOT::findCached(state->aotCache, reinterpret_cast<usz>(r.physical), r.size);
+            if (!cached) {
+                AOTResult res = AOT::rewrite(r.physical, r.size, state->regions, 0);
+                if (res.success && res.patchedCode) {
+                    AOTRegion reg;
+                    reg.originalAddr = reinterpret_cast<usz>(r.physical);
+                    reg.originalSize = r.size;
+                    reg.patchedCode = res.patchedCode;
+                    reg.patchedSize = res.patchedSize;
+                    state->aotCache.push(reg);
+                }
+            }
+        }
+    }
+}
+
+static void* xi_translate_to_patched_address(TaskState* state, void* addr) {
+    if (!state || !state->isIsolated || !addr) return addr;
+    usz target = reinterpret_cast<usz>(addr);
+    for (usz i = 0; i < state->regions.size(); ++i) {
+        MemoryRegion& r = state->regions[i];
+        if (r.physical && r.executable) {
+            if (target >= reinterpret_cast<usz>(r.physical) &&
+                target < reinterpret_cast<usz>(r.physical) + r.size) {
+                AOTRegion* cached = AOT::findCached(state->aotCache, reinterpret_cast<usz>(r.physical), r.size);
+                if (cached && cached->patchedCode) {
+                    usz offset = target - reinterpret_cast<usz>(r.physical);
+                    return cached->patchedCode + offset;
+                }
+            }
+        }
+    }
+    return addr;
+}
+
+static u8* xi_carve_from_parent(TaskState* parent, usz length, bool executable) {
+    if (!parent) return nullptr;
+    for (usz i = 0; i < parent->regions.size(); ++i) {
+        MemoryRegion& pr = parent->regions[i];
+        if (!pr.physical) continue;
+        if (executable ? !pr.executable : !pr.writable) continue;
+        if (pr.size < length) continue;
+
+        for (usz offset = 0; offset <= pr.size - length; offset += 16) {
+            u8* candidate = pr.physical + offset;
+            bool overlap = false;
+            for (usz c = 0; c < parent->childIds.size(); ++c) {
+                TaskState* child = Task::_tasks[parent->childIds[c]];
+                if (!child) continue;
+                for (usz r = 0; r < child->regions.size(); ++r) {
+                    MemoryRegion& cr = child->regions[r];
+                    if (cr.physical) {
+                        if (candidate < cr.physical + cr.size && candidate + length > cr.physical) {
+                            overlap = true;
+                            break;
+                        }
+                    }
+                }
+                if (overlap) break;
+            }
+            if (!overlap) {
+                return candidate;
+            }
+        }
+    }
+    return nullptr;
+}
+
+static u8* xi_allocate_and_carve(TaskState* state, usz length, bool executable) {
+    if (state->id == 0) {
+        u8* mem = new u8[length];
+        for (usz i = 0; i < length; ++i) mem[i] = 0;
+        Task::registerAllocation(mem, length);
+
+        MemoryRegion region;
+        region.base = 0;
+        region.size = length;
+        region.physical = mem;
+        region.writable = !executable;
+        region.executable = executable;
+        region.owned = true;
+        state->regions.push(region);
+        return mem;
+    }
+
+    TaskState* parent = Task::_tasks[state->parentId];
+    u8* mem = nullptr;
+    if (parent) {
+        mem = xi_carve_from_parent(parent, length, executable);
+        if (mem) {
+            Task::retainAllocation(mem);
+        }
+    }
+
+    if (!mem) {
+        // Fall back to allocating new memory if parent has no suitable regions.
+        // Register the allocation, and if a parent exists, add it to the parent's
+        // regions list first so the parent retains visibility/write access to it.
+        mem = new u8[length];
+        for (usz i = 0; i < length; ++i) mem[i] = 0;
+        Task::registerAllocation(mem, length);
+
+        if (parent && parent->id != 0) {
+            MemoryRegion region;
+            region.base = reinterpret_cast<usz>(mem);
+            region.size = length;
+            region.physical = mem;
+            region.writable = true;
+            region.executable = executable;
+            region.owned = true;
+            parent->regions.push(region);
+
+            // Since both parent and child now reference this allocation:
+            Task::retainAllocation(mem);
+        }
+    }
+    return mem;
+}
+
 // -------------------------------------------------------------------------
 // Context Validation (Defense-in-Depth)
 // -------------------------------------------------------------------------
@@ -115,6 +240,30 @@ bool xi_validate_context_before_switch(TaskState* state) {
     }
 
     u8* ipPtr = reinterpret_cast<u8*>(ip);
+
+    // If isolated, rewrite regions and translate context RIP
+    if (state->isIsolated) {
+        xi_aot_rewrite_task_regions(state);
+        for (usz i = 0; i < state->regions.size(); ++i) {
+            MemoryRegion& r = state->regions[i];
+            if (r.physical && r.executable) {
+                if (ipPtr >= r.physical && ipPtr < r.physical + r.size) {
+                    AOTRegion* cached = AOT::findCached(state->aotCache, reinterpret_cast<usz>(r.physical), r.size);
+                    if (cached && cached->patchedCode) {
+                        usz offset = ipPtr - r.physical;
+                        usz newRip = reinterpret_cast<usz>(cached->patchedCode) + offset;
+#if defined(__x86_64__) || defined(_M_X64)
+                        state->context.rip = newRip;
+#else
+                        state->context.pc = newRip;
+#endif
+                        ipPtr = reinterpret_cast<u8*>(newRip);
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     // Allow the entry trampoline (kernel-managed).
     u8* trampolineAddr = reinterpret_cast<u8*>(xi_context_entry_trampoline);
@@ -299,16 +448,22 @@ void Task::resume() {
         alloc(0, memSize);
     }
 
-    // Allocate a context stack if not yet done.
+    // Allocate a context stack if not yet done (carved from parent memory).
     if (!_state->stack) {
         usz stackSz = getStackSize();
-        _state->stack = new u8[stackSz];
+        _state->stack = xi_allocate_and_carve(_state, stackSz, false);
         _state->stackSize = stackSz;
-        _state->stackOwned = true;
+        _state->stackOwned = (_state->id == 0);
     }
 
     if (_state->status == TaskStatus::Created) {
         // First start: initialize context.
+        if (_state->isIsolated) {
+            xi_aot_rewrite_task_regions(_state);
+            if (_state->entryFn) {
+                _state->entryFn = (void(*)(void*))xi_translate_to_patched_address(_state, (void*)_state->entryFn);
+            }
+        }
         if (_state->entryFn) {
             xi_context_init(&_state->context, _state->entryFn, _state->entryArg,
                             _state->stack, _state->stackSize);
@@ -415,12 +570,16 @@ void Task::_execute_impl_raw(int mode, usz targetId, void (*fn)(void*), void* ar
 
     if (!_state->stack && fn) {
         usz stackSz = getStackSize();
-        _state->stack = new u8[stackSz];
+        _state->stack = xi_allocate_and_carve(_state, stackSz, false);
         _state->stackSize = stackSz;
-        _state->stackOwned = true;
+        _state->stackOwned = (_state->id == 0);
     }
 
     if (fn) {
+        if (_state->isIsolated) {
+            xi_aot_rewrite_task_regions(_state);
+            fn = (void(*)(void*))xi_translate_to_patched_address(_state, (void*)fn);
+        }
         _state->entryFn = fn;
         _state->entryArg = arg;
         xi_context_init(&_state->context, _state->entryFn, _state->entryArg, _state->stack, _state->stackSize);
@@ -455,20 +614,17 @@ void Task::_execute_impl_raw(int mode, usz targetId, void (*fn)(void*), void* ar
                         next->status = TaskStatus::Destroyed;
                         core.currentTaskId = 0;
                         xi_set_current_task(nullptr);
-                        TaskContext dummyContext;
-                        xi_context_switch(&dummyContext, &core.idleContext);
+                        xi_context_switch(&_state->context, &core.idleContext);
                     } else {
                         next->status = TaskStatus::Running;
                         core.currentTaskId = next->id;
                         xi_set_current_task(next);
-                        TaskContext dummyContext;
-                        xi_context_switch(&dummyContext, &next->context);
+                        xi_context_switch(&_state->context, &next->context);
                     }
                 } else {
                     core.currentTaskId = 0;
                     xi_set_current_task(nullptr);
-                    TaskContext dummyContext;
-                    xi_context_switch(&dummyContext, &core.idleContext);
+                    xi_context_switch(&_state->context, &core.idleContext);
                 }
             }
         }
@@ -586,10 +742,8 @@ void Task::alloc(usz dest, usz length) {
         }
     }
 
-    u8* mem = new u8[length];
-    for (usz i = 0; i < length; ++i) mem[i] = 0;
-
-    Task::registerAllocation(mem, length);
+    u8* mem = xi_allocate_and_carve(_state, length, false);
+    if (!mem) return;
 
     MemoryRegion region;
     region.base = dest;
@@ -611,10 +765,8 @@ void Task::allocExecutable(usz dest, usz length) {
         }
     }
 
-    u8* mem = new u8[length];
-    for (usz i = 0; i < length; ++i) mem[i] = 0;
-
-    Task::registerAllocation(mem, length);
+    u8* mem = xi_allocate_and_carve(_state, length, true);
+    if (!mem) return;
 
     MemoryRegion region;
     region.base = dest;
@@ -1351,7 +1503,7 @@ void Task::destroyTask(usz taskId) {
     AOT::destroyCache(s->aotCache);
 
     if (s->stackOwned && s->stack) {
-        delete[] s->stack;
+        releaseAllocation(s->stack);
     }
 
     s->status = TaskStatus::Destroyed;

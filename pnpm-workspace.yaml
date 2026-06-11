@@ -1,5 +1,0 @@
-onlyBuiltDependencies:
-  - esbuild
-
-overrides:
-  fictif: link:../../../.local/share/pnpm/global/5/node_modules/fictif

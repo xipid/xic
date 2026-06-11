@@ -95,16 +95,16 @@ public:
 
   /**
    * @brief Construct from a string. Recognizes:
-   *   - Rho comma-separated:  "7,0,0,0,0,9000"
+   *   - Multi-segment comma-separated:  "7,0,0,0,0,9000"
    *   - IPv4 dotted:          "192.168.1.1"  or  "192.168.1.1:8080"
    *   - IPv6 full/compressed: "::1", "2001:db8::1", "fe80::1%eth0"
    *   - IPv6 bracketed+port:  "[::1]:8080"
-   *   - Rho dotted fallback:  "7.0.0.0.0.9000" (non-4-octet dot notation)
+   *   - Multi-segment dotted fallback:  "7.0.0.0.0.9000" (non-4-octet dot notation)
    */
   NumericalAddress(const String &str) {
     if (str.isEmpty()) return;
 
-    // ── Rho comma-separated: "7,0,0,0,0,9000" ──
+    // ── Multi-segment comma-separated: "7,0,0,0,0,9000" ──
     if (str.find(",") != -1) {
       Array<String> parts = str.split(",");
       for (usz i = 0; i < parts.size(); i++)
@@ -160,7 +160,7 @@ public:
       }
     }
 
-    // ── Rho dot-separated fallback: "7.0.0.0.0.9000" ──
+    // ── Multi-segment dot-separated fallback: "7.0.0.0.0.9000" ──
     Array<String> parts = host.split(".");
     for (usz i = 0; i < parts.size(); i++)
       push((u64)parseLong(parts[i]));

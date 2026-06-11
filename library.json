@@ -1,44 +1,40 @@
 {
   "name": "xic",
   "version": "1.0.0",
-  "description": "Xi C++ Core Primitives: Zero-exception, memory-deterministic structures and the high-performance Rho mesh-networking protocol for ESP32 and embedded ecosystems.",
+  "description": "The Zero-Exception C++ Core Library designed for embedded systems and real-time workloads: memory-deterministic collections, SFI sandboxed tasks, CLI command parser, spatial transformations, and hardware driver frameworks.",
   "keywords": [
     "esp32",
-    "udp",
+    "embedded",
     "crypto",
-    "monocypher"
+    "monocypher",
+    "cli",
+    "sandbox",
+    "graphics",
+    "collections",
+    "yaml",
+    "networking"
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/xizyd/xic.git"
+    "url": "https://github.com/xipid/xic.git"
   },
   "authors": [
     {
-      "name": "Xi (Abderrahmene MERZOUG)",
-      "email": "",
-      "maintainer": true
+      "name": "Abderrahmene MERZOUG"
     }
   ],
-  "license": "ISC",
-  "frameworks": [
-    "arduino",
-    "espidf"
-  ],
-  "platforms": [
-    "espressif32",
-    "linux_x86_64",
-    "native"
+  "license": "Apache-2.0",
+  "frameworks": "*",
+  "platforms": "*",
+  "headers": [
+    "include"
   ],
   "build": {
     "flags": [
       "-Iinclude",
       "-Ipackages/monocypher",
+      "-std=c++17",
       "-O3"
-    ],
-    "srcFilter": [
-      "+<packages/monocypher/monocypher.c>",
-      "+<include/Xi/>",
-      "+<include/Rho/>"
     ]
   }
 }

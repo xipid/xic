@@ -854,6 +854,83 @@ void testWxEnforcement() {
     TEST("allocExec: executable", task._state->regions[1].executable);
 }
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include "Execution/AOT.hpp"
+#endif
+
+void testSecurityHardening() {
+    std::printf("\n[Security Hardening]\n");
+
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+
+    // 1. Child allocates in parent memory fallback test:
+    Task parentTask = root.spawn();
+    Task childTask = parentTask.spawn();
+
+    childTask.alloc(0x1000, 256);
+
+    TEST("parentTask has 1 region", parentTask._state->regions.size() == 1);
+    TEST("grandchild has 1 region", childTask._state->regions.size() == 1);
+    TEST("grandchild memory is inside parent memory",
+         childTask._state->regions[0].physical == parentTask._state->regions[0].physical);
+
+#if defined(__x86_64__) || defined(_M_X64)
+    // 2. AOT unconditional bans and prefix bypass test
+    Array<MemoryRegion> regions;
+
+    // Test REP SYSCALL (\xF3\x0F\x05)
+    u8 repSyscall[] = { 0xF3, 0x0F, 0x05 };
+    AOTResult res = AOT::rewrite(repSyscall, 3, regions, 0);
+    TEST("REP SYSCALL rewrite success", res.success);
+    TEST("REP SYSCALL trapped with ud2", res.patchedSize == 2 && res.patchedCode[0] == 0x0F && res.patchedCode[1] == 0x0B);
+    std::free(res.patchedCode);
+
+    // Test IRET (\xCF)
+    u8 iret[] = { 0xCF };
+    res = AOT::rewrite(iret, 1, regions, 0);
+    TEST("IRET trapped with ud2", res.patchedSize == 2 && res.patchedCode[0] == 0x0F && res.patchedCode[1] == 0x0B);
+    std::free(res.patchedCode);
+
+    // Test MOV SS, EAX (\x8E\xD0)
+    u8 movss[] = { 0x8E, 0xD0 };
+    res = AOT::rewrite(movss, 2, regions, 0);
+    TEST("MOV SS trapped with ud2", res.patchedSize == 2 && res.patchedCode[0] == 0x0F && res.patchedCode[1] == 0x0B);
+    std::free(res.patchedCode);
+
+    // Test LSS (\x0F\xB2\xC0)
+    u8 lss[] = { 0x0F, 0xB2, 0xC0 };
+    res = AOT::rewrite(lss, 3, regions, 0);
+    TEST("LSS trapped with ud2", res.patchedSize == 2 && res.patchedCode[0] == 0x0F && res.patchedCode[1] == 0x0B);
+    std::free(res.patchedCode);
+
+    // Test RDFSBASE (\xF3\x0F\xAE\xC0)
+    u8 rdfsbase[] = { 0xF3, 0x0F, 0xAE, 0xC0 };
+    res = AOT::rewrite(rdfsbase, 4, regions, 0);
+    TEST("RDFSBASE trapped with ud2", res.patchedSize == 2 && res.patchedCode[0] == 0x0F && res.patchedCode[1] == 0x0B);
+    std::free(res.patchedCode);
+
+    // Test indirect far call (FF /3 -> \xFF\x18)
+    u8 farcall[] = { 0xFF, 0x18 };
+    res = AOT::rewrite(farcall, 2, regions, 0);
+    TEST("Indirect far call trapped with ud2", res.patchedSize == 2 && res.patchedCode[0] == 0x0F && res.patchedCode[1] == 0x0B);
+    std::free(res.patchedCode);
+
+    // 3. RSP modifications (XCHG, POPFQ)
+    // Test XCHG RSP, RAX (\x48\x94)
+    u8 xchgRsp[] = { 0x48, 0x94 };
+    res = AOT::rewrite(xchgRsp, 2, regions, 0);
+    TEST("XCHG RSP includes stack check", res.patchedSize == 21);
+    std::free(res.patchedCode);
+
+    // Test POPFQ (\x9D)
+    u8 popfq[] = { 0x9D };
+    res = AOT::rewrite(popfq, 1, regions, 0);
+    TEST("POPFQ includes stack check", res.patchedSize == 20);
+    std::free(res.patchedCode);
+#endif
+}
+
 // -------------------------------------------------------------------------
 // Main
 // -------------------------------------------------------------------------
@@ -886,6 +963,7 @@ int main() {
     testForkBombProtection();
     testOnInstructionSelfRegister();
     testWxEnforcement();
+    testSecurityHardening();
 
     // --- Context-switch tests (may corrupt heap in hosted mode) ---
     testTaskJump();

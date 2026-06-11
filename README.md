@@ -1,87 +1,115 @@
-# ✦ XiC
-
-![C++](https://img.shields.io/badge/C++-17-blue?logo=cplusplus)
-![Python](https://img.shields.io/badge/Python-3.8+-yellow?logo=python)
-![WASM](https://img.shields.io/badge/WASM-Ready-purple?logo=webassembly)
-![License](https://img.shields.io/badge/License-Apache--2.0-green)
-
-**XiC (Xi Core)** is a professional-grade, zero-exception, and memory-deterministic C++ framework. It is engineered for extreme performance in IoT, and real-time distributed systems.
-
-Built for the next generation of ESP32 and native workloads, XiC provides a unified API surface that feels as modern as JavaScript but remains as lean as bare-metal C.
+# XiC
+> **The Zero-Exception C++ Core Library designed for embedded systems and real-time workloads.**
 
 ---
 
-## 💎 Core Philosophy
-
-### Zero-Exception Architecture
-We believe exceptions have no place in mission-critical systems. Every operation in XiC is designed to be deterministic. Errors are handled through state checks and return codes, ensuring your application remains stable even in failure states.
-
-### Memory Determinism
-XiC uses custom collection implementations and static buffers where possible. We manage memory with surgical precision, significantly reducing fragmentation and ensuring consistent performance over long uptimes.
-
-### Developer Fluent API
-While the internals are optimized for the metal, the external API is designed for speed of development. We use modern C++ patterns—like property-like syntax and CSS-inspired tree selectors—to make your code readable and expressive.
+XiC is a lightweight, zero-dependency, and memory-deterministic C++ core library. Engineered to run on everything from resource-constrained microcontrollers (such as ESP32) to full-scale Linux application backends, XiC provides a robust, zero-exception runtime foundation. It enables high-performance application development without the overhead or unpredictability of standard runtime features.
 
 ---
 
-## 📦 Functional Pillars
+## Key Pillars
 
-| Module | Description |
-| :--- | :--- |
-| **Collections** | High-performance `String` (COW), `Tree` (CSS queries), and multi-dimensional `Array`. |
-| **Terminal** | Professional CLI toolkit with rich ANSI formatting and progress management. |
-| **LLT** | Loss-less Transformations: High-performance encryption and compression. |
-| **Encoding** | Native high-speed YAML/JSON parsing and structured logging. |
-| **Hardware** | Standardized drivers for IMUs, GPS, and sensors with geodetic math. |
-| **Graphics** | Mesh-ready 3D rendering pipeline and window management. |
-| **Execution** | Unified sandboxed `Tasks` and high-level `Process` management. |
+### 1. Memory-Deterministic Collections
+*   **Copy-On-Write Strings:** Optimized COW string implementations that reduce dynamic allocations and page-copy overheads.
+*   **Deterministic Tree Systems:** Node-based hierarchical structures queryable via a CSS-like path selector.
+*   **Universal Data Buffers:** Fixed-capacity and dynamically growing buffers with strict boundary checks.
+*   **Static Mapping:** Hash tables and lookup maps tailored for minimal heap fragmentation.
+
+### 2. Software Fault Isolation (SFI) Task Sandbox
+*   **Sandboxed Task Execution:** Implements Ahead-of-Time (AOT) binary rewriting and software-enforced isolation.
+*   **Fork Bomb Prevention:** Resource quota management and cascade teardown for child tasks.
+*   **W^X Memory Enforcement:** Restricts memory pages to be either writable or executable, never both.
+*   **Context Switch Validation:** Sanitizes CPU registers and validates instruction pointers at scheduler boundaries to prevent escapes.
+
+### 3. Professional Terminal & Command Parsing
+*   **CLI Command Parser:** Zero-allocation command-line argument parsing with nested command definitions.
+*   **ANSI Formatting Engine:** Rich formatting, styling, and colorization for terminals.
+*   **Interactive Prompts:** Non-blocking console inputs, prompt loops, and status outputs.
+
+### 4. Encoding, Serialization, and Logging
+*   **Zero-Allocation YAML:** A stream-based YAML serializer and parser requiring zero dynamic heap operations.
+*   **Structured Logging:** Multi-channel logging with millisecond timestamping and severity filtering.
+*   **Regex Engine:** A deterministic regular expression engine designed for embedded footprints.
+
+### 5. Geodetic & Spatial Math
+*   **Transformations:** High-performance spatial math, quaternions, and geodetic coordinate transformations (ECEF to WGS84).
+*   **Sensor Drivers:** Unified peripheral driver APIs for IMUs, GPS modules, and input devices.
+
+### 6. Graphics & Mesh Pipeline
+*   **Mesh Engine:** Memory-deterministic vertex and mesh management.
+*   **Camera System:** Viewport, projection, and look-at camera matrices for real-time visualization.
+*   **Window Management:** Window hooks, display loops, and inputs.
 
 ---
 
-## 🛠️ Multi-Language Integration
+## Getting Started
 
-### C++ (Native & Embedded)
+XiC compiles into a single static library. If you are using PlatformIO (for ESP32 and embedded ecosystems), add the library dependency to your configuration:
+
+```ini
+lib_deps =
+    xipid/xic
+```
+
+### 1. Unified SFI Task Execution
 ```cpp
-#include <Collection/String.hpp>
+#include <Execution/Task.hpp>
+#include <cstdio>
 
-Collection::String identity = "xi:node:42";
+void task_payload(void* arg) {
+    std::printf("Hello from sandboxed task context!\n");
+}
+
+int main() {
+    Execution::Task root = Execution::Task::root();
+    Execution::Task child = root.spawn(task_payload, nullptr);
+    
+    // Enforce 5000 microsecond quota for starvation prevention
+    child.setQuota(5000);
+    child.start();
+    
+    Execution::Task::yield();
+    return 0;
+}
 ```
 
-### Python (Self-Healing Bindings)
-```python
-import xi
+### 2. Zero-Allocation CLI Parsing
+```cpp
+#include <Terminal/Cli.hpp>
+#include <cstdio>
 
-identity = xi.String("xi:node:42")
-print(f"Node Identity: {identity}")
-```
-
-### JavaScript (WASM Native)
-```javascript
-import { initXi } from 'xic';
-
-const xi = await initXi();
-const identity = new xi.String("xi:node:42");
+int main(int argc, char** argv) {
+    Terminal::CliParser parser;
+    parser.addOption("port", 'p', "Serial connection port");
+    parser.addOption("baud", 'b', "Baud rate (default: 115200)");
+    
+    if (parser.parse(argc, argv)) {
+        auto port = parser.getOption("port");
+        std::printf("Connecting to port: %s\n", port.c_str());
+    }
+    return 0;
+}
 ```
 
 ---
 
-## 🏗️ Building
+## Project Structure
 
-XiC uses a unified build system powered by `pnpm` and `build.js` with automated SDK management.
-
-```bash
-pnpm install
-pnpm build:wasm    # Automatically provisions Emscripten and builds WASM
-pnpm build:python  # Manages .venv and generates Python wheel
-pnpm build:docs    # Generates GitBook documentation
+```
+├── include/            # Public headers
+│   ├── Collection/     # Memory-deterministic collections
+│   ├── Encoding/       # YAML, logging, and regex
+│   ├── Execution/      # SFI Tasks and context switching
+│   ├── Hardware/       # Driver interfaces and spatial math
+│   ├── Graphics/       # Mesh and camera systems
+│   └── Terminal/       # CLI and interactive prompting
+├── src/                # Library source implementations
+├── tests/              # Comprehensive test suites
+└── docs/               # Technical whitepapers and documentation
 ```
 
 ---
 
-## 📜 License
+## License
 
-Distributed under the **Apache-2.0** License. See `LICENSE` for more information.
-
-<p align="center">
-  Developed with obsession for performance by <b>Xi</b>
-</p>
+XiC is distributed under the Apache-2.0 License. See `LICENSE` for more information.

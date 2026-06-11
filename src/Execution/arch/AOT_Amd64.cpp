@@ -191,7 +191,25 @@ extern "C" void xi_run_instruction_callback(void* callbackPtr) {
  */
 static bool isUnconditionallyBanned(const u8* code, usz len) {
     if (len == 0) return false;
-    u8 op = code[0];
+
+    usz pos = 0;
+    // Skip legacy prefixes
+    for (;;) {
+        if (pos >= len) return false;
+        u8 b = code[pos];
+        if (b == 0x66 || b == 0x67 || b == 0xF0 || b == 0xF2 || b == 0xF3 ||
+            b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 || b == 0x64 || b == 0x65) {
+            ++pos;
+        } else break;
+    }
+    // Skip REX prefix
+    if (pos < len && (code[pos] & 0xF0) == 0x40) {
+        ++pos;
+    }
+    if (pos >= len) return false;
+
+    u8 op = code[pos];
+    usz remaining = len - pos;
 
     // Single-byte privileged instructions:
     switch (op) {
@@ -208,8 +226,13 @@ static bool isUnconditionallyBanned(const u8* code, usz len) {
         case 0xED: return true; // IN AX/EAX, DX
         case 0xEE: return true; // OUT DX, AL
         case 0xEF: return true; // OUT DX, AX/EAX
+        case 0xC2: return true; // RET imm16 — ban unconditionally
         case 0xCB: return true; // RETF — far return, banned unconditionally
         case 0xCA: return true; // RETF imm16 — far return, banned unconditionally
+        case 0xCF: return true; // IRET/IRETD/IRETQ — interrupt return, banned unconditionally
+        case 0x9A: return true; // Direct far call — invalid in 64-bit but ban anyway
+        case 0xEA: return true; // Direct far jump — invalid in 64-bit but ban anyway
+        case 0x8E: return true; // MOV segment register — banned unconditionally
         // VEX prefix — ban all AVX/AVX2 instructions in sandboxed code.
         case 0xC4: return true; // 3-byte VEX prefix
         case 0xC5: return true; // 2-byte VEX prefix
@@ -219,8 +242,9 @@ static bool isUnconditionallyBanned(const u8* code, usz len) {
     }
 
     // Two-byte privileged instructions (0F xx):
-    if (op == 0x0F && len >= 2) {
-        u8 op2 = code[1];
+    if (op == 0x0F && remaining >= 2) {
+        u8 op2 = code[pos + 1];
+        if (op2 == 0x38 || op2 == 0x3A) return true; // Ban 3-byte opcodes (0F 38/3A xx)
         switch (op2) {
             case 0x05: return true; // SYSCALL
             case 0x07: return true; // SYSRET
@@ -236,6 +260,20 @@ static bool isUnconditionallyBanned(const u8* code, usz len) {
             case 0x21: return true; // MOV from DR
             case 0x22: return true; // MOV to CR
             case 0x23: return true; // MOV to DR
+            case 0xA1: return true; // POP FS — banned unconditionally
+            case 0xA9: return true; // POP GS — banned unconditionally
+            case 0xB2: return true; // LSS — banned unconditionally
+            case 0xB4: return true; // LFS — banned unconditionally
+            case 0xB5: return true; // LGS — banned unconditionally
+            case 0xAA: return true; // RSM — resume from SMM, banned unconditionally
+            case 0xAE:
+                if (remaining >= 3) {
+                    u8 modrm = code[pos + 2];
+                    u8 mod = (modrm >> 6) & 3;
+                    u8 reg = (modrm >> 3) & 7;
+                    if (mod == 3 && reg <= 3) return true; // Ban FSGSBASE (rdfsbase/rdgsbase/wrfsbase/wrgsbase)
+                }
+                break;
             default: break;
         }
     }
@@ -256,15 +294,33 @@ static bool isInstructionBannedOrHooked(const u8* code, usz len, bool& outBanned
     if (!state) return false;
 
     if (len == 0) return false;
-    u8 op = code[0];
+
+    usz pos = 0;
+    // Skip legacy prefixes
+    for (;;) {
+        if (pos >= len) return false;
+        u8 b = code[pos];
+        if (b == 0x66 || b == 0x67 || b == 0xF0 || b == 0xF2 || b == 0xF3 ||
+            b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 || b == 0x64 || b == 0x65) {
+            ++pos;
+        } else break;
+    }
+    // Skip REX prefix
+    if (pos < len && (code[pos] & 0xF0) == 0x40) {
+        ++pos;
+    }
+    if (pos >= len) return false;
+
+    u8 op = code[pos];
+    usz remaining = len - pos;
     String name;
-    if (op == 0x90 && len == 1) name = "nop";
-    else if (op == 0xF4 && len == 1) name = "hlt";
-    else if (op == 0xCC && len == 1) name = "int3";
+    if (op == 0x90 && remaining == 1) name = "nop";
+    else if (op == 0xF4 && remaining == 1) name = "hlt";
+    else if (op == 0xCC && remaining == 1) name = "int3";
     else if (op == 0xCD) name = "int";
-    else if (op == 0xC3 && len == 1) name = "ret";
-    else if (op == 0x0F && len >= 2) {
-        u8 op2 = code[1];
+    else if (op == 0xC3 && remaining == 1) name = "ret";
+    else if (op == 0x0F && remaining >= 2) {
+        u8 op2 = code[pos + 1];
         if (op2 == 0x05) name = "syscall";
         else if (op2 == 0xA2) name = "cpuid";
         else if (op2 == 0x31) name = "rdtsc";
@@ -331,20 +387,22 @@ static void detectIndirectControl(const u8* code, usz len,
 
     u8 opcode = code[pos];
 
-    // RET variants
-    if (opcode == 0xC3 || opcode == 0xC2 || opcode == 0xCB || opcode == 0xCA) {
+    // RET variants - only C3 is supported as validation RET
+    if (opcode == 0xC3) {
         outIsRet = true;
         return;
     }
 
     // FF group (indirect JMP/CALL):
     // FF /2 = CALL r/m64
+    // FF /3 = CALL far indirect
     // FF /4 = JMP r/m64
+    // FF /5 = JMP far indirect
     // FF /6 = PUSH r/m64 (not a jump)
     if (opcode == 0xFF && pos + 1 < len) {
         u8 modrm = code[pos + 1];
         u8 reg = (modrm >> 3) & 7;
-        if (reg == 2 || reg == 4) {
+        if (reg == 2 || reg == 3 || reg == 4 || reg == 5) {
             outIsIndirectJump = true;
         }
     }
@@ -396,22 +454,26 @@ static void emitCallbackCall(u8*& outPtr, u64 callbackPtr, u64 helperAddr) {
  * @param outIsRelJmp  Set to true if the instruction is a relative JMP/CALL.
  * @param outRelOffset Offset of the relative displacement within the instruction.
  * @param outRelSize   Size of the relative displacement (1 or 4 bytes).
+ * @param outIsRspModifying Set to true if the instruction modifies RSP.
  * @return Instruction length in bytes, or 0 if decoding fails.
  */
 static usz xi_x86_insn_length(const u8* code, usz maxLen,
                                bool& outHasMem,
                                bool& outIsRelJmp,
                                usz& outRelOffset,
-                               usz& outRelSize) {
+                               usz& outRelSize,
+                               bool& outIsRspModifying) {
     outHasMem = false;
     outIsRelJmp = false;
     outRelOffset = 0;
     outRelSize = 0;
+    outIsRspModifying = false;
 
     if (maxLen == 0) return 0;
 
     usz pos = 0;
     bool hasRex = false;
+    u8 rex = 0;
     bool rexW = false;
     bool has66 = false;
     bool has67 = false;
@@ -431,12 +493,17 @@ static usz xi_x86_insn_length(const u8* code, usz maxLen,
     // --- REX prefix ---
     if (pos < maxLen && (code[pos] & 0xF0) == 0x40) {
         hasRex = true;
-        rexW = (code[pos] & 0x08) != 0;
+        rex = code[pos];
+        rexW = (rex & 0x08) != 0;
         ++pos;
     }
     (void)hasRex;
 
     if (pos >= maxLen) return 0;
+
+    // --- Determine if this instruction has ModRM and what operands it needs ---
+    bool hasModRM = false;
+    usz immSize = 0; // Size of immediate operand in bytes.
 
     // --- Opcode ---
     u8 opcode = code[pos++];
@@ -447,13 +514,22 @@ static usz xi_x86_insn_length(const u8* code, usz maxLen,
         if (pos >= maxLen) return 0;
         opcode = code[pos++];
         twoByteOpcode = true;
+
+        // 3-byte opcodes (0F 38 xx or 0F 3A xx)
+        if (opcode == 0x38 || opcode == 0x3A) {
+            if (pos >= maxLen) return 0;
+            u8 opcode3 = code[pos++];
+            (void)opcode3;
+            // ModRM is always present, immediate if 3A
+            hasModRM = true;
+            immSize = (opcode == 0x3A) ? 1 : 0;
+        }
     }
 
-    // --- Determine if this instruction has ModRM and what operands it needs ---
-    bool hasModRM = false;
-    usz immSize = 0; // Size of immediate operand in bytes.
-
-    if (twoByteOpcode) {
+    // If already set by 3-byte opcode, skip switch
+    if (twoByteOpcode && (opcode == 0x38 || opcode == 0x3A)) {
+        // Already set
+    } else if (twoByteOpcode) {
         // Most two-byte opcodes have ModRM. A few don't (e.g., 0F 05 = SYSCALL).
         // Simplified: check common no-ModRM two-byte opcodes.
         switch (opcode) {
@@ -488,6 +564,10 @@ static usz xi_x86_insn_length(const u8* code, usz maxLen,
             default:
                 hasModRM = true;
                 break;
+        }
+        // push/pop FS/GS (0F A0, 0F A1, 0F A8, 0F A9)
+        if (opcode == 0xA0 || opcode == 0xA1 || opcode == 0xA8 || opcode == 0xA9) {
+            outIsRspModifying = true;
         }
     } else {
         // One-byte opcode analysis.
@@ -689,8 +769,6 @@ static usz xi_x86_insn_length(const u8* code, usz maxLen,
             // F6: TEST/NOT/NEG/MUL/IMUL/DIV/IDIV r/m8
             case 0xF6:
                 hasModRM = true;
-                // F6 /0 and /1 have imm8, others don't.
-                // We'll peek at ModRM to determine reg field.
                 if (pos < maxLen) {
                     u8 reg = (code[pos] >> 3) & 7;
                     immSize = (reg <= 1) ? 1 : 0;
@@ -735,18 +813,12 @@ static usz xi_x86_insn_length(const u8* code, usz maxLen,
                 break;
 
             default:
-                // Most remaining one-byte opcodes in the ranges 00-3F (ALU),
-                // 84-8F, D0-D3, FE-FF use ModRM without immediate.
-                // For 00-3F: even opcodes have r/m,r; odd have r,r/m;
-                //            pattern: opcodes 00-05 repeat for each ALU op.
                 if (opcode <= 0x3F) {
                     u8 lowBits = opcode & 0x07;
                     if (lowBits <= 3) {
                         hasModRM = true;
                         immSize = 0;
                     } else {
-                        // 04,05 are AL/AX,imm (handled above).
-                        // 06,07 are PUSH/POP ES (invalid in 64-bit).
                         hasModRM = false;
                         immSize = 0;
                     }
@@ -761,10 +833,36 @@ static usz xi_x86_insn_length(const u8* code, usz maxLen,
                     hasModRM = true;
                     immSize = 0;
                 } else {
-                    // Unknown opcode — NOT SAFE to pass through. Return 0 to signal decode failure.
                     return 0;
                 }
                 break;
+        }
+
+        // RSP modifying one-byte opcodes
+        if (opcode >= 0x50 && opcode <= 0x5F) { // push/pop reg
+            outIsRspModifying = true;
+        } else if (opcode == 0x6A || opcode == 0x68) { // push imm
+            outIsRspModifying = true;
+        } else if (opcode == 0xC9 || opcode == 0xC8) { // leave, enter
+            outIsRspModifying = true;
+        } else if (opcode == 0xE8) { // call rel32
+            outIsRspModifying = true;
+        } else if (opcode == 0xC3 || opcode == 0xC2 || opcode == 0xCB || opcode == 0xCA) { // ret
+            outIsRspModifying = true;
+        } else if (opcode == 0x94) { // xchg rax, rsp / xchg rsp, rax
+            outIsRspModifying = true;
+        } else if (opcode == 0x9C || opcode == 0x9D) { // pushfq / popfq
+            outIsRspModifying = true;
+        } else if (opcode == 0x8F) { // pop r/m64
+            if (pos < maxLen) {
+                u8 reg = (code[pos] >> 3) & 7;
+                if (reg == 0) outIsRspModifying = true;
+            }
+        } else if (opcode == 0xFF) { // FF group: call indirect (reg == 2), push r/m64 (reg == 6)
+            if (pos < maxLen) {
+                u8 reg = (code[pos] >> 3) & 7;
+                if (reg == 2 || reg == 6) outIsRspModifying = true;
+            }
         }
     }
 
@@ -773,7 +871,39 @@ static usz xi_x86_insn_length(const u8* code, usz maxLen,
         if (pos >= maxLen) return 0;
         u8 modrm = code[pos++];
         u8 mod = (modrm >> 6) & 3;
+        u8 reg = (modrm >> 3) & 7;
         u8 rm  = modrm & 7;
+
+        // Check if ModRM destination is RSP (register 4):
+        bool rmIsRsp = (mod == 3 && rm == 4 && !(rex & 0x01));
+        bool regIsRsp = (reg == 4 && !(rex & 0x04));
+
+        if (rmIsRsp) {
+            // Instructions that write to rm:
+            if (opcode == 0x88 || opcode == 0x89 || opcode == 0xC6 || opcode == 0xC7 ||
+                opcode == 0x80 || opcode == 0x81 || opcode == 0x83 ||
+                opcode == 0x00 || opcode == 0x01 || opcode == 0x08 || opcode == 0x09 ||
+                opcode == 0x10 || opcode == 0x11 || opcode == 0x18 || opcode == 0x19 ||
+                opcode == 0x20 || opcode == 0x21 || opcode == 0x28 || opcode == 0x29 ||
+                opcode == 0x30 || opcode == 0x31 ||
+                opcode == 0xC0 || opcode == 0xC1 ||
+                opcode == 0xD0 || opcode == 0xD1 || opcode == 0xD2 || opcode == 0xD3 ||
+                opcode == 0xF6 || opcode == 0xF7 || opcode == 0xFF ||
+                opcode == 0x86 || opcode == 0x87) {
+                outIsRspModifying = true;
+            }
+        }
+        if (regIsRsp) {
+            // Instructions that write to reg:
+            if (opcode == 0x8A || opcode == 0x8B || opcode == 0x8D ||
+                opcode == 0x02 || opcode == 0x03 || opcode == 0x0A || opcode == 0x0B ||
+                opcode == 0x12 || opcode == 0x13 || opcode == 0x1A || opcode == 0x1B ||
+                opcode == 0x22 || opcode == 0x23 || opcode == 0x2A || opcode == 0x2B ||
+                opcode == 0x32 || opcode == 0x33 ||
+                opcode == 0x86 || opcode == 0x87) {
+                outIsRspModifying = true;
+            }
+        }
 
         // Memory operand if mod != 3 (register direct).
         if (mod != 3) {
@@ -926,41 +1056,148 @@ static constexpr usz kJumpCheckStubSize = 2; // ud2 for banned indirect jumps
 /**
  * @brief Size of the RET validation stub.
  *
- * For RET, we replace with:
- *   pop rdi                           ; 1 byte — pop return address into rdi
- *   push rdi                          ; 1 byte — push it back for later
- *   push rax                          ; 1 byte — save rax
+ * For RET, we replace with a sequence that avoids clobbering RDI:
+ *   push rax                          ; 1 byte
+ *   mov rax, [rsp+8]                  ; 5 bytes — read return address
+ *   push rdi                          ; 1 byte — save original rdi
+ *   mov rdi, rax                      ; 3 bytes — target to rdi
  *   movabs rax, <xi_sfi_jump_check>   ; 10 bytes
- *   call rax                          ; 2 bytes — validate return address
+ *   call rax                          ; 2 bytes — validate
+ *   pop rdi                           ; 1 byte — restore rdi
  *   pop rax                           ; 1 byte — restore rax
- *   ret                               ; 1 byte — execute the validated ret
- *                                Total: 17 bytes
+ *   ret                               ; 1 byte — execute validated ret
+ *                                Total: 25 bytes
  */
-static constexpr usz kRetCheckStubSize = 20;
+static constexpr usz kRetCheckStubSize = 25;
 
 static void emitRetCheckStub(u8*& out, u64 jumpCheckAddr) {
-    // pop rdi (return address into rdi — first arg for jump check)
-    *out++ = 0x5F;
-    // push rdi (put it back on stack for the final ret)
-    *out++ = 0x57;
-    // push rax (save rax)
+    // push rax
     *out++ = 0x50;
-    // push rdi (save rdi — will be clobbered by function call)
+    // mov rax, [rsp+8] (48 8B 44 24 08)
+    *out++ = 0x48;
+    *out++ = 0x8B;
+    *out++ = 0x44;
+    *out++ = 0x24;
+    *out++ = 0x08;
+    // push rdi
     *out++ = 0x57;
-    // movabs rax, <xi_sfi_jump_check>
+    // mov rdi, rax (48 89 C7)
+    *out++ = 0x48;
+    *out++ = 0x89;
+    *out++ = 0xC7;
+    // movabs rax, imm64
     *out++ = 0x48;
     *out++ = 0xB8;
     std::memcpy(out, &jumpCheckAddr, 8);
     out += 8;
-    // call rax
+    // call rax (FF D0)
     *out++ = 0xFF;
     *out++ = 0xD0;
-    // pop rdi (restore rdi)
+    // pop rdi
     *out++ = 0x5F;
-    // pop rax (restore rax)
+    // pop rax
     *out++ = 0x58;
     // ret (now validated)
     *out++ = 0xC3;
+}
+
+/**
+ * @brief Size of the stack-check stub.
+ *
+ * Emitted after RSP-modifying instructions:
+ *   push rax                          ; 1 byte
+ *   push rdi                          ; 1 byte
+ *   mov rdi, rsp                      ; 3 bytes (48 89 E7) — pass RSP
+ *   movabs rax, <xi_sfi_stack_check>   ; 10 bytes
+ *   call rax                          ; 2 bytes — validate
+ *   pop rdi                           ; 1 byte
+ *   pop rax                           ; 1 byte
+ *                                Total: 19 bytes
+ */
+static constexpr usz kStackCheckStubSize = 19;
+
+static void emitStackCheckStub(u8*& out, u64 stackCheckAddr) {
+    // push rax
+    *out++ = 0x50;
+    // push rdi
+    *out++ = 0x57;
+    // mov rdi, rsp (48 89 E7)
+    *out++ = 0x48;
+    *out++ = 0x89;
+    *out++ = 0xE7;
+    // movabs rax, imm64
+    *out++ = 0x48;
+    *out++ = 0xB8;
+    std::memcpy(out, &stackCheckAddr, 8);
+    out += 8;
+    // call rax (FF D0)
+    *out++ = 0xFF;
+    *out++ = 0xD0;
+    // pop rdi
+    *out++ = 0x5F;
+    // pop rax
+    *out++ = 0x58;
+}
+
+/**
+ * @brief Detects if an instruction writes to memory (store).
+ */
+static bool isStoreInstruction(const u8* code, usz len) {
+    if (len == 0) return false;
+
+    usz pos = 0;
+    for (;;) {
+        if (pos >= len) return false;
+        u8 b = code[pos];
+        if (b == 0x66 || b == 0x67 || b == 0xF0 || b == 0xF2 || b == 0xF3 ||
+            b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 || b == 0x64 || b == 0x65) {
+            ++pos;
+        } else break;
+    }
+    if (pos < len && (code[pos] & 0xF0) == 0x40) {
+        ++pos;
+    }
+    if (pos >= len) return false;
+
+    u8 op = code[pos];
+
+    if (op == 0x88 || op == 0x89) return true;
+    if (op == 0xC6 || op == 0xC7) return true;
+    if (op == 0x8F) return true;
+
+    if (op == 0x00 || op == 0x01 ||
+        op == 0x08 || op == 0x09 ||
+        op == 0x10 || op == 0x11 ||
+        op == 0x18 || op == 0x19 ||
+        op == 0x20 || op == 0x21 ||
+        op == 0x28 || op == 0x29 ||
+        op == 0x30 || op == 0x31) {
+        return true;
+    }
+
+    if ((op == 0x80 || op == 0x81 || op == 0x83) && pos + 1 < len) {
+        u8 modrm = code[pos + 1];
+        u8 reg = (modrm >> 3) & 7;
+        if (reg != 7) return true;
+    }
+
+    if (op == 0xC0 || op == 0xC1 || op == 0xD0 || op == 0xD1 || op == 0xD2 || op == 0xD3) {
+        return true;
+    }
+
+    if (op == 0xFF && pos + 1 < len) {
+        u8 modrm = code[pos + 1];
+        u8 reg = (modrm >> 3) & 7;
+        if (reg == 0 || reg == 1) return true;
+    }
+
+    if ((op == 0xF6 || op == 0xF7) && pos + 1 < len) {
+        u8 modrm = code[pos + 1];
+        u8 reg = (modrm >> 3) & 7;
+        if (reg == 2 || reg == 3) return true;
+    }
+
+    return false;
 }
 
 // -------------------------------------------------------------------------
@@ -981,13 +1218,9 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         return result;
     }
 
-    // First pass: compute the output size.
-    // For each instruction with memory access, we add kStubSize bytes.
-    // For all others, we copy verbatim.
     usz outputSize = 0;
     usz pos = 0;
 
-    // Store per-instruction info for the second pass.
     struct InsnInfo {
         usz origOffset;    // Offset in original code.
         usz instrLen;      // Length of the original instruction.
@@ -1002,9 +1235,9 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         bool isBannedPrivileged; // Unconditionally banned privileged instruction.
         bool isIndirectJump;     // Indirect JMP/CALL — banned for containment.
         bool isRet;              // RET — rewritten with validation.
+        bool isRspModifying;     // RSP modifying instruction.
     };
 
-    // Estimate: at most codeSize instructions (one byte each minimum).
     usz insnCapacity = codeSize;
     InsnInfo* insns = static_cast<InsnInfo*>(std::malloc(insnCapacity * sizeof(InsnInfo)));
     if (!insns) {
@@ -1018,9 +1251,10 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         bool isRelJmp = false;
         usz relOffset = 0;
         usz relSize = 0;
+        bool isRspModifying = false;
 
         usz len = xi_x86_insn_length(code + pos, codeSize - pos,
-                                      hasMem, isRelJmp, relOffset, relSize);
+                                      hasMem, isRelJmp, relOffset, relSize, isRspModifying);
         if (len == 0) {
             // Decoding failed — unknown instruction. Trap it.
             len = 1;
@@ -1033,13 +1267,11 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         bool isHooked = isInstructionBannedOrHooked(code + pos, len, hookBanned, callbackPtr);
 
         bool isBannedPrivileged = isUnconditionallyBanned(code + pos, len);
-        // Also trap decode failures (len was 0, we forced it to 1).
         if (len == 1 && pos + 1 <= codeSize) {
-            // Re-check: was the original decode a failure?
-            bool dummy1, dummy2;
+            bool dummy1, dummy2, dummy5;
             usz dummy3, dummy4;
             usz recheck = xi_x86_insn_length(code + pos, codeSize - pos,
-                                             dummy1, dummy2, dummy3, dummy4);
+                                             dummy1, dummy2, dummy3, dummy4, dummy5);
             if (recheck == 0) {
                 isBannedPrivileged = true; // Force trap for undecoded instruction.
             }
@@ -1063,101 +1295,100 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         info.isBannedPrivileged = isBannedPrivileged;
         info.isIndirectJump = isIndirectJump;
         info.isRet = isRet;
+        info.isRspModifying = isRspModifying;
 
-        // Determine output size for this instruction.
+        usz insnOutputSize = 0;
         if (isBannedPrivileged) {
-            outputSize += 2; // ud2
+            insnOutputSize = 2; // ud2
         } else if (isHooked && hookBanned) {
-            outputSize += 2; // ud2
+            insnOutputSize = 2; // ud2
         } else if (isIndirectJump) {
-            // Replace indirect JMP/CALL with ud2 (strictest policy).
-            outputSize += 2;
+            insnOutputSize = 2; // ud2
         } else if (isRet) {
-            // Replace RET with validated return stub.
-            outputSize += kRetCheckStubSize;
+            insnOutputSize = kRetCheckStubSize;
         } else if (isHooked && callbackPtr) {
-            outputSize += 22 + len; // callback call stub + original
+            insnOutputSize = 22 + len;
         } else if (hasMem) {
-            outputSize += kStubSize + len;
+            insnOutputSize = kStubSize + len;
         } else {
-            outputSize += len;
+            insnOutputSize = len;
         }
+
+        if (isRspModifying && !isBannedPrivileged && !(isHooked && hookBanned) && !isIndirectJump && !isRet) {
+            insnOutputSize += kStackCheckStubSize;
+        }
+        outputSize += insnOutputSize;
 
         ++insnCount;
         pos += len;
     }
 
-    // Allocate output buffer.
     u8* output = static_cast<u8*>(std::malloc(outputSize));
     if (!output) {
         std::free(insns);
         return result;
     }
 
-    // Second pass: emit the rewritten code.
     u64 boundsCheckAddr = reinterpret_cast<u64>(&xi_sfi_bounds_check);
+    u64 writeCheckAddr = reinterpret_cast<u64>(&xi_sfi_write_check);
     u64 jumpCheckAddr = reinterpret_cast<u64>(&xi_sfi_jump_check);
+    u64 stackCheckAddr = reinterpret_cast<u64>(&xi_sfi_stack_check);
     u8* outPtr = output;
 
     for (usz i = 0; i < insnCount; ++i) {
         const InsnInfo& info = insns[i];
         const u8* insnSrc = code + info.origOffset;
 
-        // Priority 1: Unconditionally banned privileged instructions.
         if (info.isBannedPrivileged) {
             emitUd2(outPtr);
             continue;
         }
 
-        // Priority 2: User-banned via instruction hooks.
         if (info.isHooked && info.banned) {
             emitUd2(outPtr);
             continue;
         }
 
-        // Priority 3: Indirect JMP/CALL — banned for containment.
         if (info.isIndirectJump) {
             emitUd2(outPtr);
             continue;
         }
 
-        // Priority 4: RET — rewrite with validated return.
         if (info.isRet) {
             emitRetCheckStub(outPtr, jumpCheckAddr);
             continue;
         }
 
-        // Priority 5: Hooked instruction with callback.
         if (info.isHooked && info.callbackPtr) {
             u64 callbackAddr = reinterpret_cast<u64>(info.callbackPtr);
             u64 helperAddr = reinterpret_cast<u64>(&xi_run_instruction_callback);
             emitCallbackCall(outPtr, callbackAddr, helperAddr);
             std::memcpy(outPtr, insnSrc, info.instrLen);
             outPtr += info.instrLen;
+            if (info.isRspModifying) {
+                emitStackCheckStub(outPtr, stackCheckAddr);
+            }
             continue;
         }
 
-        // Priority 6: Memory access — insert bounds check.
         if (info.hasMem) {
-            emitBoundsCheckStub(outPtr, boundsCheckAddr);
+            if (isStoreInstruction(insnSrc, info.instrLen)) {
+                emitBoundsCheckStub(outPtr, writeCheckAddr);
+            } else {
+                emitBoundsCheckStub(outPtr, boundsCheckAddr);
+            }
         }
 
-        // Handle relative JMP/CALL displacement adjustment.
         if (info.isRelJmp && info.relSize == 4) {
-            // Copy the instruction but adjust the 32-bit relative offset.
             usz insnRelOffset = info.relOffset - info.origOffset;
             std::memcpy(outPtr, insnSrc, insnRelOffset);
 
-            // Read the original displacement.
             i32 origDisp = 0;
             std::memcpy(&origDisp, insnSrc + insnRelOffset, 4);
 
-            // The original displacement targets:
-            //   target = origOffset + instrLen + origDisp
             usz origTarget = info.origOffset + info.instrLen + static_cast<usz>(
                 static_cast<i64>(origDisp));
 
-            // Search for the instruction at origTarget.
             usz newTargetOffset = 0;
             bool targetFound = false;
             for (usz j = 0; j < insnCount; ++j) {
@@ -1169,7 +1400,6 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
             }
 
             if (targetFound) {
-                // Compute the current instruction's end in the output.
                 usz curInsnOutputEnd = info.outputOffset;
                 if (info.hasMem) {
                     curInsnOutputEnd += kStubSize;
@@ -1181,11 +1411,9 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
                 i32 newDisp = static_cast<i32>(newDisp64);
                 std::memcpy(outPtr + insnRelOffset, &newDisp, 4);
             } else {
-                // Target is outside the AOT'd region — keep original displacement.
                 std::memcpy(outPtr + insnRelOffset, &origDisp, 4);
             }
 
-            // Copy remaining bytes after the displacement.
             usz afterDisp = insnRelOffset + 4;
             if (afterDisp < info.instrLen) {
                 std::memcpy(outPtr + afterDisp, insnSrc + afterDisp,
@@ -1194,9 +1422,12 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
             outPtr += info.instrLen;
 
         } else {
-            // Copy instruction verbatim.
             std::memcpy(outPtr, insnSrc, info.instrLen);
             outPtr += info.instrLen;
+        }
+
+        if (info.isRspModifying) {
+            emitStackCheckStub(outPtr, stackCheckAddr);
         }
     }
 

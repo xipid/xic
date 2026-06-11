@@ -34,7 +34,7 @@ String data = logFs.read("latest.log");
 
 The `Xi::Path` class is an extremely versatile utility for managing both filesystem paths and networking URLs.
 
--   **Protocols**: Automatically parses schemes like `http://`, `file://`, or `rho://`.
+-   **Protocols**: Automatically parses schemes like `http://` or `file://`.
 -   **Normalization**: Resolves `.` and `..` segments automatically.
 -   **Query Parameters**: Parses URL query strings into a `Map<String, String>`.
 
