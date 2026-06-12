@@ -77,19 +77,14 @@ extern "C" void xi_sfi_bounds_check(void* addr, usz size) {
 
     // 3. Check registered fetch ranges
     for (usz i = 0; i < state->fetchRanges.size(); ++i) {
-        TaskState::FetchRange& fr = state->fetchRanges[i];
+        TaskState::FetchRange fr = state->fetchRanges[i];
         if (targetAddr >= fr.start && targetAddr + size <= fr.end) {
-            if (!fr.cached || !fr.resolved) {
-                fr.callback(fr.start, fr.end);
-                if (fr.cached) {
-                    fr.resolved = true;
-                }
-                // Re-verify that the callback successfully mapped/allocated the region
-                for (usz j = 0; j < state->regions.size(); ++j) {
-                    MemoryRegion& r = state->regions[j];
-                    if (r.physical && r.base <= fr.start && r.base + r.size >= fr.end) {
-                        return; // Successfully resolved!
-                    }
+            fr.callback(fr.start, fr.end);
+            // Re-verify that the callback successfully mapped/allocated the region containing targetAddr
+            for (usz j = 0; j < state->regions.size(); ++j) {
+                MemoryRegion& r = state->regions[j];
+                if (r.physical && targetAddr >= r.base && targetAddr + size <= r.base + r.size) {
+                    return; // Successfully resolved!
                 }
             }
         }
@@ -130,21 +125,31 @@ extern "C" void xi_sfi_write_check(void* addr, usz size) {
         return;
     }
 
+    // 2.5 Check registered store ranges (onStore)
+    for (usz i = 0; i < state->storeRanges.size(); ++i) {
+        TaskState::StoreRange sr = state->storeRanges[i];
+        if (targetAddr >= sr.start && targetAddr + size <= sr.end) {
+            sr.callback(sr.start, sr.end);
+            // Re-verify that the callback successfully mapped/allocated the region and it is writable
+            for (usz j = 0; j < state->regions.size(); ++j) {
+                MemoryRegion& r = state->regions[j];
+                if (r.physical && r.writable && targetAddr >= r.base && targetAddr + size <= r.base + r.size) {
+                    return; // Successfully resolved!
+                }
+            }
+        }
+    }
+
     // 3. Check registered fetch ranges
     for (usz i = 0; i < state->fetchRanges.size(); ++i) {
-        TaskState::FetchRange& fr = state->fetchRanges[i];
+        TaskState::FetchRange fr = state->fetchRanges[i];
         if (targetAddr >= fr.start && targetAddr + size <= fr.end) {
-            if (!fr.cached || !fr.resolved) {
-                fr.callback(fr.start, fr.end);
-                if (fr.cached) {
-                    fr.resolved = true;
-                }
-                // Re-verify that the callback successfully mapped/allocated the region and it is writable
-                for (usz j = 0; j < state->regions.size(); ++j) {
-                    MemoryRegion& r = state->regions[j];
-                    if (r.physical && r.writable && r.base <= fr.start && r.base + r.size >= fr.end) {
-                        return; // Successfully resolved!
-                    }
+            fr.callback(fr.start, fr.end);
+            // Re-verify that the callback successfully mapped/allocated the region and it is writable
+            for (usz j = 0; j < state->regions.size(); ++j) {
+                MemoryRegion& r = state->regions[j];
+                if (r.physical && r.writable && targetAddr >= r.base && targetAddr + size <= r.base + r.size) {
+                    return; // Successfully resolved!
                 }
             }
         }
@@ -204,6 +209,27 @@ extern "C" void xi_sfi_jump_check(void* target) {
         return;
     }
 
+    // Also allow jumping to host runner (parent task 0) executable regions.
+    TaskState* parent = (Task::_tasks.size() > 0) ? Task::_tasks[0] : nullptr;
+    if (parent) {
+        for (usz i = 0; i < parent->regions.size(); ++i) {
+            MemoryRegion& r = parent->regions[i];
+            if (r.physical && r.executable) {
+                if (addr >= r.physical && addr < r.physical + r.size) {
+                    return;
+                }
+            }
+        }
+        for (usz i = 0; i < parent->aotCache.size(); ++i) {
+            AOTRegion& aot = parent->aotCache[i];
+            if (aot.patchedCode) {
+                if (addr >= aot.patchedCode && addr < aot.patchedCode + aot.patchedSize) {
+                    return;
+                }
+            }
+        }
+    }
+
     // Invalid jump target: trap.
     __asm__ volatile("ud2");
 }
@@ -237,6 +263,26 @@ extern "C" void* xi_sfi_indirect_jump_resolver(void* target) {
     }
 
     if (!targetRegion) {
+        // Check registered fetch ranges
+        for (usz i = 0; i < state->fetchRanges.size(); ++i) {
+            TaskState::FetchRange fr = state->fetchRanges[i];
+            if (targetAddr >= fr.start && targetAddr < fr.end) {
+                fr.callback(fr.start, fr.end);
+                // Re-verify if it's now mapped
+                for (usz j = 0; j < state->regions.size(); ++j) {
+                    MemoryRegion& r = state->regions[j];
+                    if (r.physical && targetAddr >= r.base && targetAddr < r.base + r.size) {
+                        targetRegion = &r;
+                        isVirtual = true;
+                        break;
+                    }
+                }
+                if (targetRegion) break;
+            }
+        }
+    }
+
+    if (!targetRegion) {
         // Not in any memory region. Check if it's the entry point or trampoline.
         if (state->entryFn) {
             u8* entryAddr = reinterpret_cast<u8*>(state->entryFn);
@@ -251,6 +297,26 @@ extern "C" void* xi_sfi_indirect_jump_resolver(void* target) {
             if (aot.patchedCode && targetAddr >= reinterpret_cast<usz>(aot.patchedCode) &&
                 targetAddr < reinterpret_cast<usz>(aot.patchedCode) + aot.patchedSize) {
                 return target;
+            }
+        }
+        // Also check if it's a host runner (parent task 0) executable region!
+        TaskState* parent = (Task::_tasks.size() > 0) ? Task::_tasks[0] : nullptr;
+        if (parent) {
+            for (usz i = 0; i < parent->regions.size(); ++i) {
+                MemoryRegion& r = parent->regions[i];
+                if (r.physical && r.executable) {
+                    if (targetAddr >= reinterpret_cast<usz>(r.physical) &&
+                        targetAddr < reinterpret_cast<usz>(r.physical) + r.size) {
+                        return target;
+                    }
+                }
+            }
+            for (usz i = 0; i < parent->aotCache.size(); ++i) {
+                AOTRegion& aot = parent->aotCache[i];
+                if (aot.patchedCode && targetAddr >= reinterpret_cast<usz>(aot.patchedCode) &&
+                    targetAddr < reinterpret_cast<usz>(aot.patchedCode) + aot.patchedSize) {
+                    return target;
+                }
             }
         }
         // Invalid target: trap!
@@ -270,14 +336,17 @@ extern "C" void* xi_sfi_indirect_jump_resolver(void* target) {
             reg.originalSize = targetRegion->size;
             reg.patchedCode = res.patchedCode;
             reg.patchedSize = res.patchedSize;
+            reg.offsetMap = res.offsetMap;
             state->aotCache.push(reg);
             cached = &state->aotCache[state->aotCache.size() - 1];
         }
     }
 
-    if (cached && cached->patchedCode) {
+    if (cached && cached->patchedCode && cached->offsetMap) {
         usz offset = isVirtual ? (targetAddr - targetRegion->base) : (targetAddr - reinterpret_cast<usz>(targetRegion->physical));
-        return cached->patchedCode + offset;
+        if (offset < cached->originalSize && cached->offsetMap[offset] != 0xFFFFFFFF) {
+            return cached->patchedCode + cached->offsetMap[offset];
+        }
     }
 
     // If compilation failed, trap!
@@ -307,16 +376,18 @@ extern "C" void xi_sfi_stack_check(void* rsp_value) {
     }
 }
 
-extern "C" void xi_run_instruction_callback(void* callbackPtr, usz guestRbx) {
-    ::printf("[JIT Callback Debug] xi_run_instruction_callback entered! callbackPtr=%p, guestRbx=0x%lx\n", callbackPtr, (unsigned long)guestRbx);
-    ::fflush(stdout);
-    xi_last_guest_rbx = guestRbx;
+extern "C" void xi_run_instruction_callback(void* callbackPtr, GuestRegs* regs) {
+    if (regs) {
+        xi_last_guest_rbx = regs->rbx;
+        xi_guest_regs = regs;
+    }
     if (callbackPtr) {
         auto* cb = static_cast<Func<void()>*>(callbackPtr);
         if (*cb) {
             (*cb)();
         }
     }
+    xi_guest_regs = nullptr;
 }
 
 // -------------------------------------------------------------------------
@@ -331,13 +402,20 @@ extern "C" void xi_run_instruction_callback(void* callbackPtr, usz guestRbx) {
  *
  * @return true if the instruction must be replaced with ud2.
  */
-static bool isUnconditionallyBanned(const u8* code, usz len) {
-    if (len == 0) return false;
+struct InstructionMatch {
+    bool matched;
+    bool banned;
+    void* callbackPtr;
+    bool isTranslate;
+    void* translateCallbackPtr;
+};
 
+static String getInstructionName(const u8* code, usz len) {
+    if (len == 0) return "";
     usz pos = 0;
     // Skip legacy prefixes
     for (;;) {
-        if (pos >= len) return false;
+        if (pos >= len) return "";
         u8 b = code[pos];
         if (b == 0x66 || b == 0x67 || b == 0xF0 || b == 0xF2 || b == 0xF3 ||
             b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 || b == 0x64 || b == 0x65) {
@@ -348,151 +426,90 @@ static bool isUnconditionallyBanned(const u8* code, usz len) {
     if (pos < len && (code[pos] & 0xF0) == 0x40) {
         ++pos;
     }
-    if (pos >= len) return false;
+    if (pos >= len) return "";
 
     u8 op = code[pos];
     usz remaining = len - pos;
+    if (op == 0x90 && remaining == 1) return "nop";
+    if (op == 0xF4 && remaining == 1) return "hlt";
+    if (op == 0xCC && remaining == 1) return "int3";
+    if (op == 0xCD) return "int";
+    if (op == 0xC3 && remaining == 1) return "ret";
+    if (op == 0xCF && remaining == 1) return "iret";
+    if (op == 0x8E) return "mov-seg";
+    if (op == 0x9A) return "call-far";
+    if (op == 0xEA) return "jmp-far";
 
-    // Single-byte privileged instructions:
-    switch (op) {
-        case 0xF4: return true; // HLT
-        case 0xFA: return true; // CLI
-        case 0xFB: return true; // STI
-        case 0xCD: return true; // INT imm8 (any software interrupt)
-        case 0xCE: return true; // INTO
-        case 0xE4: return true; // IN AL, imm8
-        case 0xE5: return true; // IN AX/EAX, imm8
-        case 0xE6: return true; // OUT imm8, AL
-        case 0xE7: return true; // OUT imm8, AX/EAX
-        case 0xEC: return true; // IN AL, DX
-        case 0xED: return true; // IN AX/EAX, DX
-        case 0xEE: return true; // OUT DX, AL
-        case 0xEF: return true; // OUT DX, AX/EAX
-        case 0xC2: return true; // RET imm16 — ban unconditionally
-        case 0xCB: return true; // RETF — far return, banned unconditionally
-        case 0xCA: return true; // RETF imm16 — far return, banned unconditionally
-        case 0xCF: return true; // IRET/IRETD/IRETQ — interrupt return, banned unconditionally
-        case 0x9A: return true; // Direct far call — invalid in 64-bit but ban anyway
-        case 0xEA: return true; // Direct far jump — invalid in 64-bit but ban anyway
-        case 0x8E: return true; // MOV segment register — banned unconditionally
-        // VEX prefix — ban all AVX/AVX2 instructions in sandboxed code.
-        case 0xC4: return true; // 3-byte VEX prefix
-        case 0xC5: return true; // 2-byte VEX prefix
-        // EVEX prefix — ban all AVX-512 instructions.
-        case 0x62: return true; // EVEX prefix
-        case 0xFF: // FF group checks: far jumps and far calls
-            if (pos + 1 < len) {
-                u8 modrm = code[pos + 1];
-                u8 reg = (modrm >> 3) & 7;
-                if (reg == 3 || reg == 5) return true; // CALL far indirect / JMP far indirect
-            }
-            break;
-        default: break;
+    if (op == 0xFF && remaining >= 2) {
+        u8 modrm = code[pos + 1];
+        u8 reg = (modrm >> 3) & 7;
+        if (reg == 3 || reg == 5) return "call-far";
     }
 
-    // Two-byte privileged instructions (0F xx):
     if (op == 0x0F && remaining >= 2) {
         u8 op2 = code[pos + 1];
-        if (op2 == 0x38 || op2 == 0x3A) return true; // Ban 3-byte opcodes (0F 38/3A xx)
-        switch (op2) {
-            case 0x05: return true; // SYSCALL
-            case 0x07: return true; // SYSRET
-            case 0x30: return true; // WRMSR
-            case 0x32: return true; // RDMSR
-            case 0x34: return true; // SYSENTER
-            case 0x35: return true; // SYSEXIT
-            case 0x01: return true; // LGDT/LIDT/SMSW/LMSW/INVLPG — all privileged
-            case 0x06: return true; // CLTS
-            case 0x08: return true; // INVD
-            case 0x09: return true; // WBINVD
-            case 0x20: return true; // MOV from CR
-            case 0x21: return true; // MOV from DR
-            case 0x22: return true; // MOV to CR
-            case 0x23: return true; // MOV to DR
-            case 0xA1: return true; // POP FS — banned unconditionally
-            case 0xA9: return true; // POP GS — banned unconditionally
-            case 0xB2: return true; // LSS — banned unconditionally
-            case 0xB4: return true; // LFS — banned unconditionally
-            case 0xB5: return true; // LGS — banned unconditionally
-            case 0xAA: return true; // RSM — resume from SMM, banned unconditionally
-            case 0xAE:
-                if (remaining >= 3) {
-                    u8 modrm = code[pos + 2];
-                    u8 mod = (modrm >> 6) & 3;
-                    u8 reg = (modrm >> 3) & 7;
-                    if (mod == 3 && reg <= 3) return true; // Ban FSGSBASE (rdfsbase/rdgsbase/wrfsbase/wrgsbase)
-                }
-                break;
-            default: break;
+        if (op2 == 0x05) return "syscall";
+        if (op2 == 0xA2) return "cpuid";
+        if (op2 == 0x31) return "rdtsc";
+        if (op2 == 0x0B) return "ud2";
+        if (op2 == 0xB2) return "lss";
+        if (op2 == 0x01) return "sysctl";
+        if (op2 == 0xAE && remaining >= 3) {
+            u8 modrm = code[pos + 2];
+            u8 mod = (modrm >> 6) & 3;
+            u8 reg = (modrm >> 3) & 7;
+            if (mod == 3 && reg <= 3) return "fsgsbase";
         }
     }
-
-    return false;
+    return "";
 }
 
-/**
- * @brief Checks if an instruction is hooked or banned via the task's
- *        instruction hook system (user-defined hooks on top of the
- *        unconditional ban list).
- */
-static bool isInstructionBannedOrHooked(const u8* code, usz len, bool& outBanned, void*& outCallbackPtr) {
-    outBanned = false;
-    outCallbackPtr = nullptr;
-
+static InstructionMatch checkInstructionHooks(const u8* code, usz len, const String& name) {
+    InstructionMatch match = {false, false, nullptr, false, nullptr};
     TaskState* state = xi_get_current_task();
-    if (!state) return false;
+    if (!state) return match;
 
-    if (len == 0) return false;
+    String op1;
+    if (len >= 1) op1 = String(code, 1);
+    String op2;
+    if (len >= 2) op2 = String(code, 2);
 
-    usz pos = 0;
-    // Skip legacy prefixes
-    for (;;) {
-        if (pos >= len) return false;
-        u8 b = code[pos];
-        if (b == 0x66 || b == 0x67 || b == 0xF0 || b == 0xF2 || b == 0xF3 ||
-            b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 || b == 0x64 || b == 0x65) {
-            ++pos;
-        } else break;
-    }
-    // Skip REX prefix
-    if (pos < len && (code[pos] & 0xF0) == 0x40) {
-        ++pos;
-    }
-    if (pos >= len) return false;
-
-    u8 op = code[pos];
-    usz remaining = len - pos;
-    String name;
-    if (op == 0x90 && remaining == 1) name = "nop";
-    else if (op == 0xF4 && remaining == 1) name = "hlt";
-    else if (op == 0xCC && remaining == 1) name = "int3";
-    else if (op == 0xCD) name = "int";
-    else if (op == 0xC3 && remaining == 1) name = "ret";
-    else if (op == 0x0F && remaining >= 2) {
-        u8 op2 = code[pos + 1];
-        if (op2 == 0x05) name = "syscall";
-        else if (op2 == 0xA2) name = "cpuid";
-        else if (op2 == 0x31) name = "rdtsc";
-        else if (op2 == 0x0B) name = "ud2";
-    }
-
-    if (name.size() == 0) return false;
-
-    ::printf("[AOT Hook Check] name=%s, current task state=%p, hooks size=%zu\n",
-             name.c_str(), state, state->instructionHooks.size());
-    for (usz i = 0; i < state->instructionHooks.size(); ++i) {
-        ::printf("  Hook %zu: name=%s, banned=%d, callback=%p\n",
-                 i, state->instructionHooks[i].name.c_str(),
-                 state->instructionHooks[i].banned,
-                 (void*)&state->instructionHooks[i].callback);
-        if (state->instructionHooks[i].name == name) {
-            outBanned = state->instructionHooks[i].banned;
-            outCallbackPtr = &(state->instructionHooks[i].callback);
-            return true;
+    // 1. Check translators first
+    for (usz i = 0; i < state->instructionTranslators.size(); ++i) {
+        const auto& t = state->instructionTranslators[i];
+        if (t.name == name || (op1.size() > 0 && t.name == op1) || (op2.size() > 0 && t.name == op2)) {
+            match.matched = true;
+            match.isTranslate = true;
+            match.translateCallbackPtr = const_cast<void*>(reinterpret_cast<const void*>(&t.callback));
+            return match;
         }
     }
-    return false;
+
+    // 2. Check explicit hooks next
+    for (usz i = 0; i < state->instructionHooks.size(); ++i) {
+        const auto& hook = state->instructionHooks[i];
+        if (hook.name == name || (op1.size() > 0 && hook.name == op1) || (op2.size() > 0 && hook.name == op2)) {
+            match.matched = true;
+            match.banned = hook.banned;
+            match.callbackPtr = const_cast<void*>(reinterpret_cast<const void*>(&hook.callback));
+            return match;
+        }
+    }
+
+    // 3. Check inherited ban list
+    for (usz i = 0; i < state->bannedList.size(); ++i) {
+        const String& ban = state->bannedList[i];
+        if (ban == name || (op1.size() > 0 && ban == op1) || (op2.size() > 0 && ban == op2)) {
+            match.matched = true;
+            match.banned = true;
+            return match;
+        }
+    }
+
+    return match;
 }
+
+// Banned instructions are checked dynamically.
 
 // -------------------------------------------------------------------------
 // Indirect Jump/Call Detection
@@ -569,16 +586,34 @@ static void emitUd2(u8*& outPtr) {
 }
 
 static void emitCallbackCall(u8*& outPtr, u64 callbackPtr, u64 helperAddr) {
-    // mov rsi, rbx
+    // Save caller-saved registers and rbx
+    *outPtr++ = 0x9C; // pushfq
+    *outPtr++ = 0x50; // push rax
+    *outPtr++ = 0x53; // push rbx
+    *outPtr++ = 0x51; // push rcx
+    *outPtr++ = 0x52; // push rdx
+    *outPtr++ = 0x56; // push rsi
+    *outPtr++ = 0x57; // push rdi
+    *outPtr++ = 0x41; *outPtr++ = 0x50; // push r8
+    *outPtr++ = 0x41; *outPtr++ = 0x51; // push r9
+    *outPtr++ = 0x41; *outPtr++ = 0x52; // push r10
+    *outPtr++ = 0x41; *outPtr++ = 0x53; // push r11
+
+    // mov rsi, rsp
     *outPtr++ = 0x48;
     *outPtr++ = 0x89;
-    *outPtr++ = 0xDE;
+    *outPtr++ = 0xE6;
 
     // movabs rdi, callbackPtr
     *outPtr++ = 0x48;
     *outPtr++ = 0xBF;
     std::memcpy(outPtr, &callbackPtr, 8);
     outPtr += 8;
+
+    // Align stack
+    *outPtr++ = 0x55; // push rbp
+    *outPtr++ = 0x48; *outPtr++ = 0x89; *outPtr++ = 0xE5; // mov rbp, rsp
+    *outPtr++ = 0x48; *outPtr++ = 0x83; *outPtr++ = 0xE4; *outPtr++ = 0xF0; // and rsp, -16
 
     // movabs rax, helperAddr
     *outPtr++ = 0x48;
@@ -589,6 +624,22 @@ static void emitCallbackCall(u8*& outPtr, u64 callbackPtr, u64 helperAddr) {
     // call rax
     *outPtr++ = 0xFF;
     *outPtr++ = 0xD0;
+
+    // Restore stack
+    *outPtr++ = 0xC9; // leave
+
+    // Restore registers
+    *outPtr++ = 0x41; *outPtr++ = 0x5B; // pop r11
+    *outPtr++ = 0x41; *outPtr++ = 0x5A; // pop r10
+    *outPtr++ = 0x41; *outPtr++ = 0x59; // pop r9
+    *outPtr++ = 0x41; *outPtr++ = 0x58; // pop r8
+    *outPtr++ = 0x5F; // pop rdi
+    *outPtr++ = 0x5E; // pop rsi
+    *outPtr++ = 0x5A; // pop rdx
+    *outPtr++ = 0x59; // pop rcx
+    *outPtr++ = 0x5B; // pop rbx
+    *outPtr++ = 0x58; // pop rax
+    *outPtr++ = 0x9D; // popfq
 }
 
 // -------------------------------------------------------------------------
@@ -1067,8 +1118,8 @@ static usz xi_x86_insn_length(const u8* code, usz maxLen,
             }
         }
 
-        // Memory operand if mod != 3 (register direct).
-        if (mod != 3) {
+        // Memory operand if mod != 3 (register direct) and not LEA.
+        if (mod != 3 && !(opcode == 0x8D && !twoByteOpcode)) {
             outHasMem = true;
         }
 
@@ -1266,23 +1317,48 @@ static usz getMemAccessSize(const u8* code, usz len, bool rexW, bool has66) {
 }
 
 static void emitBoundsCheckStub(u8*& out, u64 stubAddr, const u8* insnSrc, usz instrLen, usz immSize, usz accessSize) {
-    // push rax
-    *out++ = 0x50;
-    // push rdi
-    *out++ = 0x57;
-    // push rsi
-    *out++ = 0x56;
+    // 1. Save all caller-saved registers and RFLAGS (10 registers = 80 bytes)
+    *out++ = 0x9C; // pushfq
+    *out++ = 0x50; // push rax
+    *out++ = 0x51; // push rcx
+    *out++ = 0x52; // push rdx
+    *out++ = 0x56; // push rsi
+    *out++ = 0x57; // push rdi
+    *out++ = 0x41; *out++ = 0x50; // push r8
+    *out++ = 0x41; *out++ = 0x51; // push r9
+    *out++ = 0x41; *out++ = 0x52; // push r10
+    *out++ = 0x41; *out++ = 0x53; // push r11
 
-    // Construct and emit the LEA instruction to compute the target address into rdi
+    // 2. Temporarily restore rsp so buildLea computes the correct address
+    // mov r11, rsp  (save shifted rsp to r11) -> 4C 8B DC
+    *out++ = 0x4C; *out++ = 0x8B; *out++ = 0xDC;
+    // add rsp, 80 -> 48 83 C4 50
+    *out++ = 0x48; *out++ = 0x83; *out++ = 0xC4; *out++ = 0x50;
+
+    // 3. Construct and emit the LEA instruction to compute the target address into rdi
     usz leaLen = buildLea(out, insnSrc, instrLen, immSize);
     out += leaLen;
 
+    // 4. Restore the shifted rsp
+    // mov rsp, r11 -> 4C 89 DC
+    *out++ = 0x4C; *out++ = 0x89; *out++ = 0xDC;
+
+    // 5. Pass accessSize in rsi
     // push accessSize (imm8)
     *out++ = 0x6A;
     *out++ = static_cast<u8>(accessSize);
     // pop rsi
     *out++ = 0x5E;
 
+    // 6. Dynamically align the stack to 16 bytes before calling C++ helper
+    // push rbp -> 55
+    *out++ = 0x55;
+    // mov rbp, rsp -> 48 89 E5
+    *out++ = 0x48; *out++ = 0x89; *out++ = 0xE5;
+    // and rsp, -16 -> 48 83 E4 F0
+    *out++ = 0x48; *out++ = 0x83; *out++ = 0xE4; *out++ = 0xF0;
+
+    // 7. Call the bounds check helper
     // movabs rax, stubAddr
     *out++ = 0x48;
     *out++ = 0xB8;
@@ -1293,12 +1369,21 @@ static void emitBoundsCheckStub(u8*& out, u64 stubAddr, const u8* insnSrc, usz i
     *out++ = 0xFF;
     *out++ = 0xD0;
 
-    // pop rsi
-    *out++ = 0x5E;
-    // pop rdi
-    *out++ = 0x5F;
-    // pop rax
-    *out++ = 0x58;
+    // 8. Restore stack and unaligned rsp
+    // leave -> C9 (mov rsp, rbp; pop rbp)
+    *out++ = 0xC9;
+
+    // 9. Restore caller-saved registers
+    *out++ = 0x41; *out++ = 0x5B; // pop r11
+    *out++ = 0x41; *out++ = 0x5A; // pop r10
+    *out++ = 0x41; *out++ = 0x59; // pop r9
+    *out++ = 0x41; *out++ = 0x58; // pop r8
+    *out++ = 0x5F; // pop rdi
+    *out++ = 0x5E; // pop rsi
+    *out++ = 0x5A; // pop rdx
+    *out++ = 0x59; // pop rcx
+    *out++ = 0x58; // pop rax
+    *out++ = 0x9D; // popfq
 }
 
 /**
@@ -1372,46 +1457,68 @@ static constexpr usz kJumpCheckStubSize = 2; // ud2 for banned indirect jumps
  *   ret                               ; 1 byte — execute validated ret
  *                                Total: 25 bytes
  */
-static constexpr usz kRetCheckStubSize = 25;
+static constexpr usz kRetCheckStubSize = 56;
 
 static void emitRetCheckStub(u8*& out, u64 jumpCheckAddr) {
-    // push rax
-    *out++ = 0x50;
-    // mov rax, [rsp+8] (48 8B 44 24 08)
-    *out++ = 0x48;
-    *out++ = 0x8B;
-    *out++ = 0x44;
-    *out++ = 0x24;
-    *out++ = 0x08;
-    // push rdi
-    *out++ = 0x57;
-    // mov rdi, rax (48 89 C7)
-    *out++ = 0x48;
-    *out++ = 0x89;
-    *out++ = 0xC7;
-    // movabs rax, imm64
-    *out++ = 0x48;
-    *out++ = 0xB8;
+    // 1. Save original rdi and rax to compute safely
+    *out++ = 0x57; // push rdi
+    *out++ = 0x50; // push rax
+    
+    // 2. Read the return address (which is now at rsp + 16) into rdi
+    // mov rdi, [rsp+16] (48 8b 7c 24 10)
+    *out++ = 0x48; *out++ = 0x8B; *out++ = 0x7C; *out++ = 0x24; *out++ = 0x10;
+    
+    // 3. Save all other caller-saved registers and RFLAGS (8 items = 64 bytes)
+    *out++ = 0x9C; // pushfq
+    *out++ = 0x51; // push rcx
+    *out++ = 0x52; // push rdx
+    *out++ = 0x56; // push rsi
+    *out++ = 0x41; *out++ = 0x50; // push r8
+    *out++ = 0x41; *out++ = 0x51; // push r9
+    *out++ = 0x41; *out++ = 0x52; // push r10
+    *out++ = 0x41; *out++ = 0x53; // push r11
+    
+    // 4. Align the stack dynamically
+    *out++ = 0x55; // push rbp
+    *out++ = 0x48; *out++ = 0x89; *out++ = 0xE5; // mov rbp, rsp
+    *out++ = 0x48; *out++ = 0x83; *out++ = 0xE4; *out++ = 0xF0; // and rsp, -16
+    
+    // 5. Call the jump check helper
+    // movabs rax, jumpCheckAddr
+    *out++ = 0x48; *out++ = 0xB8;
     std::memcpy(out, &jumpCheckAddr, 8);
     out += 8;
-    // call rax (FF D0)
-    *out++ = 0xFF;
-    *out++ = 0xD0;
-    // pop rdi
-    *out++ = 0x5F;
-    // pop rax
-    *out++ = 0x58;
-    // ret (now validated)
+    // call rax
+    *out++ = 0xFF; *out++ = 0xD0;
+    
+    // 6. Restore stack
+    *out++ = 0xC9; // leave
+    
+    // 7. Restore all registers
+    *out++ = 0x41; *out++ = 0x5B; // pop r11
+    *out++ = 0x41; *out++ = 0x5A; // pop r10
+    *out++ = 0x41; *out++ = 0x59; // pop r9
+    *out++ = 0x41; *out++ = 0x58; // pop r8
+    *out++ = 0x5E; // pop rsi
+    *out++ = 0x5A; // pop rdx
+    *out++ = 0x59; // pop rcx
+    *out++ = 0x9D; // popfq
+    *out++ = 0x58; // pop rax
+    *out++ = 0x5F; // pop rdi
+    
+    // 8. Execute the validated ret
     *out++ = 0xC3;
 }
 
-static void emitIndirectJumpStub(u8*& out, const u8* insnSrc, usz instrLen, u64 resolverAddr) {
-    // 1. push rax
-    *out++ = 0x50;
-    // 2. push rdi
-    *out++ = 0x57;
+static constexpr usz kIndirectJumpCheckStubSize = 85;
 
-    // 3. Dynamically construct the PUSH instruction from the original JMP/CALL.
+static void emitIndirectJumpStub(u8*& out, const u8* insnSrc, usz instrLen, u64 resolverAddr) {
+    // 1. Save original rdi and rax to compute safely
+    *out++ = 0x57; // push rdi
+    *out++ = 0x50; // push rax
+    
+    // 2. Execute the modified instruction (e.g. push [rbx]).
+    // This pushes the TARGET address onto the stack.
     usz opcodePos = 0;
     while (opcodePos < instrLen) {
         u8 b = insnSrc[opcodePos];
@@ -1423,77 +1530,69 @@ static void emitIndirectJumpStub(u8*& out, const u8* insnSrc, usz instrLen, u64 
     if (opcodePos < instrLen && (insnSrc[opcodePos] & 0xF0) == 0x40) {
         ++opcodePos;
     }
-
     std::memcpy(out, insnSrc, instrLen);
     u8 modrm = insnSrc[opcodePos + 1];
     out[opcodePos + 1] = (modrm & 0xC7) | 0x30; // reg = 6 (push)
     out += instrLen;
-
-    // 4. pop rdi
-    *out++ = 0x5F;
-    // 5. push rsi
-    *out++ = 0x56;
-    // 6. push rdx
-    *out++ = 0x52;
-    // 7. push rcx
-    *out++ = 0x51;
-    // 8. push r8
-    *out++ = 0x41; *out++ = 0x50;
-    // 9. push r9
-    *out++ = 0x41; *out++ = 0x51;
-    // 10. push r10
-    *out++ = 0x41; *out++ = 0x52;
-    // 11. push r11
-    *out++ = 0x41; *out++ = 0x53;
-
-    // 12. movabs rax, resolverAddr
-    *out++ = 0x48;
-    *out++ = 0xB8;
+    
+    // 3. Pop the target into rdi
+    *out++ = 0x5F; // pop rdi
+    
+    // 4. Save other caller-saved registers and RFLAGS (8 items = 64 bytes)
+    *out++ = 0x9C; // pushfq
+    *out++ = 0x51; // push rcx
+    *out++ = 0x52; // push rdx
+    *out++ = 0x56; // push rsi
+    *out++ = 0x41; *out++ = 0x50; // push r8
+    *out++ = 0x41; *out++ = 0x51; // push r9
+    *out++ = 0x41; *out++ = 0x52; // push r10
+    *out++ = 0x41; *out++ = 0x53; // push r11
+    
+    // 5. Align stack dynamically
+    *out++ = 0x55; // push rbp
+    *out++ = 0x48; *out++ = 0x89; *out++ = 0xE5; // mov rbp, rsp
+    *out++ = 0x48; *out++ = 0x83; *out++ = 0xE4; *out++ = 0xF0; // and rsp, -16
+    
+    // 6. Call the jump check helper
+    // movabs rax, resolverAddr
+    *out++ = 0x48; *out++ = 0xB8;
     std::memcpy(out, &resolverAddr, 8);
     out += 8;
-
-    // 13. call rax
-    *out++ = 0xFF;
-    *out++ = 0xD0;
-
-    // 15. pop r11
-    *out++ = 0x41; *out++ = 0x5B;
-    // 16. pop r10
-    *out++ = 0x41; *out++ = 0x5A;
-    // 17. pop r9
-    *out++ = 0x41; *out++ = 0x59;
-    // 18. pop r8
-    *out++ = 0x41; *out++ = 0x58;
-    // 19. pop rcx
-    *out++ = 0x59;
-    // 20. pop rdx
-    *out++ = 0x5A;
-    // 21. pop rsi
-    *out++ = 0x5E;
-    // 22. pop rdi
-    *out++ = 0x5F;
-
-    // 14. mov r11, rax
-    *out++ = 0x49;
-    *out++ = 0x89;
-    *out++ = 0xC3;
-
-    // 23. pop rax
-    *out++ = 0x58;
-
-    // 24. Determine if the original was a CALL or a JMP
+    // call rax
+    *out++ = 0xFF; *out++ = 0xD0;
+    
+    // 7. Restore stack
+    *out++ = 0xC9; // leave
+    
+    // 8. Restore registers (save rax into r11 first!)
+    // mov r11, rax (49 89 C3)
+    *out++ = 0x49; *out++ = 0x89; *out++ = 0xC3;
+    
+    // pop the rest
+    // Actually, pop r11 would overwrite the resolved target!
+    // So we add 8 to rsp instead of popping r11!
+    // add rsp, 8 (48 83 C4 08)
+    *out++ = 0x48; *out++ = 0x83; *out++ = 0xC4; *out++ = 0x08;
+    
+    *out++ = 0x41; *out++ = 0x5A; // pop r10
+    *out++ = 0x41; *out++ = 0x59; // pop r9
+    *out++ = 0x41; *out++ = 0x58; // pop r8
+    *out++ = 0x5E; // pop rsi
+    *out++ = 0x5A; // pop rdx
+    *out++ = 0x59; // pop rcx
+    *out++ = 0x9D; // popfq
+    *out++ = 0x58; // pop rax
+    *out++ = 0x5F; // pop rdi
+    
+    // 9. Execute the jump/call using r11
     u8 reg = (modrm >> 3) & 7;
     bool isCall = (reg == 2 || reg == 3);
     if (isCall) {
         // call r11 (41 FF D3)
-        *out++ = 0x41;
-        *out++ = 0xFF;
-        *out++ = 0xD3;
+        *out++ = 0x41; *out++ = 0xFF; *out++ = 0xD3;
     } else {
         // jmp r11 (41 FF E3)
-        *out++ = 0x41;
-        *out++ = 0xFF;
-        *out++ = 0xE3;
+        *out++ = 0x41; *out++ = 0xFF; *out++ = 0xE3;
     }
 }
 
@@ -1509,31 +1608,51 @@ static void emitIndirectJumpStub(u8*& out, const u8* insnSrc, usz instrLen, u64 
  *   call rax                          ; 2 bytes — validate
  *   pop rdi                           ; 1 byte
  *   pop rax                           ; 1 byte
- *                                Total: 19 bytes
+ *                                Total: 54 bytes
  */
-static constexpr usz kStackCheckStubSize = 19;
+static constexpr usz kStackCheckStubSize = 54;
 
 static void emitStackCheckStub(u8*& out, u64 stackCheckAddr) {
-    // push rax
-    *out++ = 0x50;
-    // push rdi
-    *out++ = 0x57;
-    // mov rdi, rsp (48 89 E7)
-    *out++ = 0x48;
-    *out++ = 0x89;
-    *out++ = 0xE7;
-    // movabs rax, imm64
-    *out++ = 0x48;
-    *out++ = 0xB8;
+    // 1. Save all caller-saved registers and RFLAGS (80 bytes of pushes)
+    *out++ = 0x9C; // pushfq
+    *out++ = 0x50; // push rax
+    *out++ = 0x51; // push rcx
+    *out++ = 0x52; // push rdx
+    *out++ = 0x56; // push rsi
+    *out++ = 0x57; // push rdi
+    *out++ = 0x41; *out++ = 0x50; // push r8
+    *out++ = 0x41; *out++ = 0x51; // push r9
+    *out++ = 0x41; *out++ = 0x52; // push r10
+    *out++ = 0x41; *out++ = 0x53; // push r11
+
+    // 2. Compute the original RSP into rdi: lea rdi, [rsp + 80]
+    *out++ = 0x48; *out++ = 0x8D; *out++ = 0x7C; *out++ = 0x24; *out++ = 0x50;
+
+    // 3. Align stack dynamically before call
+    *out++ = 0x55; // push rbp
+    *out++ = 0x48; *out++ = 0x89; *out++ = 0xE5; // mov rbp, rsp
+    *out++ = 0x48; *out++ = 0x83; *out++ = 0xE4; *out++ = 0xF0; // and rsp, -16
+
+    // 4. Call helper
+    *out++ = 0x48; *out++ = 0xB8; // movabs rax, imm64
     std::memcpy(out, &stackCheckAddr, 8);
     out += 8;
-    // call rax (FF D0)
-    *out++ = 0xFF;
-    *out++ = 0xD0;
-    // pop rdi
-    *out++ = 0x5F;
-    // pop rax
-    *out++ = 0x58;
+    *out++ = 0xFF; *out++ = 0xD0; // call rax
+
+    // 5. Restore stack
+    *out++ = 0xC9; // leave
+
+    // 6. Restore caller-saved registers
+    *out++ = 0x41; *out++ = 0x5B; // pop r11
+    *out++ = 0x41; *out++ = 0x5A; // pop r10
+    *out++ = 0x41; *out++ = 0x59; // pop r9
+    *out++ = 0x41; *out++ = 0x58; // pop r8
+    *out++ = 0x5F; // pop rdi
+    *out++ = 0x5E; // pop rsi
+    *out++ = 0x5A; // pop rdx
+    *out++ = 0x59; // pop rcx
+    *out++ = 0x58; // pop rax
+    *out++ = 0x9D; // popfq
 }
 
 /**
@@ -1629,13 +1748,15 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         bool isHooked;     // Whether the instruction is hooked or banned.
         bool banned;       // Whether the instruction is banned.
         void* callbackPtr; // Pointer to registered callback (stored in TaskState).
-        bool isBannedPrivileged; // Unconditionally banned privileged instruction.
+        bool isBannedPrivileged; // Force trap (fails decoding).
         bool isIndirectJump;     // Indirect JMP/CALL — banned for containment.
         bool isRet;              // RET — rewritten with validation.
         bool isRspModifying;     // RSP modifying instruction.
         usz immSize;
         usz leaSize;
         usz accessSize;
+        bool isTranslate;
+        void* translateCallbackPtr;
     };
 
     usz insnCapacity = codeSize;
@@ -1663,11 +1784,16 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
             isRelJmp = false;
         }
 
-        bool hookBanned = false;
-        void* callbackPtr = nullptr;
-        bool isHooked = isInstructionBannedOrHooked(code + pos, len, hookBanned, callbackPtr);
+        String instrName = getInstructionName(code + pos, len);
+        InstructionMatch match = checkInstructionHooks(code + pos, len, instrName);
 
-        bool isBannedPrivileged = isUnconditionallyBanned(code + pos, len);
+        bool isHooked = match.matched;
+        bool hookBanned = match.banned;
+        void* callbackPtr = match.callbackPtr;
+        bool isTranslate = match.isTranslate;
+        void* translateCallbackPtr = match.translateCallbackPtr;
+
+        bool isBannedPrivileged = false;
         if (len == 1 && pos + 1 <= codeSize) {
             bool dummy1, dummy2, dummy5;
             usz dummy3, dummy4, dummy6;
@@ -1689,8 +1815,7 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         info.hasMem = hasMem;
         info.isRelJmp = isRelJmp;
         info.relOffset = relOffset;
-        ::printf("[AOT First Pass] Insn %d: origOffset=%d, relOffset=%d, relSize=%d\n",
-                 (int)insnCount, (int)info.origOffset, (int)info.relOffset, (int)relSize);
+
         info.relSize = relSize;
         info.isHooked = isHooked;
         info.banned = hookBanned;
@@ -1700,6 +1825,8 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         info.isRet = isRet;
         info.isRspModifying = isRspModifying;
         info.immSize = immSize;
+        info.isTranslate = isTranslate;
+        info.translateCallbackPtr = translateCallbackPtr;
 
         if (hasMem) {
             usz prefixLen = 0, modrmPos = 0, opcodeLen = 0;
@@ -1724,16 +1851,31 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         usz insnOutputSize = 0;
         if (isBannedPrivileged) {
             insnOutputSize = 2; // ud2
-        } else if (isHooked && hookBanned) {
+        } else if (isTranslate && translateCallbackPtr) {
+            auto* cb = reinterpret_cast<Func<Array<u8>(const Array<u8>&)>*>(translateCallbackPtr);
+            Array<u8> srcBytes;
+            srcBytes.set(code + pos, len);
+            Array<u8> replacement = (*cb)(srcBytes);
+            insnOutputSize = replacement.size();
+        } else if (isHooked && hookBanned && !callbackPtr) {
             insnOutputSize = 2; // ud2
+        } else if (isHooked && callbackPtr) {
+            insnOutputSize = 64 + (hookBanned ? 0 : len);
         } else if (isIndirectJump) {
-            insnOutputSize = 45 + len; // Dynamic JIT target check & translation stub
+            insnOutputSize = 58 + len; // Dynamic JIT target check & translation stub
         } else if (isRet) {
             insnOutputSize = kRetCheckStubSize;
-        } else if (isHooked && callbackPtr) {
-            insnOutputSize = 25 + len;
+        } else if (isRelJmp && relSize == 1) {
+            u8 op = code[pos + len - 2];
+            if (op == 0xEB) {
+                insnOutputSize = 5; // E9 disp32
+            } else if (op >= 0x70 && op <= 0x7F) {
+                insnOutputSize = 6; // 0F 8x disp32
+            } else {
+                insnOutputSize = len;
+            }
         } else if (hasMem) {
-            insnOutputSize = 21 + info.leaSize + len;
+            insnOutputSize = 62 + info.leaSize + len;
         } else {
             insnOutputSize = len;
         }
@@ -1748,6 +1890,7 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
     }
 
     u8* output = nullptr;
+    u32* offsetMap = nullptr;
 #ifndef _WIN32
     usz mapSize = (outputSize + 4095) & ~4095;
     output = static_cast<u8*>(::mmap(nullptr, mapSize, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0));
@@ -1755,12 +1898,16 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         std::free(insns);
         return result;
     }
+    offsetMap = new u32[codeSize];
+    for (usz i = 0; i < codeSize; ++i) offsetMap[i] = 0xFFFFFFFF;
 #else
     output = static_cast<u8*>(std::malloc(outputSize));
     if (!output) {
         std::free(insns);
         return result;
     }
+    offsetMap = new u32[codeSize];
+    for (usz i = 0; i < codeSize; ++i) offsetMap[i] = 0xFFFFFFFF;
 #endif
 
     u64 boundsCheckAddr = reinterpret_cast<u64>(&xi_sfi_bounds_check);
@@ -1775,20 +1922,28 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         u8* beforePtr = outPtr;
         const u8* insnSrc = code + info.origOffset;
 
-        ::printf("[AOT Rewrite Detail] Insn %d: origOffset=%d, len=%d, beforeOffset=%d, bytes=",
-                 (int)i, (int)info.origOffset, (int)info.instrLen, (int)(beforePtr - output));
-        for (usz k = 0; k < info.instrLen; ++k) ::printf("%02x ", insnSrc[k]);
-        if (i == 49) {
-            ::printf("[AOT Debug Insn 49 Rewrite] isHooked=%d, callbackPtr=%p, banned=%d\n",
-                     (int)info.isHooked, info.callbackPtr, (int)info.banned);
+        if (info.origOffset < codeSize) {
+            offsetMap[info.origOffset] = static_cast<u32>(outPtr - output);
         }
+
+
 
         if (info.isBannedPrivileged) {
             emitUd2(outPtr);
             continue;
         }
 
-        if (info.isHooked && info.banned) {
+        if (info.isTranslate && info.translateCallbackPtr) {
+            auto* cb = reinterpret_cast<Func<Array<u8>(const Array<u8>&)>*>(info.translateCallbackPtr);
+            Array<u8> srcBytes;
+            srcBytes.set(insnSrc, info.instrLen);
+            Array<u8> replacement = (*cb)(srcBytes);
+            std::memcpy(outPtr, replacement.data(), replacement.size());
+            outPtr += replacement.size();
+            continue;
+        }
+
+        if (info.isHooked && info.banned && !info.callbackPtr) {
             emitUd2(outPtr);
             continue;
         }
@@ -1807,15 +1962,14 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
             u64 callbackAddr = reinterpret_cast<u64>(info.callbackPtr);
             u64 helperAddr = reinterpret_cast<u64>(&xi_run_instruction_callback);
             emitCallbackCall(outPtr, callbackAddr, helperAddr);
-            std::memcpy(outPtr, insnSrc, info.instrLen);
-            outPtr += info.instrLen;
+            if (!info.banned) {
+                std::memcpy(outPtr, insnSrc, info.instrLen);
+                outPtr += info.instrLen;
+            }
             if (info.isRspModifying) {
                 emitStackCheckStub(outPtr, stackCheckAddr);
             }
-            ::printf("[AOT Debug Hook Rewrite] Insn %d completed, afterOffset=%d, written=",
-                     (int)i, (int)(outPtr - output));
-            for (usz k = 0; k < (usz)(outPtr - beforePtr); ++k) ::printf("%02x ", beforePtr[k]);
-            ::printf("\n");
+
             continue;
         }
 
@@ -1829,8 +1983,7 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
 
         if (info.isRelJmp && info.relSize == 4) {
             usz insnRelOffset = info.relOffset;
-            ::printf("[AOT Debug RelJmp] info.relOffset=%lu, info.origOffset=%lu, insnRelOffset=%lu\n",
-                     (unsigned long)info.relOffset, (unsigned long)info.origOffset, (unsigned long)insnRelOffset);
+
             std::memcpy(outPtr, insnSrc, insnRelOffset);
 
             i32 origDisp = 0;
@@ -1850,11 +2003,13 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
             }
 
             if (targetFound) {
-                usz curInsnOutputEnd = info.outputOffset;
+                usz curInsnOutputEnd = info.outputOffset + info.instrLen;
                 if (info.hasMem) {
-                    curInsnOutputEnd += 20 + info.leaSize;
+                    curInsnOutputEnd += 62 + info.leaSize;
                 }
-                curInsnOutputEnd += info.instrLen;
+                if (info.isRspModifying) {
+                    curInsnOutputEnd += kStackCheckStubSize;
+                }
 
                 i64 newDisp64 = static_cast<i64>(newTargetOffset) -
                                 static_cast<i64>(curInsnOutputEnd);
@@ -1871,6 +2026,44 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
             }
             outPtr += info.instrLen;
 
+        } else if (info.isRelJmp && info.relSize == 1 &&
+                   (insnSrc[info.instrLen - 2] == 0xEB || (insnSrc[info.instrLen - 2] >= 0x70 && insnSrc[info.instrLen - 2] <= 0x7F))) {
+            u8 op = insnSrc[info.instrLen - 2];
+            i8 origDisp = static_cast<i8>(insnSrc[info.instrLen - 1]);
+            usz origTarget = info.origOffset + info.instrLen + static_cast<usz>(
+                static_cast<i64>(origDisp));
+
+            usz newTargetOffset = 0;
+            bool targetFound = false;
+            for (usz j = 0; j < insnCount; ++j) {
+                if (insns[j].origOffset == origTarget) {
+                    newTargetOffset = insns[j].outputOffset;
+                    targetFound = true;
+                    break;
+                }
+            }
+
+            i32 newDisp = 0;
+            if (targetFound) {
+                usz curInsnOutputEnd = info.outputOffset + (op == 0xEB ? 5 : 6);
+                i64 newDisp64 = static_cast<i64>(newTargetOffset) -
+                                static_cast<i64>(curInsnOutputEnd);
+                newDisp = static_cast<i32>(newDisp64);
+            } else {
+                newDisp = origDisp;
+            }
+
+            if (op == 0xEB) {
+                *outPtr++ = 0xE9;
+                std::memcpy(outPtr, &newDisp, 4);
+                outPtr += 4;
+            } else {
+                *outPtr++ = 0x0F;
+                *outPtr++ = 0x80 + (op & 0x0F);
+                std::memcpy(outPtr, &newDisp, 4);
+                outPtr += 4;
+            }
+
         } else {
             std::memcpy(outPtr, insnSrc, info.instrLen);
             outPtr += info.instrLen;
@@ -1879,24 +2072,7 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         if (info.isRspModifying) {
             emitStackCheckStub(outPtr, stackCheckAddr);
         }
-        ::printf("[AOT Debug] Insn %d: origOffset=%d, len=%d, before=%d, after=%d\n",
-                 (int)i, (int)info.origOffset, (int)info.instrLen,
-                 (int)(beforePtr - output), (int)(outPtr - output));
-        ::printf("[AOT Rewrite Detail] Insn %d completed, afterOffset=%d, outPtr=%p, written=",
-                 (int)i, (int)(outPtr - output), outPtr);
-        for (usz k = 0; k < (usz)(outPtr - beforePtr); ++k) ::printf("%02x ", beforePtr[k]);
-        ::printf("\n");
-        ::printf("[AOT Loop State] After Insn %d: offset 80-112: ", (int)i);
-        for (int k = 80; k < 112; ++k) ::printf("%02x ", output[k]);
-        ::printf("\n");
     }
-
-    ::printf("[AOT Debug] Output bytes before mprotect:\n");
-    for (int j = 0; j < 1024 && j < (int)(outPtr - output); ++j) {
-        ::printf("%02x ", output[j]);
-        if ((j + 1) % 16 == 0) ::printf("\n");
-    }
-    ::printf("\n");
 
     std::free(insns);
 
@@ -1910,6 +2086,7 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
     result.patchedCode = output;
     result.patchedSize = static_cast<usz>(outPtr - output);
     result.originalSize = codeSize;
+    result.offsetMap = offsetMap;
     result.success = true;
     return result;
 }
@@ -1953,6 +2130,9 @@ void AOT::invalidate(Array<AOTRegion>& cache, usz addr, usz size) {
             if (region.patchedCode) {
                 freePatchedCode(region.patchedCode, region.patchedSize);
             }
+            if (region.offsetMap) {
+                delete[] region.offsetMap;
+            }
             // Remove from cache by shifting elements.
             for (usz j = idx; j + 1 < cache.size(); ++j) {
                 cache[j] = cache[j + 1];
@@ -1967,6 +2147,10 @@ void AOT::destroyCache(Array<AOTRegion>& cache) {
         if (cache[i].patchedCode) {
             freePatchedCode(cache[i].patchedCode, cache[i].patchedSize);
             cache[i].patchedCode = nullptr;
+        }
+        if (cache[i].offsetMap) {
+            delete[] cache[i].offsetMap;
+            cache[i].offsetMap = nullptr;
         }
     }
     cache.clear();

@@ -56,6 +56,22 @@ bool xi_is_task_dead_recursive(usz tid);
 
 extern thread_local usz xi_last_guest_rbx;
 
+struct GuestRegs {
+    u64 r11;
+    u64 r10;
+    u64 r9;
+    u64 r8;
+    u64 rdi;
+    u64 rsi;
+    u64 rdx;
+    u64 rcx;
+    u64 rbx;
+    u64 rax;
+    u64 rflags;
+};
+
+extern thread_local GuestRegs* xi_guest_regs;
+
 // -------------------------------------------------------------------------
 // Supporting Structures
 // -------------------------------------------------------------------------
@@ -157,6 +173,12 @@ struct TaskState {
     };
     Array<FetchRange> fetchRanges;
 
+    struct CopyMapRegion {
+        usz dest;
+        usz size;
+    };
+    Array<CopyMapRegion> copyMapCache;
+
     // Entry point for raw tasks
     void (*entryFn)(void*);
     void* entryArg;
@@ -176,6 +198,26 @@ struct TaskState {
     };
     Array<InstructionHook> instructionHooks;
 
+    struct InstructionTranslator {
+        String name;
+        Func<Array<u8>(const Array<u8>&)> callback;
+    };
+    Array<InstructionTranslator> instructionTranslators;
+
+    Array<String> bannedList;
+
+    usz maxChildrenMemory;
+    Func<void(usz, usz)> swapCallback;
+
+    struct StoreRange {
+        usz start;
+        usz end;
+        Func<void(usz, usz)> callback;
+    };
+    Array<StoreRange> storeRanges;
+
+    Func<void()> customSyscallCallback;
+
     TaskState()
         : id(0), parentId(0), status(TaskStatus::Created),
           context{}, quotaUs(0), remainingUs(0), sleepUntilUs(0),
@@ -183,7 +225,27 @@ struct TaskState {
           stack(nullptr), stackSize(0), stackOwned(false),
           isWaitingForMessage(false), isIsolated(false),
           entryFn(nullptr), entryArg(nullptr), waitDeadTarget(0),
-          minChildQuotaUs(0), childQuotaUsed(0) {}
+          minChildQuotaUs(0), childQuotaUsed(0),
+          maxChildrenMemory(0) {
+        bannedList.push("syscall");
+        bannedList.push("sysenter");
+        bannedList.push("sysexit");
+        bannedList.push("sysret");
+        bannedList.push("int");
+        bannedList.push("int3");
+        bannedList.push("hlt");
+        bannedList.push("cli");
+        bannedList.push("sti");
+        bannedList.push("wrmsr");
+        bannedList.push("rdmsr");
+        bannedList.push("iret");
+        bannedList.push("mov-seg");
+        bannedList.push("lss");
+        bannedList.push("fsgsbase");
+        bannedList.push("call-far");
+        bannedList.push("jmp-far");
+        bannedList.push("sysctl");
+    }
 };
 
 /**
@@ -239,6 +301,7 @@ public:
         u8* ptr;
         usz size;
         usz refCount;
+        bool isMmap;
     };
     static Array<PhysicalAllocation> _allocations;
 
@@ -247,7 +310,7 @@ public:
     static Task findTask(usz id);
     static usz taskCount();
 
-    static void registerAllocation(u8* ptr, usz size);
+    static void registerAllocation(u8* ptr, usz size, bool isMmap = false);
     static void retainAllocation(u8* ptr);
     static void releaseAllocation(u8* ptr);
 
@@ -287,6 +350,9 @@ public:
 
     /** @brief Returns the parent task ID. */
     usz parentId() const { return _state ? _state->parentId : 0; }
+
+    /** @brief Returns the parent task. */
+    Task parent() const { return findTask(parentId()); }
 
     /** @brief Returns the current status. */
     TaskStatus status() const {
@@ -397,6 +463,14 @@ public:
     /** @brief Ban an instruction and remove callback. */
     void offInstruction(const String& instruction);
 
+    void onInstructionTranslate(const String& instruction, Func<Array<u8>(const Array<u8>&)> callback);
+    void forwardInstruction(const String& instruction);
+    void setOnSwap(Func<void(usz, usz)> cb);
+    void setOnStore(Func<void(usz, usz)> cb);
+    void setOnStore(usz start, usz end, Func<void(usz, usz)> cb);
+    void setMaxChildrenMemory(usz bytes);
+    usz totalChildrenMemory() const;
+
     // -- Memory --
 
     /** @brief Adds a memory translation entry. */
@@ -498,9 +572,11 @@ public:
      */
     void setOnFetch(Func<void(usz, usz)> cb);
     void setOnFetch(usz start, usz end, Func<void(usz, usz)> cb);
-    void setOnFetchCached(usz start, usz end, Func<void(usz, usz)> cb);
     void uncache(usz start, usz end);
     void uncache();
+
+    void copyAndMap(usz source, usz dest, usz length);
+    usz translate(usz destAddr, usz length = 0);
 
     // -- Children --
 
@@ -553,11 +629,13 @@ public:
     template <typename Dummy = void>
     static void setOnFetch(usz start, usz end, Func<void(usz, usz)> cb) { current().setOnFetch(start, end, cb); }
     template <typename Dummy = void>
-    static void setOnFetchCached(usz start, usz end, Func<void(usz, usz)> cb) { current().setOnFetchCached(start, end, cb); }
-    template <typename Dummy = void>
     static void uncache(usz start, usz end) { current().uncache(start, end); }
     template <typename Dummy = void>
     static void uncache() { current().uncache(); }
+    template <typename Dummy = void>
+    static void copyAndMap(usz source, usz dest, usz length) { current().copyAndMap(source, dest, length); }
+    template <typename Dummy = void>
+    static usz translate(usz destAddr, usz length = 0) { return current().translate(destAddr, length); }
     template <typename Dummy = void>
     static void onInstruction(const String& instruction, Func<void()> callback) {
         current().onInstruction(instruction, callback);
@@ -565,6 +643,34 @@ public:
     template <typename Dummy = void>
     static void offInstruction(const String& instruction) {
         current().offInstruction(instruction);
+    }
+    template <typename Dummy = void>
+    static void onInstructionTranslate(const String& instruction, Func<Array<u8>(const Array<u8>&)> callback) {
+        current().onInstructionTranslate(instruction, callback);
+    }
+    template <typename Dummy = void>
+    static void forwardInstruction(const String& instruction) {
+        current().forwardInstruction(instruction);
+    }
+    template <typename Dummy = void>
+    static void setOnSwap(Func<void(usz, usz)> cb) {
+        current().setOnSwap(cb);
+    }
+    template <typename Dummy = void>
+    static void setOnStore(Func<void(usz, usz)> cb) {
+        current().setOnStore(cb);
+    }
+    template <typename Dummy = void>
+    static void setOnStore(usz start, usz end, Func<void(usz, usz)> cb) {
+        current().setOnStore(start, end, cb);
+    }
+    template <typename Dummy = void>
+    static void setMaxChildrenMemory(usz bytes) {
+        current().setMaxChildrenMemory(bytes);
+    }
+    template <typename Dummy = void>
+    static usz totalChildrenMemory() {
+        return current().totalChildrenMemory();
     }
     template <typename Dummy = void>
     static void setPin(usz coreId) { current().setPin(coreId); }

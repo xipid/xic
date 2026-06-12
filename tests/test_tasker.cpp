@@ -938,7 +938,7 @@ void testDynamicJitExecution() {
 extern "C" void xi_sfi_bounds_check(void* addr, usz size);
 
 void testDemandPaging() {
-    std::printf("\n[Demand Paging: onFetch / onFetchCached]\n");
+    std::printf("\n[Demand Paging: onFetch & copyAndMap Cache]\n");
 
     xi_reset_task_state_for_tests();
     Task root = Task::root();
@@ -946,75 +946,75 @@ void testDemandPaging() {
 
     task.unmap(); // Isolate the task
 
-    // 1. Test onFetchCached (caching demand-paging)
-    int fetchCachedCount = 0;
-    // We register onFetchCached for range [0x1000, 0x2000)
-    task.setOnFetchCached(0x1000, 0x2000, [&](usz start, usz end) {
-        fetchCachedCount++;
-        // The resolver maps the region
-        task.alloc(start, end - start);
+    // 1. Test onFetch + desensitization via alloc
+    int fetchCount = 0;
+    // We register onFetch for range [0x1000, 0x2000)
+    task.setOnFetch(0x1000, 0x2000, [&](usz start, usz end) {
+        fetchCount++;
+        // The resolver maps a sub-range [0x1100, 0x1300)
+        task.alloc(0x1100, 0x200);
     });
 
-    TEST("onFetchCached initially unresolved", task._state->fetchRanges[0].resolved == false);
+    TEST("fetchRanges registered", task._state->fetchRanges.size() == 1);
 
     // Trigger bounds check directly to simulate memory access at 0x1200
-    // Set active task context so bounds_check runs on this task
     xi_set_current_task(task._state);
     xi_sfi_bounds_check((void*)0x1200, 4);
 
-    TEST("onFetchCached resolved after access", task._state->fetchRanges[0].resolved == true);
-    TEST("onFetchCached callback called exactly once", fetchCachedCount == 1);
-    TEST("onFetchCached region mapped", task._state->regions.size() == 1);
+    TEST("onFetch callback called once", fetchCount == 1);
+    TEST("sub-range mapped", task._state->regions.size() == 1);
+    // The range [0x1100, 0x1300) should be removed from fetchRanges, splitting it into two
+    TEST("onFetch range split into two", task._state->fetchRanges.size() == 2);
 
-    // Access again — should not call the callback since it's cached/native now
-    xi_sfi_bounds_check((void*)0x1500, 4);
-    TEST("onFetchCached callback not called again", fetchCachedCount == 1);
+    // Access again at 0x1250 (inside mapped sub-range) — should not call callback
+    xi_sfi_bounds_check((void*)0x1250, 4);
+    TEST("onFetch callback not called for mapped sub-range", fetchCount == 1);
 
-    // 2. Test explicit uncache
-    task.uncache(0x1000, 0x2000);
-    TEST("onFetchCached unresolved after explicit uncache", task._state->fetchRanges[0].resolved == false);
-    TEST("onFetchCached region unmapped", task._state->regions.size() == 0);
-
-    // Access again — should call callback again!
-    xi_sfi_bounds_check((void*)0x1200, 4);
-    TEST("onFetchCached callback called after uncache", fetchCachedCount == 2);
-
-    // 3. Test onFetch (non-caching demand-paging)
-    int fetchCount = 0;
-    // We must clear the current task to register the parent callback!
+    // Access at 0x1500 (inside remaining onFetch range [0x1300, 0x2000)) — should trigger callback
+    // Let's change the callback to map the rest
     xi_set_current_task(nullptr);
-    task.setOnFetch(0x3000, 0x4000, [&](usz start, usz end) {
+    task._state->fetchRanges.clear();
+    task.setOnFetch(0x1000, 0x2000, [&](usz start, usz end) {
         fetchCount++;
-        task.alloc(start, end - start);
+        task.alloc(0x1300, 0x700);
     });
-    // Restore child task context
     xi_set_current_task(task._state);
 
-    xi_sfi_bounds_check((void*)0x3500, 4);
-    TEST("onFetch callback called on access", fetchCount == 1);
-    TEST("onFetch region mapped", task._state->regions.size() == 2); // 0x1000 region + 0x3000 region
+    xi_sfi_bounds_check((void*)0x1500, 4);
+    TEST("onFetch callback called for unmapped remaining range", fetchCount == 2);
 
-    // Access again — onFetch always calls resolver
-    xi_sfi_bounds_check((void*)0x3500, 4);
-    TEST("onFetch callback not called on back-to-back access in same slice", fetchCount == 1);
+    // 2. Test copyAndMap Cache Eviction (limit = 8)
+    xi_set_current_task(nullptr);
+    // Allocate some source memory in root first
+    root.alloc(0xA000, 0x1000);
+    u8* rootPhys = root._state->regions[0].physical;
+    for (int i = 0; i < 0x1000; ++i) rootPhys[i] = (u8)i;
 
-    // Run scheduler / yield to simulate time slice end
-    Task::yield();
+    task.share(root);
 
-    // Now the non-cached region at 0x3000 should be auto-uncached!
-    // But the cached region at 0x1000 should still be resident!
-    bool region3000Found = false;
-    bool region1000Found = false;
-    for (usz i = 0; i < task._state->regions.size(); ++i) {
-        if (task._state->regions[i].base == 0x3000) region3000Found = true;
-        if (task._state->regions[i].base == 0x1000) region1000Found = true;
+    // Perform 9 copyAndMap operations
+    for (usz i = 0; i < 9; ++i) {
+        task.copyAndMap(0xA000 + i * 16, 0x5000 + i * 0x1000, 16);
     }
-    TEST("onFetch region auto-uncached on yield", region3000Found == false);
-    TEST("onFetchCached region remains resident on yield", region1000Found == true);
 
-    // Access onFetch range again after yield — should trigger callback again!
-    xi_sfi_bounds_check((void*)0x3500, 4);
-    TEST("onFetch callback called again after yield", fetchCount == 2);
+    TEST("copyMapCache keeps at most 8 entries", task._state->copyMapCache.size() == 8);
+    // The first one (dest = 0x5000) should have been evicted/unmapped
+    bool firstFound = false;
+    for (usz i = 0; i < task._state->regions.size(); ++i) {
+        if (task._state->regions[i].base == 0x5000) {
+            firstFound = true;
+        }
+    }
+    TEST("first copyAndMap was evicted", firstFound == false);
+
+    // The second one (dest = 0x6000) should still be mapped
+    bool secondFound = false;
+    for (usz i = 0; i < task._state->regions.size(); ++i) {
+        if (task._state->regions[i].base == 0x6000) {
+            secondFound = true;
+        }
+    }
+    TEST("second copyAndMap remains mapped", secondFound == true);
 
     // Clean up current task
     xi_set_current_task(nullptr);
@@ -1086,13 +1086,13 @@ void testSecurityHardening() {
     // Test XCHG RSP, RAX (\x48\x94)
     u8 xchgRsp[] = { 0x48, 0x94 };
     res = AOT::rewrite(xchgRsp, 2, regions, 0);
-    TEST("XCHG RSP includes stack check", res.patchedSize == 21);
+    TEST("XCHG RSP includes stack check", res.patchedSize == 56);
     AOT::freePatchedCode(res.patchedCode, res.patchedSize);
 
     // Test POPFQ (\x9D)
     u8 popfq[] = { 0x9D };
     res = AOT::rewrite(popfq, 1, regions, 0);
-    TEST("POPFQ includes stack check", res.patchedSize == 20);
+    TEST("POPFQ includes stack check", res.patchedSize == 55);
     AOT::freePatchedCode(res.patchedCode, res.patchedSize);
 #endif
 }

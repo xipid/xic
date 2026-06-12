@@ -167,9 +167,11 @@ public:
    * @brief Replaces contents with data from a raw pointer.
    */
   void set(const T *vals, usz count) {
-    allocate(0);
-    if (count > 0 && vals) {
-      pushEach(vals, count);
+    clear();
+    if (vals && count > 0) {
+      for (usz i = 0; i < count; ++i) {
+        push(vals[i]);
+      }
     }
   }
 

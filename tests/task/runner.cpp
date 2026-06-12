@@ -8,29 +8,6 @@
 using namespace Execution;
 using namespace Xi;
 
-struct GuestMessage {
-    unsigned int cmd;
-    unsigned int status;
-    unsigned long long arg1;
-    unsigned long long arg2;
-    char payload[256];
-};
-
-void* translate_guest_addr(Task& task, usz virtAddr) {
-    if (task._state->stack && virtAddr >= reinterpret_cast<usz>(task._state->stack) &&
-        virtAddr < reinterpret_cast<usz>(task._state->stack) + task._state->stackSize) {
-        return reinterpret_cast<void*>(virtAddr);
-    }
-    for (usz i = 0; i < task._state->regions.size(); ++i) {
-        MemoryRegion& r = task._state->regions[i];
-        if (virtAddr >= r.base && virtAddr < r.base + r.size) {
-            usz offset = virtAddr - r.base;
-            return r.physical + offset;
-        }
-    }
-    return nullptr;
-}
-
 int main() {
     std::printf("=== ELF Loading & Execution Test ===\n");
 
@@ -41,15 +18,20 @@ int main() {
     Task task = root.spawn();
     task.unmap(); // Full isolation
 
+    // Set memory limit to 4 pages (16KB) to drive swapping!
+    task.setMaxChildrenMemory(16384);
+
+    task.setOnSwap([&](usz base, usz size) {
+        std::printf("[Runner Swap] Evicting region: base=0x%lx, size=0x%lx\n", (long)base, (long)size);
+    });
+
     // Attempt to open the guest ELF executable
     const char* elfPath = "./tests/task/internal";
     FILE* f = std::fopen(elfPath, "rb");
     if (!f) {
-        // Fallback for nested build directories
         f = std::fopen("./build/tests/task/internal", "rb");
     }
     if (!f) {
-        // Alternate fallback
         f = std::fopen("./tests/tests/task/internal", "rb");
     }
     if (!f) {
@@ -82,7 +64,7 @@ int main() {
         return 1;
     }
 
-    // Map and load program segments
+    // We register onFetch callbacks for all PT_LOAD segments
     for (int i = 0; i < ehdr.e_phnum; ++i) {
         if (phdrs[i].p_type == PT_LOAD) {
             usz vaddr = phdrs[i].p_vaddr;
@@ -90,104 +72,69 @@ int main() {
             usz filesz = phdrs[i].p_filesz;
             usz offset = phdrs[i].p_offset;
 
-            // Allocate memory inside the isolated task
-            task.alloc(vaddr, memsz);
+            std::printf("[Runner Loader] Registering demand paging for segment: vaddr=0x%lx, size=0x%lx\n", (long)vaddr, (long)memsz);
 
-            // Find physical host pointer of the mapped region
-            u8* phys = (u8*)translate_guest_addr(task, vaddr);
-            if (phys) {
-                std::fseek(f, offset, SEEK_SET);
-                if (filesz > 0) {
-                    if (std::fread(phys, 1, filesz, f) != filesz) {
-                        std::printf("Error: Failed to read segment %d\n", i);
-                        delete[] phdrs;
-                        std::fclose(f);
-                        return 1;
+            task.setOnFetch(vaddr, vaddr + memsz, [=, &task](usz faultStart, usz faultEnd) {
+                usz pageStart = faultStart & ~4095;
+                usz pageEnd = (faultEnd + 4095) & ~4095;
+
+                for (usz pageAddr = pageStart; pageAddr < pageEnd; pageAddr += 4096) {
+                    // Check if already mapped
+                    bool alreadyMapped = false;
+                    for (usz j = 0; j < task._state->regions.size(); ++j) {
+                        if (pageAddr >= task._state->regions[j].base && 
+                            pageAddr < task._state->regions[j].base + task._state->regions[j].size) {
+                            alreadyMapped = true;
+                            break;
+                        }
                     }
+                    if (alreadyMapped) continue;
+
+                    std::printf("[Runner PageFault] Loading page at 0x%lx on demand\n", (long)pageAddr);
+
+                    u8 buf[4096];
+                    std::memset(buf, 0, 4096);
+
+                    if (pageAddr < vaddr + filesz) {
+                        usz fileOffset = offset + (pageAddr - vaddr);
+                        usz bytesToRead = 4096;
+                        if (pageAddr + bytesToRead > vaddr + filesz) {
+                            bytesToRead = (vaddr + filesz) - pageAddr;
+                        }
+                        std::fseek(f, fileOffset, SEEK_SET);
+                        std::fread(buf, 1, bytesToRead, f);
+                    }
+
+                    task.alloc(pageAddr, 4096);
+                    task.copy(reinterpret_cast<usz>(buf), pageAddr, 4096);
                 }
-                // Zero out remainder (.bss)
-                if (memsz > filesz) {
-                    std::memset(phys + filesz, 0, memsz - filesz);
-                }
-            }
+            });
         }
     }
 
     usz entryPoint = ehdr.e_entry;
     delete[] phdrs;
-    std::fclose(f);
 
-    std::printf("[Runner Debug] Regions:\n");
+    // Jump to guest entry point
+    task.jump(entryPoint);
+
+    // Yield control to run the task
+    for (int i = 0; i < 100; ++i) {
+        yield();
+        if (task.status() == TaskStatus::Finished) break;
+    }
+
+    std::printf("[Runner Debug] Final Mapped Regions:\n");
     for (size_t i = 0; i < task._state->regions.size(); ++i) {
         MemoryRegion& r = task._state->regions[i];
         std::printf("  Region %d: base=0x%lx, size=0x%lx, phys=%p\n",
                     (int)i, (long)r.base, (long)r.size, r.physical);
     }
 
-    bool childExited = false;
-
-    // Register CPUID instruction hook callback to service API calls from guest
-    task.onInstruction("cpuid", [&]() {
-        // Read guest rbx register via thread-local storage saved in JIT helper
-        usz msgVirt = xi_last_guest_rbx;
-        std::printf("[Runner Hook] CPUID hook called! msgVirt=0x%llx\n", (unsigned long long)msgVirt);
-        std::fflush(stdout);
-
-        GuestMessage* msg = (GuestMessage*)translate_guest_addr(task, msgVirt);
-        if (!msg) {
-            std::printf("[Runner Hook] msg is null!\n");
-            std::fflush(stdout);
-            return;
-        }
-        std::printf("[Runner Hook] msg->cmd=%u\n", msg->cmd);
-        std::fflush(stdout);
-
-        if (msg->cmd == 1) {
-            // Command 1: Get Current Task ID
-            msg->arg1 = task.id();
-            msg->status = 0;
-        } else if (msg->cmd == 2) {
-            // Command 2: Get Parent Task ID
-            usz targetId = msg->arg1;
-            Task t = Task::findTask(targetId);
-            msg->arg1 = t.valid() ? t.parentId() : 0;
-            msg->status = 0;
-        } else if (msg->cmd == 3) {
-            // Command 3: Send IPC Message
-            usz receiverId = msg->arg1;
-            Task receiver = Task::findTask(receiverId);
-            if (receiver.valid()) {
-                task.send(receiver, msg->payload);
-                msg->status = 0;
-            } else {
-                msg->status = 1;
-            }
-        } else if (msg->cmd == 4) {
-            // Command 4: Exit Task Execution
-            childExited = true;
-            task._state->status = TaskStatus::Finished;
-            msg->status = 0;
-        }
-    });
-
-    // Jump to guest entry point
-    task.jump(entryPoint);
-
-    // Yield control to run the task
-    for (int i = 0; i < 50; ++i) {
-        yield();
-        if (childExited) break;
-    }
-
-    std::printf("[Runner Debug] AOT Cache:\n");
-    for (size_t i = 0; i < task._state->aotCache.size(); ++i) {
-        AOTRegion& a = task._state->aotCache[i];
-        std::printf("  Cache %d: originalAddr=0x%lx, size=0x%lx, patched=%p\n",
-                    (int)i, (long)a.originalAddr, (long)a.originalSize, a.patchedCode);
-    }
+    std::fclose(f);
 
     // Verify task execution and IPC message
-    assert(childExited);
+    assert(task.status() == TaskStatus::Finished);
     assert(root.inbox().size() > 0);
     std::printf("[Runner] Message received in root inbox: %s (Sender: %d)\n", 
                 root.inbox()[0].payload.c_str(), (int)root.inbox()[0].senderId);

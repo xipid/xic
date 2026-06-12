@@ -30,6 +30,7 @@ struct AOTRegion {
     usz originalSize;   ///< Size of the original code region.
     u8* patchedCode;    ///< Heap-allocated buffer with rewritten instructions.
     usz patchedSize;    ///< Size of the patched code.
+    u32* offsetMap;     ///< Map of original offset -> patched offset.
 };
 
 /**
@@ -40,6 +41,7 @@ struct AOTResult {
     u8* patchedCode;    ///< Output buffer with rewritten instructions.
     usz patchedSize;    ///< Size of patched code.
     usz originalSize;   ///< Size of original code consumed.
+    u32* offsetMap;     ///< Map of original offset -> patched offset.
     bool success;       ///< True if rewrite completed without errors.
 };
 
