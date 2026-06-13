@@ -37,12 +37,10 @@
     * [Networking](7-Resource/Networking.md)
 
 ## Task
-* [Task Architecture](8-Task/Architecture.md)
-    * [SFI & Sandboxing](8-Task/Security_and_SFI.md)
-    * [API Reference](8-Task/API_Reference.md)
-    * [Code Examples](8-Task/Examples.md)
-    * [DVFS Power Governance](8-Task/DVFS_Power.md)
-    * [Project TODO](todo.md)
+* [SFI & Sandboxing](8-Task/Security_and_SFI.md)
+* [API Reference](8-Task/API_Reference.md)
+* [Code Examples](8-Task/Examples.md)
+* [DVFS Power Governance](8-Task/DVFS_Power.md)
 
 ## Hardware
 * [Input Devices](9-Hardware/Input.md)
@@ -57,3 +55,5 @@
 
 ## System
 * [Child Processes](11-System/Processes.md)
+
+* [Project TODO](todo.md)
