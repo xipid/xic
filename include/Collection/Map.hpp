@@ -169,6 +169,7 @@ public:
 
   Map &operator=(const Map &other) {
     if (this != &other) {
+      free_buckets();
       allocate_buckets(other.capacity);
       for (usz i = 0; i < other.capacity; ++i) {
         if (!other.buckets[i].isEmpty())

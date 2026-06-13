@@ -113,7 +113,7 @@ public:
       }
       if (!b->device) {
         T *ptr = b->get_data();
-        for (usz i = 0; i < b->_length; ++i)
+        for (usz i = 0; i <= b->_length; ++i)
           ptr[i].~T();
       }
       ::operator delete(b);
@@ -260,11 +260,12 @@ public:
     if (unique && is_root && len <= block->capacity) {
       if (len > block->_length) {
         T *ptr = block->get_data();
+        ptr[block->_length].~T();
         for (usz i = block->_length; i < len; ++i)
           new (&ptr[i]) T();
       } else if (len < block->_length) {
         T *ptr = block->get_data();
-        for (usz i = len; i < block->_length; ++i)
+        for (usz i = len; i <= block->_length; ++i)
           ptr[i].~T();
       }
       block->_length = len;
@@ -308,6 +309,8 @@ public:
       nb->_length = toCopy;
       destroy();
     }
+    T *dst = nb->get_data();
+    new (&dst[nb->_length]) T();
     block = nb;
     _data = block->get_data();
     _length = block->_length;
@@ -341,6 +344,7 @@ public:
       _data = block->get_data();
       _length = 0;
       offset = 0;
+      new (&_data[0]) T();
     }
     if (block->useCount > 1 || _data != block->get_data() ||
         (_data + _length) != (block->get_data() + block->_length)) {
@@ -377,6 +381,7 @@ public:
       _data = nb->get_data();
       _length = nb->_length;
     } else {
+      _data[_length].~T();
       new (&_data[_length]) T(val);
       block->_length++;
       _length++;
@@ -442,6 +447,7 @@ public:
       return;
     }
     if (block->_length < block->capacity) {
+      _data[_length].~T();
       for (usz i = _length; i > 0; --i) {
         new (&_data[i]) T(Xi::Move(_data[i - 1]));
         _data[i - 1].~T();
@@ -656,7 +662,7 @@ public:
     for (usz i = start + length; i < _length; ++i) {
       ptr[i - length] = Xi::Move(ptr[i]);
     }
-    for (usz i = _length - length; i < _length; ++i) {
+    for (usz i = _length - length; i <= _length; ++i) {
       ptr[i].~T();
     }
     _length -= length;
