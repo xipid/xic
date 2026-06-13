@@ -40,7 +40,7 @@
     * [API Reference](8-Task/API_Reference.md)
     * [Code Examples](8-Task/Examples.md)
     * [DVFS Power Governance](8-Task/DVFS_Power.md)
-    * [Hardware Assist (TODO)](8-Task/Hardware_Assist_TODO.md)
+    * [Project TODO](todo.md)
 * [Child Processes](11-System/Processes.md)
 
 ## Hardware & Graphics

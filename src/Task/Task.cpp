@@ -226,8 +226,12 @@ static Xi::u64 xi_micros_now() {
 static Xi::u64 xi_micros_now() {
     return (Xi::u64)esp_timer_get_time();
 }
+#endif
+
+#if defined(__x86_64__) || defined(_M_X64)
+extern "C" void xi_invalidate_sfi_cache();
 #else
-static Xi::u64 xi_micros_now() { return 0; }
+static inline void xi_invalidate_sfi_cache() {}
 #endif
 
 namespace Task {
@@ -1165,6 +1169,7 @@ void Task::alloc(usz dest, usz length) {
     region.owned = true;
 
     _state->regions.push(region);
+    xi_invalidate_sfi_cache();
     xi_desensitize_on_fetch(_state, dest, length);
 }
 
@@ -1338,6 +1343,7 @@ void Task::map(usz source, usz dest, usz length) {
     region.owned = false;        // Don't free — someone else owns it.
 
     _state->regions.push(region);
+    xi_invalidate_sfi_cache();
     xi_desensitize_on_fetch(_state, dest, length);
 }
 
@@ -1404,6 +1410,7 @@ void Task::copyAndMap(usz source, usz dest, usz length) {
     region.owned = true;
 
     _state->regions.push(region);
+    xi_invalidate_sfi_cache();
 
     TaskState::CopyMapRegion cmr;
     cmr.dest = dest;
@@ -1496,6 +1503,7 @@ void Task::unmap(usz dest, usz length) {
             _state->fetchRanges.push(newFr);
         }
     }
+    xi_invalidate_sfi_cache();
 }
 
 void Task::unmap() {
@@ -1526,6 +1534,7 @@ void Task::unmap() {
 
     // Activate memory isolation — the task now sees its own address space from 0.
     _state->isIsolated = true;
+    xi_invalidate_sfi_cache();
 
     // Register default syscall hypercall handler for isolated guest tasks
     onInstruction("syscall", [state = _state]() {
@@ -1956,6 +1965,7 @@ void Task::uncache(usz start, usz end) {
             _state->regions.pop();
         }
     }
+    xi_invalidate_sfi_cache();
 }
 
 void Task::uncache() {
@@ -1987,6 +1997,7 @@ void Task::uncache() {
             }
         }
     }
+    xi_invalidate_sfi_cache();
 }
 
 // -------------------------------------------------------------------------

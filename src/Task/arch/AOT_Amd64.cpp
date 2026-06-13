@@ -50,6 +50,32 @@ namespace Task {
  *
  * If the access is out-of-bounds, traps with ud2.
  */
+thread_local usz tl_last_task_id = (usz)-1;
+
+// Read/Write bounds cache
+thread_local u8* tl_last_phys_base = nullptr;
+thread_local u8* tl_last_phys_limit = nullptr;
+thread_local usz tl_last_virt_base = 0;
+thread_local usz tl_last_virt_limit = 0;
+
+// Write bounds cache
+thread_local u8* tl_last_write_phys_base = nullptr;
+thread_local u8* tl_last_write_phys_limit = nullptr;
+thread_local usz tl_last_write_virt_base = 0;
+thread_local usz tl_last_write_virt_limit = 0;
+
+extern "C" void xi_invalidate_sfi_cache() {
+    tl_last_task_id = (usz)-1;
+    tl_last_phys_base = nullptr;
+    tl_last_phys_limit = nullptr;
+    tl_last_virt_base = 0;
+    tl_last_virt_limit = 0;
+    tl_last_write_phys_base = nullptr;
+    tl_last_write_phys_limit = nullptr;
+    tl_last_write_virt_base = 0;
+    tl_last_write_virt_limit = 0;
+}
+
 extern "C" void xi_sfi_bounds_check(void* addr, usz size) {
     xi_last_jit_rip = reinterpret_cast<usz>(__builtin_return_address(0));
     if (addr == nullptr && size == 0) return;
@@ -59,6 +85,17 @@ extern "C" void xi_sfi_bounds_check(void* addr, usz size) {
     u8* target = static_cast<u8*>(addr);
     usz targetAddr = reinterpret_cast<usz>(addr);
 
+    // 0. Check thread-local cache
+    if (state->id == tl_last_task_id) {
+        if ((target >= tl_last_phys_base && target + size <= tl_last_phys_limit) ||
+            (targetAddr >= tl_last_virt_base && targetAddr + size <= tl_last_virt_limit)) {
+            return; // Cache hit!
+        }
+    } else {
+        xi_invalidate_sfi_cache();
+        tl_last_task_id = state->id;
+    }
+
     // 1. Check existing mapped regions (both physical and virtual base)
     for (usz i = 0; i < state->regions.size(); ++i) {
         MemoryRegion& r = state->regions[i];
@@ -66,6 +103,11 @@ extern "C" void xi_sfi_bounds_check(void* addr, usz size) {
             if ((target >= r.physical && target + size <= r.physical + r.size) ||
                 (targetAddr >= r.base && targetAddr + size <= r.base + r.size)) {
                 r.lastAccessTicks = ++state->accessCounter;
+                // Update cache
+                tl_last_phys_base = r.physical;
+                tl_last_phys_limit = r.physical + r.size;
+                tl_last_virt_base = r.base;
+                tl_last_virt_limit = r.base + r.size;
                 return; // Access is within a valid region.
             }
         }
@@ -74,6 +116,11 @@ extern "C" void xi_sfi_bounds_check(void* addr, usz size) {
     // 2. Check stack
     if (state->stack && target >= state->stack &&
         target + size <= state->stack + state->stackSize) {
+        // Update cache with stack boundaries
+        tl_last_phys_base = state->stack;
+        tl_last_phys_limit = state->stack + state->stackSize;
+        tl_last_virt_base = reinterpret_cast<usz>(state->stack);
+        tl_last_virt_limit = reinterpret_cast<usz>(state->stack) + state->stackSize;
         return;
     }
 
@@ -115,6 +162,17 @@ extern "C" void xi_sfi_write_check(void* addr, usz size) {
     u8* target = static_cast<u8*>(addr);
     usz targetAddr = reinterpret_cast<usz>(addr);
 
+    // 0. Check thread-local write cache
+    if (state->id == tl_last_task_id) {
+        if ((target >= tl_last_write_phys_base && target + size <= tl_last_write_phys_limit) ||
+            (targetAddr >= tl_last_write_virt_base && targetAddr + size <= tl_last_write_virt_limit)) {
+            return; // Cache hit!
+        }
+    } else {
+        xi_invalidate_sfi_cache();
+        tl_last_task_id = state->id;
+    }
+
     // 1. Check existing writable mapped regions
     for (usz i = 0; i < state->regions.size(); ++i) {
         MemoryRegion& r = state->regions[i];
@@ -122,6 +180,11 @@ extern "C" void xi_sfi_write_check(void* addr, usz size) {
             if ((target >= r.physical && target + size <= r.physical + r.size) ||
                 (targetAddr >= r.base && targetAddr + size <= r.base + r.size)) {
                 r.lastAccessTicks = ++state->accessCounter;
+                // Update write cache
+                tl_last_write_phys_base = r.physical;
+                tl_last_write_phys_limit = r.physical + r.size;
+                tl_last_write_virt_base = r.base;
+                tl_last_write_virt_limit = r.base + r.size;
                 return; // Write is within a writable region.
             }
         }
@@ -130,6 +193,11 @@ extern "C" void xi_sfi_write_check(void* addr, usz size) {
     // 2. Stack is always writable.
     if (state->stack && target >= state->stack &&
         target + size <= state->stack + state->stackSize) {
+        // Update write cache with stack boundaries
+        tl_last_write_phys_base = state->stack;
+        tl_last_write_phys_limit = state->stack + state->stackSize;
+        tl_last_write_virt_base = reinterpret_cast<usz>(state->stack);
+        tl_last_write_virt_limit = reinterpret_cast<usz>(state->stack) + state->stackSize;
         return;
     }
 
@@ -1274,6 +1342,67 @@ static void parseLayout(const u8* code, usz len, usz& prefixLen, bool& hasRex, u
     modrmPos = pos;
 }
 
+static bool isStackRelativeAndSafe(const u8* code, usz len) {
+    usz prefixLen = 0, modrmPos = 0, opcodeLen = 0;
+    bool hasRex = false;
+    u8 rex = 0;
+    parseLayout(code, len, prefixLen, hasRex, rex, opcodeLen, modrmPos);
+    if (modrmPos == 0 || modrmPos >= len) return false;
+
+    u8 modrm = code[modrmPos];
+    u8 mod = (modrm >> 6) & 3;
+    u8 rm = modrm & 7;
+
+    if (mod == 3) return false; // Register direct
+
+    usz dispPos = 0;
+    bool stackRelative = false;
+
+    if (rm == 4) { // SIB present
+        usz sibPos = modrmPos + 1;
+        if (sibPos >= len) return false;
+        u8 sib = code[sibPos];
+        u8 base = sib & 7;
+        u8 index = (sib >> 3) & 7;
+
+        if (index != 4) return false; // Index register present
+
+        if (base == 4) {
+            stackRelative = true;
+            dispPos = modrmPos + 2;
+        } else if (base == 5 && mod != 0) {
+            stackRelative = true;
+            dispPos = modrmPos + 2;
+        }
+    } else {
+        if (rm == 5 && mod != 0) {
+            stackRelative = true;
+            dispPos = modrmPos + 1;
+        }
+    }
+
+    if (stackRelative) {
+        if (mod == 0) {
+            return true; // Offset is 0, always safe
+        } else if (mod == 1) {
+            // 8-bit displacement, offset is between -128 and 127
+            return true; // Always safe for stack
+        } else if (mod == 2) {
+            // 32-bit displacement
+            if (dispPos + 4 <= len) {
+                i32 disp = 0;
+                std::memcpy(&disp, code + dispPos, 4);
+                // Safe if offset is within a reasonable range (e.g. +/- 4096)
+                if (disp >= -4096 && disp <= 4096) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
 static usz getLeaSize(const u8* code, usz len, usz immSize) {
     usz prefixLen = 0, modrmPos = 0, opcodeLen = 0;
     bool hasRex = false;
@@ -2107,6 +2236,10 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
 
         usz len = xi_x86_insn_length(code + pos, maxLen,
                                       hasMem, isRelJmp, relOffset, relSize, isRspModifying, immSize);
+
+        if (hasMem && isStackRelativeAndSafe(code + pos, len)) {
+            hasMem = false;
+        }
 
         if (len == 0) {
             // Decoding failed — unknown instruction. Trap it.
