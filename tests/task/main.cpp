@@ -1,6 +1,6 @@
 /**
- * @file test_tasker.cpp
- * @brief Functional test for the Task subsystem.
+ * @file main.cpp
+ * @brief Functional unit test suite for the Task subsystem.
  *
  * Tests:
  *   1. Task creation and hierarchy.
@@ -13,16 +13,19 @@
 
 #include <cstdio>
 #include <cassert>
-#include "Execution/Task.hpp"
+#include "Task/Task.hpp"
 
-using namespace Execution;
-using namespace Xi;
-using namespace Collection;
+using namespace Task;
+using TaskClass = Task::Task;
 
-namespace Execution {
+namespace Task {
     extern void xi_set_current_task(TaskState* s);
     extern void xi_reset_task_state_for_tests();
 }
+
+#define Task TaskClass
+using namespace Xi;
+using namespace Collection;
 
 // -------------------------------------------------------------------------
 // CustomTask subclass test — must work with Task seamlessly.
@@ -650,7 +653,7 @@ void testUnmapIsolation() {
 
     // Set an onFetch callback.
     bool fetchSet = false;
-    task.setOnFetch([&](usz dest, usz length) { fetchSet = true; });
+    task.onFetch([&](usz dest, usz length) { fetchSet = true; });
     TEST("onFetch callback set", task._state->fetchRanges.size() > 0);
 
     // Full isolation unmap.
@@ -949,7 +952,7 @@ void testDemandPaging() {
     // 1. Test onFetch + desensitization via alloc
     int fetchCount = 0;
     // We register onFetch for range [0x1000, 0x2000)
-    task.setOnFetch(0x1000, 0x2000, [&](usz start, usz end) {
+    task.onFetch(0x1000, 0x2000, [&](usz start, usz end) {
         fetchCount++;
         // The resolver maps a sub-range [0x1100, 0x1300)
         task.alloc(0x1100, 0x200);
@@ -974,7 +977,7 @@ void testDemandPaging() {
     // Let's change the callback to map the rest
     xi_set_current_task(nullptr);
     task._state->fetchRanges.clear();
-    task.setOnFetch(0x1000, 0x2000, [&](usz start, usz end) {
+    task.onFetch(0x1000, 0x2000, [&](usz start, usz end) {
         fetchCount++;
         task.alloc(0x1300, 0x700);
     });
@@ -1021,7 +1024,7 @@ void testDemandPaging() {
 }
 
 #if defined(__x86_64__) || defined(_M_X64)
-#include "Execution/AOT.hpp"
+#include "Task/AOT.hpp"
 #endif
 
 void testSecurityHardening() {

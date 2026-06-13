@@ -23,8 +23,8 @@ file(GLOB_RECURSE CORE_SOURCES
     "src/Xi/*.cpp"
     "src/Collection/*.cpp"
     "src/Encoding/*.cpp"
-    "src/Execution/*.cpp"
-    "src/Execution/arch/*.S"
+    "src/Task/*.cpp"
+    "src/Task/arch/*.S"
     "src/Security/*.cpp"
     "src/Resource/*.cpp"
     "src/Terminal/*.cpp"
@@ -201,18 +201,9 @@ if(NOT TARGET Xi::Xi)
     add_library(Xi::Xi ALIAS Xi)
 endif()
 
-# --- Test Discovery ---
-file(GLOB TEST_SOURCES "tests/*.cpp")
-foreach(TEST_SRC ${TEST_SOURCES})
-    get_filename_component(TEST_NAME ${TEST_SRC} NAME_WE)
-    add_executable(${TEST_NAME} ${TEST_SRC})
-    target_link_libraries(${TEST_NAME} PRIVATE Xi::Xi)
-    set_target_properties(${TEST_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
-endforeach()
-
-# --- Additional Task ELF Loading/IPC Tests ---
+# --- Task Subsystem Tests ---
 # Build XiGuest library target for the guest
-add_library(XiGuest STATIC src/Execution/Task.cpp)
+add_library(XiGuest STATIC src/Task/Task.cpp)
 target_compile_definitions(XiGuest PRIVATE COMPILING_FOR_GUEST)
 target_compile_options(XiGuest PRIVATE -nostdlib -fno-exceptions -fno-rtti -fno-pie -fno-stack-protector -mno-red-zone -mcmodel=large -ffunction-sections -fdata-sections)
 target_include_directories(XiGuest PRIVATE include)
@@ -229,4 +220,14 @@ set_target_properties(internal PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURR
 add_executable(runner tests/task/runner.cpp)
 target_link_libraries(runner PRIVATE Xi::Xi)
 set_target_properties(runner PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
+
+# Build example (realistic developer use-case test)
+add_executable(example tests/task/example.cpp)
+target_link_libraries(example PRIVATE Xi::Xi)
+set_target_properties(example PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
+
+# Build main (functional unit test suite)
+add_executable(main tests/task/main.cpp)
+target_link_libraries(main PRIVATE Xi::Xi)
+set_target_properties(main PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
 

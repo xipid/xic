@@ -8,8 +8,8 @@
 
 #if defined(__XTENSA__)
 
-#include "../../../include/Execution/Interrupt.hpp"
-#include "../../../include/Execution/Task.hpp"
+#include "../../../include/Task/Interrupt.hpp"
+#include "../../../include/Task/Task.hpp"
 
 #if defined(ESP_PLATFORM)
 #include <esp_timer.h>
@@ -18,7 +18,7 @@
 #include <freertos/task.h>
 #endif
 
-namespace Execution {
+namespace Task {
 
 // -------------------------------------------------------------------------
 // Per-Core Timer State
@@ -110,6 +110,6 @@ usz xi_current_core() {
 #endif
 }
 
-} // namespace Execution
+} // namespace Task
 
 #endif // defined(__XTENSA__)

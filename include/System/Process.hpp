@@ -4,8 +4,8 @@
 
  */
 
-#ifndef XI_EXECUTION_PROCESS_HPP
-#define XI_EXECUTION_PROCESS_HPP
+#ifndef XI_SYSTEM_PROCESS_HPP
+#define XI_SYSTEM_PROCESS_HPP
 
 #include "../Collection/Stream.hpp"
 #include "../Collection/String.hpp"
@@ -15,7 +15,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-namespace Execution {
+namespace System {
 
 using namespace Collection;
 
@@ -255,6 +255,6 @@ public:
   };
 };
 
-} // namespace Execution
+} // namespace System
 
-#endif // XI_EXECUTION_PROCESS_HPP
+#endif // XI_SYSTEM_PROCESS_HPP

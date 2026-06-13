@@ -16,10 +16,11 @@ XiC is a lightweight, zero-dependency, and memory-deterministic C++ core library
 *   **Static Mapping:** Hash tables and lookup maps tailored for minimal heap fragmentation.
 
 ### 2. Software Fault Isolation (SFI) Task Sandbox
-*   **Sandboxed Task Execution:** Implements Ahead-of-Time (AOT) binary rewriting and software-enforced isolation.
+*   **Sandboxed Task Execution:** Ahead-of-Time (AOT) JIT rewriter with Redundant Bounds Check Elimination (BCE) for stack and frame footprint optimizations.
+*   **Prioritized Swap Paging:** Intelligent LRU swap eviction utilizing range-specific page monitoring.
+*   **Cooperative Yielding & Sleep:** Non-blocking task sleep and core yielding during page faults.
 *   **Fork Bomb Prevention:** Resource quota management and cascade teardown for child tasks.
-*   **W^X Memory Enforcement:** Restricts memory pages to be either writable or executable, never both.
-*   **Context Switch Validation:** Sanitizes CPU registers and validates instruction pointers at scheduler boundaries to prevent escapes.
+*   **W^X Memory Enforcement & Switch Validation:** Restricts memory pages to be either writable or executable, sanitizes CPU registers, and validates instruction pointers at scheduler boundaries to prevent escapes.
 
 ### 3. Professional Terminal & Command Parsing
 *   **CLI Command Parser:** Zero-allocation command-line argument parsing with nested command definitions.
@@ -53,22 +54,24 @@ lib_deps =
 
 ### 1. Unified SFI Task Execution
 ```cpp
-#include <Execution/Task.hpp>
+#include <Task/Task.hpp>
 #include <cstdio>
+
+using namespace Task;
 
 void task_payload(void* arg) {
     std::printf("Hello from sandboxed task context!\n");
 }
 
 int main() {
-    Execution::Task root = Execution::Task::root();
-    Execution::Task child = root.spawn(task_payload, nullptr);
+    Task root = Task::root();
+    Task child = root.spawn(task_payload, nullptr);
     
     // Enforce 5000 microsecond quota for starvation prevention
     child.setQuota(5000);
-    child.start();
+    child.resume();
     
-    Execution::Task::yield();
+    Task::yield();
     return 0;
 }
 ```
@@ -99,7 +102,8 @@ int main(int argc, char** argv) {
 ├── include/            # Public headers
 │   ├── Collection/     # Memory-deterministic collections
 │   ├── Encoding/       # YAML, logging, and regex
-│   ├── Execution/      # SFI Tasks and context switching
+│   ├── Task/           # SFI Tasks and context switching
+│   ├── System/         # Child processes and system APIs
 │   ├── Hardware/       # Driver interfaces and spatial math
 │   ├── Graphics/       # Mesh and camera systems
 │   └── Terminal/       # CLI and interactive prompting

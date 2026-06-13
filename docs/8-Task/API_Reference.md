@@ -1,6 +1,6 @@
 # Task Subsystem API Reference
 
-The `Execution::Task` class represents a handle to an execution state managed by the system scheduler.
+The `Task::Task` class represents a handle to an execution state managed by the system scheduler.
 
 ## Static Management Helpers
 
@@ -122,8 +122,23 @@ Adds a custom address translation rule to the task.
 ### `void copy(usz source, usz dest, usz length)`
 Copies bytes between two virtual addresses within the task's memory map.
 
-### `void setOnFetch(Func<void(usz dest, usz length)> cb)`
+### `void onFetch(Func<void(usz dest, usz length)> cb)`
 Sets a callback triggered when the task attempts to fetch memory from an unmapped region.
+
+### `void onFetch(usz start, usz end, Func<void(usz, usz)> cb)`
+Registers a fetch callback for a specific address range.
+
+### `void onStore(Func<void(usz dest, usz length)> cb)`
+Sets a callback triggered when the task attempts to write/store to a write-protected or unmapped region.
+
+### `void onStore(usz start, usz end, Func<void(usz, usz)> cb)`
+Registers a store callback for a specific address range.
+
+### `void onSwap(Func<void(usz dest, usz length)> cb)`
+Sets a callback triggered when a page needs to be evicted/swapped out.
+
+### `void onSwap(usz start, usz end, Func<void(usz, usz)> cb)`
+Registers a swap callback for a specific address range. Priority is given to evicting registered ranges first.
 
 ### `void onInstruction(const String& instruction, Func<void()> callback)`
 Registers a hook to intercept specific CPU instructions. When the AOT compiler encounters the instruction in the task's code, it inserts a branch to the registered callback.

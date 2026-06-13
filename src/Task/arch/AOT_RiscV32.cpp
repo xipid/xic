@@ -21,13 +21,13 @@
 
 #if defined(__riscv) && (__riscv_xlen == 32)
 
-#include "../../../include/Execution/AOT.hpp"
-#include "../../../include/Execution/Task.hpp"
+#include "../../../include/Task/AOT.hpp"
+#include "../../../include/Task/Task.hpp"
 
 #include <cstdlib>
 #include <cstring>
 
-namespace Execution {
+namespace Task {
 
 // -------------------------------------------------------------------------
 // Bounds-check stub (RISC-V32)
@@ -146,8 +146,8 @@ static constexpr usz kRV32StubSize = 8;
 // -------------------------------------------------------------------------
 
 AOTResult AOT::rewrite(const u8* code, usz codeSize,
-                       const Array<MemoryRegion>& /* regions */,
-                       usz /* taskBase */) {
+                       const Array<MemoryRegion>& regions,
+                       usz taskBase) {
     AOTResult result;
     result.patchedCode = nullptr;
     result.patchedSize = 0;
@@ -291,6 +291,6 @@ void AOT::destroyCache(Array<AOTRegion>& cache) {
     cache.clear();
 }
 
-} // namespace Execution
+} // namespace Task
 
 #endif // defined(__riscv) && (__riscv_xlen == 32)

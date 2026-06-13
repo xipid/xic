@@ -26,8 +26,8 @@
 
 #if defined(__x86_64__) || defined(_M_X64)
 
-#include "../../../include/Execution/AOT.hpp"
-#include "../../../include/Execution/Task.hpp"
+#include "../../../include/Task/AOT.hpp"
+#include "../../../include/Task/Task.hpp"
 
 #include <cstring>
 #include <cstdlib>
@@ -38,7 +38,7 @@
 #include <cstdio>
 #endif
 
-namespace Execution {
+namespace Task {
 
 // -------------------------------------------------------------------------
 // SFI Bounds-Check Functions
@@ -83,6 +83,7 @@ extern "C" void xi_sfi_bounds_check(void* addr, usz size) {
         if (targetAddr >= fr.start && targetAddr + size <= fr.end) {
             TaskState* prev = xi_get_current_task();
             xi_set_current_task(nullptr);
+            Task(state).stop(1);
             fr.callback(fr.start, fr.end);
             xi_set_current_task(prev);
             // Re-verify that the callback successfully mapped/allocated the region containing targetAddr
@@ -138,6 +139,7 @@ extern "C" void xi_sfi_write_check(void* addr, usz size) {
         if (targetAddr >= sr.start && targetAddr + size <= sr.end) {
             TaskState* prev = xi_get_current_task();
             xi_set_current_task(nullptr);
+            Task(state).stop(1);
             sr.callback(sr.start, sr.end);
             xi_set_current_task(prev);
             // Re-verify that the callback successfully mapped/allocated the region and it is writable
@@ -156,6 +158,7 @@ extern "C" void xi_sfi_write_check(void* addr, usz size) {
         if (targetAddr >= fr.start && targetAddr + size <= fr.end) {
             TaskState* prev = xi_get_current_task();
             xi_set_current_task(nullptr);
+            Task(state).stop(1);
             fr.callback(fr.start, fr.end);
             xi_set_current_task(prev);
             // Re-verify that the callback successfully mapped/allocated the region and it is writable
@@ -282,6 +285,7 @@ extern "C" void* xi_sfi_indirect_jump_resolver(void* target) {
             if (targetAddr >= fr.start && targetAddr < fr.end) {
                 TaskState* prevTask = xi_get_current_task();
                 xi_set_current_task(nullptr);
+                Task(state).stop(1);
                 fr.callback(fr.start, fr.end);
                 xi_set_current_task(prevTask);
                 // Re-verify if it's now mapped
@@ -1833,6 +1837,164 @@ static bool isStoreInstruction(const u8* code, usz len) {
     return false;
 }
 
+struct MemOperand {
+    bool valid = false;
+    int baseReg = -1;
+    int indexReg = -1;
+    int scale = 0;
+    i64 disp = 0;
+};
+
+static void parseMemOperand(const u8* code, usz len, usz immSize, MemOperand& op) {
+    usz pos = 0;
+    for (;;) {
+        u8 b = code[pos];
+        if (b == 0x66 || b == 0x67 || b == 0xF0 || b == 0xF2 || b == 0xF3 ||
+            b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 || b == 0x64 || b == 0x65) {
+            pos++;
+        } else break;
+    }
+    
+    bool hasRex = false;
+    u8 rex = 0;
+    if ((code[pos] & 0xF0) == 0x40) {
+        hasRex = true;
+        rex = code[pos];
+        pos++;
+    }
+    
+    u8 opcode = code[pos];
+    bool twoByteOpcode = false;
+    if (opcode == 0x0F) {
+        if (pos + 1 < len && (code[pos + 1] == 0x38 || code[pos + 1] == 0x3A)) {
+            pos += 3;
+        } else {
+            pos += 2;
+        }
+        twoByteOpcode = true;
+    } else {
+        pos += 1;
+    }
+    
+    u8 modrm = code[pos++];
+    u8 mod = (modrm >> 6) & 3;
+    u8 reg = (modrm >> 3) & 7;
+    u8 rm  = modrm & 7;
+    
+    if (mod == 3) {
+        return;
+    }
+    
+    bool hasSib = (rm == 4);
+    u8 base = 0;
+    u8 sibBase = 0;
+    bool hasBase = true;
+    
+    if (hasSib) {
+        u8 sib = code[pos++];
+        u8 sibScale = (sib >> 6) & 3;
+        u8 sibIndex = (sib >> 3) & 7;
+        sibBase = sib & 7;
+        
+        op.scale = 1 << sibScale;
+        
+        if (sibIndex != 4 || (hasRex && (rex & 0x02))) {
+            op.indexReg = sibIndex | ((rex & 0x02) ? 8 : 0);
+        }
+        
+        if (sibBase == 5 && mod == 0) {
+            hasBase = false;
+        } else {
+            base = sibBase;
+        }
+    } else {
+        if (mod == 0 && rm == 5) {
+            hasBase = false;
+        } else {
+            base = rm;
+        }
+    }
+    
+    if (hasBase) {
+        op.baseReg = base | ((rex & 0x01) ? 8 : 0);
+    }
+    
+    i64 displacement = 0;
+    if (hasSib && sibBase == 5 && mod == 0) {
+        i32 d32 = 0;
+        std::memcpy(&d32, code + pos, 4);
+        displacement = d32;
+    } else if (mod == 0 && rm == 5) {
+        i32 d32 = 0;
+        std::memcpy(&d32, code + pos, 4);
+        displacement = d32;
+    } else if (mod == 1) {
+        i8 d8 = static_cast<i8>(code[pos]);
+        displacement = d8;
+    } else if (mod == 2) {
+        i32 d32 = 0;
+        std::memcpy(&d32, code + pos, 4);
+        displacement = d32;
+    }
+    
+    op.disp = displacement;
+    op.valid = true;
+}
+
+static bool modifiesRbp(const u8* code, usz len, bool hasModRM, u8 modrm, u8 opcode, bool twoByteOpcode, bool hasRex, u8 rex) {
+    if (len == 0) return false;
+    
+    usz pos = 0;
+    for (;;) {
+        u8 b = code[pos];
+        if (b == 0x66 || b == 0x67 || b == 0xF0 || b == 0xF2 || b == 0xF3 ||
+            b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 || b == 0x64 || b == 0x65) {
+            pos++;
+        } else break;
+    }
+    if (hasRex) pos++;
+    if (twoByteOpcode) pos++;
+    u8 op = code[pos];
+    
+    if (op == 0x55 || op == 0x5D) {
+        return true;
+    }
+    
+    if (hasModRM) {
+        u8 mod = (modrm >> 6) & 3;
+        u8 reg = (modrm >> 3) & 7;
+        u8 rm  = modrm & 7;
+        bool rmIsRbp = (mod == 3 && rm == 5 && !(rex & 0x01));
+        bool regIsRbp = (reg == 5 && !(rex & 0x04));
+        
+        if (rmIsRbp) {
+            if (op == 0x88 || op == 0x89 || op == 0xC6 || op == 0xC7 ||
+                op == 0x80 || op == 0x81 || op == 0x83 ||
+                op == 0x00 || op == 0x01 || op == 0x08 || op == 0x09 ||
+                op == 0x10 || op == 0x11 || op == 0x18 || op == 0x19 ||
+                op == 0x20 || op == 0x21 || op == 0x28 || op == 0x29 ||
+                op == 0x30 || op == 0x31 ||
+                op == 0xC0 || op == 0xC1 ||
+                op == 0xD0 || op == 0xD1 || op == 0xD2 || op == 0xD3 ||
+                op == 0xF6 || op == 0xF7 || op == 0xFF ||
+                op == 0x86 || op == 0x87) {
+                return true;
+            }
+        }
+        if (regIsRbp) {
+            if (op == 0x8A || op == 0x8B || op == 0x8D ||
+                op == 0x02 || op == 0x03 || op == 0x0A || op == 0x0B ||
+                op == 0x12 || op == 0x13 || op == 0x1A || op == 0x1B ||
+                op == 0x22 || op == 0x23 || op == 0x2A || op == 0x2B ||
+                op == 0x32 || op == 0x33 ||
+                op == 0x86 || op == 0x87) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // -------------------------------------------------------------------------
 // AOT::rewrite — Main Rewriter
 // -------------------------------------------------------------------------
@@ -2082,6 +2244,187 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         ++insnCount;
         pos += len;
     }
+
+    // 1. Identify branch targets to divide basic blocks.
+    bool* isBranchTarget = static_cast<bool*>(std::calloc(codeSize, sizeof(bool)));
+    if (isBranchTarget) {
+        for (usz j = 0; j < insnCount; ++j) {
+            const InsnInfo& info = insns[j];
+            if (info.isRelJmp) {
+                i64 origDisp = 0;
+                if (info.relSize == 4) {
+                    i32 disp32 = 0;
+                    std::memcpy(&disp32, code + info.origOffset + info.relOffset, 4);
+                    origDisp = disp32;
+                } else if (info.relSize == 1) {
+                    i8 disp8 = static_cast<i8>(code[info.origOffset + info.relOffset]);
+                    origDisp = disp8;
+                }
+                usz origTarget = info.origOffset + info.instrLen + static_cast<usz>(origDisp);
+                if (origTarget < codeSize) {
+                    isBranchTarget[origTarget] = true;
+                }
+            }
+        }
+    }
+
+    // 2. Perform Redundant Bounds Check Elimination (BCE)
+    struct TrackedRange {
+        i64 startOffset = 0;
+        i64 endOffset = 0;
+        bool valid = false;
+    };
+    TrackedRange rspChecked;
+    TrackedRange rbpChecked;
+
+    for (usz j = 0; j < insnCount; ++j) {
+        InsnInfo& info = insns[j];
+        
+        if (isBranchTarget && isBranchTarget[info.origOffset]) {
+            rspChecked.valid = false;
+            rbpChecked.valid = false;
+        }
+
+        if (info.hasMem) {
+            MemOperand op;
+            parseMemOperand(code + info.origOffset, info.instrLen, info.immSize, op);
+            if (op.valid) {
+                if (op.baseReg == 4 && op.indexReg == -1) { // RSP
+                    bool redundant = false;
+                    if (rspChecked.valid && op.disp >= rspChecked.startOffset && 
+                        op.disp + (i64)info.accessSize <= rspChecked.endOffset) {
+                        redundant = true;
+                    }
+                    if (redundant) {
+                        info.hasMem = false;
+                    } else {
+                        if (!rspChecked.valid) {
+                            rspChecked.startOffset = op.disp;
+                            rspChecked.endOffset = op.disp + info.accessSize;
+                            rspChecked.valid = true;
+                        } else {
+                            rspChecked.startOffset = (rspChecked.startOffset < op.disp) ? rspChecked.startOffset : op.disp;
+                            i64 accessEnd = op.disp + info.accessSize;
+                            rspChecked.endOffset = (rspChecked.endOffset > accessEnd) ? rspChecked.endOffset : accessEnd;
+                        }
+                    }
+                } else if (op.baseReg == 5 && op.indexReg == -1) { // RBP
+                    bool redundant = false;
+                    if (rbpChecked.valid && op.disp >= rbpChecked.startOffset && 
+                        op.disp + (i64)info.accessSize <= rbpChecked.endOffset) {
+                        redundant = true;
+                    }
+                    if (redundant) {
+                        info.hasMem = false;
+                    } else {
+                        if (!rbpChecked.valid) {
+                            rbpChecked.startOffset = op.disp;
+                            rbpChecked.endOffset = op.disp + info.accessSize;
+                            rbpChecked.valid = true;
+                        } else {
+                            rbpChecked.startOffset = (rbpChecked.startOffset < op.disp) ? rbpChecked.startOffset : op.disp;
+                            i64 accessEnd = op.disp + info.accessSize;
+                            rbpChecked.endOffset = (rbpChecked.endOffset > accessEnd) ? rbpChecked.endOffset : accessEnd;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (info.isRspModifying) {
+            rspChecked.valid = false;
+        }
+        
+        usz prefixLen = 0, modrmPos = 0, opcodeLen = 0;
+        bool hasRex = false;
+        u8 rex = 0;
+        parseLayout(code + info.origOffset, info.instrLen, prefixLen, hasRex, rex, opcodeLen, modrmPos);
+        u8 modrm = (modrmPos > 0) ? code[info.origOffset + modrmPos] : 0;
+        bool twoByte = (opcodeLen == 2 && code[prefixLen + (hasRex ? 1 : 0)] == 0x0F);
+        u8 opc = code[prefixLen + (hasRex ? 1 : 0)];
+        if (modifiesRbp(code + info.origOffset, info.instrLen, modrmPos > 0, modrm, opc, twoByte, hasRex, rex)) {
+            rbpChecked.valid = false;
+        }
+
+        if (info.isRelJmp || info.isRet || info.isIndirectJump || info.isBannedPrivileged) {
+            rspChecked.valid = false;
+            rbpChecked.valid = false;
+        }
+    }
+
+    if (isBranchTarget) {
+        std::free(isBranchTarget);
+    }
+
+    // 3. Recalculate outputSize and outputOffset for each instruction
+    usz currentOutputSize = 0;
+    for (usz j = 0; j < insnCount; ++j) {
+        InsnInfo& info = insns[j];
+        info.outputOffset = currentOutputSize;
+        
+        usz insnOutputSize = 0;
+        if (info.isBannedPrivileged) {
+            insnOutputSize = 2; // ud2
+        } else if (info.isTranslate && info.translateCallbackPtr) {
+            auto* cb = reinterpret_cast<Func<Array<u8>(const Array<u8>&)>*>(info.translateCallbackPtr);
+            Array<u8> srcBytes;
+            srcBytes.set(code + info.origOffset, info.instrLen);
+            Array<u8> replacement = (*cb)(srcBytes);
+            insnOutputSize = replacement.size();
+        } else if (info.isHooked && info.banned && !info.callbackPtr) {
+            insnOutputSize = 2; // ud2
+        } else if (info.isHooked && info.callbackPtr) {
+            insnOutputSize = 64 + (info.banned ? 0 : info.instrLen);
+        } else if (info.isIndirectJump) {
+            insnOutputSize = 58 + info.instrLen;
+        } else if (info.isRet) {
+            insnOutputSize = kRetCheckStubSize;
+        } else if (info.isRelJmp) {
+            bool inPage = isTargetInPage(info.origOffset, info.instrLen, info.relOffset, info.relSize, code, codeSize);
+            if (inPage) {
+                if (info.relSize == 1) {
+                    u8 op = code[info.origOffset + info.instrLen - 2];
+                    if (op == 0xEB) {
+                        insnOutputSize = 5; // E9 disp32
+                    } else if (op >= 0x70 && op <= 0x7F) {
+                        insnOutputSize = 6; // 0F 8x disp32
+                    } else {
+                        insnOutputSize = info.instrLen;
+                    }
+                } else {
+                    insnOutputSize = info.instrLen;
+                }
+            } else {
+                u8 op = code[info.origOffset + info.relOffset - 1];
+                bool isCond = false;
+                if (info.relSize == 4) {
+                    if (op >= 0x80 && op <= 0x8F && info.relOffset >= 2 && code[info.origOffset + info.relOffset - 2] == 0x0F) {
+                        isCond = true;
+                    }
+                } else if (info.relSize == 1) {
+                    if (op >= 0x70 && op <= 0x7F) {
+                        isCond = true;
+                    }
+                }
+
+                if (isCond) {
+                    insnOutputSize = 2 + kDirectCrossPageStubSize;
+                } else {
+                    insnOutputSize = kDirectCrossPageStubSize;
+                }
+            }
+        } else if (info.hasMem) {
+            insnOutputSize = 62 + info.leaSize + info.instrLen;
+        } else {
+            insnOutputSize = info.instrLen;
+        }
+
+        if (info.isRspModifying && !info.isBannedPrivileged && !(info.isHooked && info.banned) && !info.isIndirectJump && !info.isRet) {
+            insnOutputSize += kStackCheckStubSize;
+        }
+        currentOutputSize += insnOutputSize;
+    }
+    outputSize = currentOutputSize;
 
     u8* output = nullptr;
     u32* offsetMap = nullptr;
@@ -2376,6 +2719,6 @@ void AOT::destroyCache(Array<AOTRegion>& cache) {
     cache.clear();
 }
 
-} // namespace Execution
+} // namespace Task
 
 #endif // defined(__x86_64__) || defined(_M_X64)

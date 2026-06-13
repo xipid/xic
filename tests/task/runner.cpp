@@ -3,9 +3,11 @@
 #include <cstring>
 #include <cassert>
 #include <elf.h>
-#include "Execution/Task.hpp"
+#include "Task/Task.hpp"
 
-using namespace Execution;
+using namespace Task;
+using TaskClass = Task::Task;
+#define Task TaskClass
 using namespace Xi;
 
 int main() {
@@ -21,7 +23,8 @@ int main() {
     // Set memory limit to 3 pages (12KB) to drive swapping!
     root.setMaxChildrenMemory(12288);
 
-    task.setOnSwap([&](usz base, usz size) {
+    // Prioritize swapping for the main program regions (from 0x50000000 to 0x50006000)
+    task.onSwap(0x50000000, 0x50006000, [&](usz base, usz size) {
         std::printf("[Runner Swap] Evicting region: base=0x%lx, size=0x%lx\n", (long)base, (long)size);
     });
 
@@ -74,7 +77,7 @@ int main() {
 
             std::printf("[Runner Loader] Registering demand paging for segment: vaddr=0x%lx, size=0x%lx\n", (long)vaddr, (long)memsz);
 
-            task.setOnFetch(vaddr, vaddr + memsz, [=, &task](usz faultStart, usz faultEnd) {
+            task.onFetch(vaddr, vaddr + memsz, [=, &task](usz faultStart, usz faultEnd) {
                 usz pageStart = faultStart & ~4095;
                 usz pageEnd = (faultEnd + 4095) & ~4095;
 

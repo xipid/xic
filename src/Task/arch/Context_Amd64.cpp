@@ -8,12 +8,12 @@
 
 #if defined(__x86_64__) || defined(_M_X64)
 
-#include "../../../include/Execution/Context.hpp"
-#include "../../../include/Execution/Task.hpp"
+#include "../../../include/Task/Context.hpp"
+#include "../../../include/Task/Task.hpp"
 
 #include <cstring>
 
-namespace Execution {
+namespace Task {
 
 /**
  * @brief Initializes an x86_64 TaskContext for a new task.
@@ -61,6 +61,6 @@ void xi_context_init(TaskContext* ctx, void (*entry)(void*), void* arg,
 // Note: xi_context_entry_trampoline is defined in Task.cpp as a
 // portable implementation. On x86_64, it's linked as extern "C".
 
-} // namespace Execution
+} // namespace Task
 
 #endif // defined(__x86_64__) || defined(_M_X64)

@@ -1,6 +1,6 @@
 # The Architecture of the Unified Task Subsystem
 
-The Execution::Task subsystem is the fundamental execution unit in the xic kernel. It unifies traditional, separate operating system primitives—such as processes, threads, coroutines, and functions—into a single unified abstraction.
+The Task::Task subsystem is the fundamental execution unit in the xic kernel. It unifies traditional, separate operating system primitives—such as processes, threads, coroutines, and functions—into a single unified abstraction.
 
 ## Unified Abstraction Model
 
@@ -9,7 +9,7 @@ In traditional operating systems, execution is split across multiple layers:
 - **Threads** provide concurrent paths of execution sharing a process address space.
 - **Coroutines** provide user-space cooperative scheduling.
 
-This fragmentation introduces significant runtime overhead and complexity. In xic, this hierarchy is collapsed into a single class: `Execution::Task`. A task is represented internally by a lightweight `TaskState` structure. The nature of a task depends entirely on its configuration:
+This fragmentation introduces significant runtime overhead and complexity. In xic, this hierarchy is collapsed into a single class: `Task::Task`. A task is represented internally by a lightweight `TaskState` structure. The nature of a task depends entirely on its configuration:
 - **Non-isolated Tasks** share the parent task's memory space and context, functioning like lightweight threads or coroutines.
 - **Isolated Tasks** clear all inherited parent memory mappings. They run within their own sandboxed memory region starting at virtual address 0, functioning like isolated processes.
 - **Cooperative Tasks** explicitly yield control back to the scheduler, functioning like coroutines.

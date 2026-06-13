@@ -14,7 +14,7 @@
 #include "../Collection/Array.hpp"
 #include "../Xi/Primitives.hpp"
 
-namespace Execution {
+namespace Task {
 
 using namespace Xi;
 using namespace Collection;
@@ -113,6 +113,6 @@ public:
     static void freePatchedCode(u8* patchedCode, usz patchedSize);
 };
 
-} // namespace Execution
+} // namespace Task
 
 #endif // XI_EXECUTION_AOT_HPP

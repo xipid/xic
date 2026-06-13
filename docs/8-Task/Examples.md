@@ -1,6 +1,6 @@
 # Task Subsystem Code Examples
 
-These examples demonstrate common usage patterns of the `Execution::Task` subsystem, including basic execution, memory sandboxing, and inter-process communication.
+These examples demonstrate common usage patterns of the `Task::Task` subsystem, including basic execution, memory sandboxing, and inter-process communication.
 
 ## 1. Basic Task Spawning
 
@@ -8,9 +8,9 @@ This example demonstrates how to spawn a child task, set up its entry arguments,
 
 ```cpp
 #include <cstdio>
-#include "Execution/Task.hpp"
+#include "Task/Task.hpp"
 
-using namespace Execution;
+using namespace Task;
 
 void worker(void* arg) {
     int count = *static_cast<int*>(arg);
@@ -40,14 +40,16 @@ int main() {
 }
 ```
 
+---
+
 ## 2. Sandbox Creation and Full Memory Isolation
 
 This example demonstrates how to configure a task in Full Isolation mode. The task's default memory maps are cleared, and a single, isolated memory region is allocated at virtual address 0.
 
 ```cpp
-#include "Execution/Task.hpp"
+#include "Task/Task.hpp"
 
-using namespace Execution;
+using namespace Task;
 
 void untrusted_code(void* arg) {
     // Attempting to access parent memory outside the sandbox boundary
@@ -81,15 +83,17 @@ int main() {
 }
 ```
 
+---
+
 ## 3. IPC Message Passing (Wait and Wake)
 
 This example demonstrates cooperative task yielding and IPC communication. The child task suspends itself to wait for an incoming message, and the parent wakes it by sending a payload.
 
 ```cpp
 #include <cstdio>
-#include "Execution/Task.hpp"
+#include "Task/Task.hpp"
 
-using namespace Execution;
+using namespace Task;
 
 void listener(void* arg) {
     Task self = Task::current();

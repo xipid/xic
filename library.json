@@ -1,7 +1,7 @@
 {
   "name": "xic",
   "version": "1.0.0",
-  "description": "The Zero-Exception C++ Core Library designed for embedded systems and real-time workloads: memory-deterministic collections, SFI sandboxed tasks, CLI command parser, spatial transformations, and hardware driver frameworks.",
+  "description": "The Zero-Exception C++ Core Library designed for embedded systems and real-time workloads: memory-deterministic collections, microsecond SFI sandboxed tasks with JIT redundant bounds check elimination (BCE) and prioritized swap paging, CLI command parser, spatial transformations, and hardware driver frameworks.",
   "keywords": [
     "esp32",
     "embedded",

@@ -9,10 +9,10 @@
 
 #if defined(__XTENSA__)
 
-#include "../../include/Execution/Context.hpp"
-#include "../../include/Execution/Task.hpp"
+#include "../../include/Task/Context.hpp"
+#include "../../include/Task/Task.hpp"
 
-namespace Execution {
+namespace Task {
 
 /**
  * @brief Initializes a TaskContext so that when switched to, it begins
@@ -155,6 +155,6 @@ extern "C" void xi_context_entry_trampoline(void* arg) {
     }
 }
 
-} // namespace Execution
+} // namespace Task
 
 #endif /* defined(__XTENSA__) */

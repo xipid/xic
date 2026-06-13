@@ -15,8 +15,8 @@
 
 #if defined(__x86_64__) || defined(_M_X64)
 
-#include "../../../include/Execution/Interrupt.hpp"
-#include "../../../include/Execution/Task.hpp"
+#include "../../../include/Task/Interrupt.hpp"
+#include "../../../include/Task/Task.hpp"
 
 #include <csignal>
 #include <cstring>
@@ -24,7 +24,7 @@
 #include <sched.h>
 #include <unistd.h>
 
-namespace Execution {
+namespace Task {
 
 // -------------------------------------------------------------------------
 // Per-Core Timer State
@@ -166,6 +166,6 @@ usz xi_current_core() {
     return static_cast<usz>(cpu);
 }
 
-} // namespace Execution
+} // namespace Task
 
 #endif // defined(__x86_64__) || defined(_M_X64)

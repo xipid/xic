@@ -26,7 +26,7 @@
 /// Default memory allocation for a task if alloc() is not called before start().
 static constexpr usz XI_DEFAULT_TASK_MEM = 4096;
 
-namespace Execution {
+namespace Task {
 
 using namespace Xi;
 using namespace Collection;
@@ -221,6 +221,13 @@ struct TaskState {
         Func<void(usz, usz)> callback;
     };
     Array<StoreRange> storeRanges;
+
+    struct SwapRange {
+        usz start;
+        usz end;
+        Func<void(usz, usz)> callback;
+    };
+    Array<SwapRange> swapRanges;
 
     Func<void()> customSyscallCallback;
 
@@ -453,9 +460,10 @@ public:
 
     void onInstructionTranslate(const String& instruction, Func<Array<u8>(const Array<u8>&)> callback);
     void forwardInstruction(const String& instruction);
-    void setOnSwap(Func<void(usz, usz)> cb);
-    void setOnStore(Func<void(usz, usz)> cb);
-    void setOnStore(usz start, usz end, Func<void(usz, usz)> cb);
+    void onSwap(Func<void(usz, usz)> cb);
+    void onSwap(usz start, usz end, Func<void(usz, usz)> cb);
+    void onStore(Func<void(usz, usz)> cb);
+    void onStore(usz start, usz end, Func<void(usz, usz)> cb);
     void setMaxChildrenMemory(usz bytes);
     usz totalChildrenMemory() const;
 
@@ -561,8 +569,8 @@ public:
      *
      * @param cb  Callback receiving (dest address, requested length).
      */
-    void setOnFetch(Func<void(usz, usz)> cb);
-    void setOnFetch(usz start, usz end, Func<void(usz, usz)> cb);
+    void onFetch(Func<void(usz, usz)> cb);
+    void onFetch(usz start, usz end, Func<void(usz, usz)> cb);
     void uncache(usz start, usz end);
     void uncache();
 
@@ -616,9 +624,9 @@ public:
     template <typename Dummy = void>
     static void setMemorySize(usz bytes) { current().setMemorySize(bytes); }
     template <typename Dummy = void>
-    static void setOnFetch(Func<void(usz, usz)> cb) { current().setOnFetch(cb); }
+    static void onFetch(Func<void(usz, usz)> cb) { current().onFetch(cb); }
     template <typename Dummy = void>
-    static void setOnFetch(usz start, usz end, Func<void(usz, usz)> cb) { current().setOnFetch(start, end, cb); }
+    static void onFetch(usz start, usz end, Func<void(usz, usz)> cb) { current().onFetch(start, end, cb); }
     template <typename Dummy = void>
     static void uncache(usz start, usz end) { current().uncache(start, end); }
     template <typename Dummy = void>
@@ -646,16 +654,20 @@ public:
         current().forwardInstruction(instruction);
     }
     template <typename Dummy = void>
-    static void setOnSwap(Func<void(usz, usz)> cb) {
-        current().setOnSwap(cb);
+    static void onSwap(Func<void(usz, usz)> cb) {
+        current().onSwap(cb);
     }
     template <typename Dummy = void>
-    static void setOnStore(Func<void(usz, usz)> cb) {
-        current().setOnStore(cb);
+    static void onSwap(usz start, usz end, Func<void(usz, usz)> cb) {
+        current().onSwap(start, end, cb);
     }
     template <typename Dummy = void>
-    static void setOnStore(usz start, usz end, Func<void(usz, usz)> cb) {
-        current().setOnStore(start, end, cb);
+    static void onStore(Func<void(usz, usz)> cb) {
+        current().onStore(cb);
+    }
+    template <typename Dummy = void>
+    static void onStore(usz start, usz end, Func<void(usz, usz)> cb) {
+        current().onStore(start, end, cb);
     }
     template <typename Dummy = void>
     static void setMaxChildrenMemory(usz bytes) {
@@ -889,30 +901,30 @@ void Task::_execute_impl(int mode, usz targetId, Fn fn, Args... args) {
     }
 }
 
-} // namespace Execution
+} // namespace Task
 
 #define XI_DECLARE_GLOBAL_EXECUTION_CONVENIENCE(name) \
     template <typename Fn, typename... Args> \
     void name(Fn fn, Args... args) { \
-        Execution::Task::current().name(fn, args...); \
+        Task::Task::current().name(fn, args...); \
     } \
     inline void name(void (*fn)(void*), void* arg = nullptr) { \
-        Execution::Task::current().name(fn, arg); \
+        Task::Task::current().name(fn, arg); \
     } \
     inline void name(usz addr) { \
-        Execution::Task::current().name(addr); \
+        Task::Task::current().name(addr); \
     } \
     inline void name() { \
-        Execution::Task::current().name(); \
+        Task::Task::current().name(); \
     }
 
-namespace Execution {
+namespace Task {
     XI_DECLARE_GLOBAL_EXECUTION_CONVENIENCE(jump)
     XI_DECLARE_GLOBAL_EXECUTION_CONVENIENCE(wait)
     XI_DECLARE_GLOBAL_EXECUTION_CONVENIENCE(waitDead)
 
     inline void yield(usz coreId = 0) {
-        Execution::Task::yield(coreId);
+        Task::Task::yield(coreId);
     }
 }
 
@@ -921,10 +933,10 @@ namespace Execution {
  *        initializing it to execute fn(args...). Auto-starts.
  */
 template <typename Fn, typename... Args>
-Execution::Task spawn(Fn fn, Args... args) {
-    Execution::Task parent = Execution::Task::current();
+Task::Task spawn(Fn fn, Args... args) {
+    Task::Task parent = Task::Task::current();
     if (!parent.valid()) {
-        parent = Execution::Task::root();
+        parent = Task::Task::root();
     }
     return parent.spawn(fn, args...);
 }

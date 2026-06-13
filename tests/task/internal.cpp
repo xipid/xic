@@ -1,10 +1,9 @@
-#include "Execution/Task.hpp"
+#include "Task/Task.hpp"
 
-using namespace Execution;
 
 int main() {
-    Task self = Task::current();
-    Task parentTask = self.parent();
+    Task::Task self = Task::Task::current();
+    Task::Task parentTask = self.parent();
     self.send(parentTask, "Hello from guest!");
     return 0;
 }

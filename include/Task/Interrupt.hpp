@@ -12,7 +12,7 @@
 
 #include "../Xi/Primitives.hpp"
 
-namespace Execution {
+namespace Task {
 
 using namespace Xi;
 
@@ -44,6 +44,6 @@ usz xi_core_count();
  */
 usz xi_current_core();
 
-} // namespace Execution
+} // namespace Task
 
 #endif // XI_EXECUTION_INTERRUPT_HPP

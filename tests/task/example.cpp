@@ -1,20 +1,22 @@
 /**
- * @file realistic_dev_test.cpp
- * @brief Realistic developer use-case test.
+ * @file example.cpp
+ * @brief Realistic developer use-case example.
  *
- * Demonstrates how a lazy developer would use the Task subsystem:
- *   1. Spawning background tasks with simple function overloads.
- *   2. Message sending/inbox IPC using static and dynamic APIs.
- *   3. Enforcing W^X, instruction bans, and fork bomb protection automatically.
- *   4. Wait/yield cooperative scheduling.
+ * Demonstrates how a developer uses the Task subsystem:
+ *   1. Spawning background tasks with clean function overloads.
+ *   2. Message sending / inbox IPC using static and dynamic APIs.
+ *   3. Enforcing W^X, instruction hooks, and fork bomb protection automatically.
+ *   4. Cooperative yielding and task scheduling.
  */
 
 #include <cstdio>
 #include <cassert>
 #include <cstdint>
-#include "Execution/Task.hpp"
+#include "Task/Task.hpp"
 
-using namespace Execution;
+using namespace Task;
+using TaskClass = Task::Task;
+#define Task TaskClass
 using namespace Xi;
 using namespace Collection;
 

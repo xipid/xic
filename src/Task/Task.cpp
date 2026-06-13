@@ -3,7 +3,7 @@
  * @brief Task lifecycle, IPC, and memory operations — portable C++.
  */
 
-#include "../../include/Execution/Task.hpp"
+#include "../../include/Task/Task.hpp"
 
 #ifdef COMPILING_FOR_GUEST
 
@@ -124,7 +124,7 @@ const char* String::c_str() {
 
 } // namespace Collection
 
-namespace Execution {
+namespace Task {
 
 // Implement the required Task methods for the guest
 Task Task::current() {
@@ -163,9 +163,10 @@ bool Task::isMapped(usz, usz) const { return false; }
 
 void Task::onInstructionTranslate(const String&, Func<Array<u8>(const Array<u8>&)>) {}
 void Task::forwardInstruction(const String&) {}
-void Task::setOnSwap(Func<void(usz, usz)>) {}
-void Task::setOnStore(Func<void(usz, usz)>) {}
-void Task::setOnStore(usz, usz, Func<void(usz, usz)>) {}
+void Task::onSwap(Func<void(usz, usz)>) {}
+void Task::onSwap(usz, usz, Func<void(usz, usz)>) {}
+void Task::onStore(Func<void(usz, usz)>) {}
+void Task::onStore(usz, usz, Func<void(usz, usz)>) {}
 void Task::setMaxChildrenMemory(usz) {}
 usz Task::totalChildrenMemory() const { return 0; }
 
@@ -193,7 +194,7 @@ void Task::OnChangeFrequencyProxy::operator()(usz, u32) const {}
 void Task::_execute_impl_raw(int, usz, void (*)(void*), void*) {}
 void Task::reset() {}
 
-} // namespace Execution
+} // namespace Task
 
 #else // !defined(COMPILING_FOR_GUEST)
 
@@ -205,7 +206,7 @@ struct GuestMessage {
     char payload[256];
 };
 
-#include "../../include/Execution/Interrupt.hpp"
+#include "../../include/Task/Interrupt.hpp"
 #include <cstdio>
 #include <cstring>
 #ifndef _WIN32
@@ -229,7 +230,7 @@ static Xi::u64 xi_micros_now() {
 static Xi::u64 xi_micros_now() { return 0; }
 #endif
 
-namespace Execution {
+namespace Task {
 
 static void xi_desensitize_on_fetch(TaskState* state, usz dest, usz length);
 
@@ -1037,9 +1038,10 @@ static void xi_ensure_memory_limits(TaskState* state, usz dest, usz length) {
             for (usz c = 0; c < parent._state->childIds.size(); ++c) {
                 Task child = Task::findTask(parent._state->childIds[c]);
                 if (!child.valid()) continue;
-                if (child._state->swapCallback && child._state->regions.size() > 0) {
+                if ((child._state->swapCallback || child._state->swapRanges.size() > 0) && child._state->regions.size() > 0) {
                     long long candidateIdx = -1;
                     u64 minAccessTicks = (u64)-1;
+                    int bestPriority = 2; // 0 = prioritized, 1 = deprioritized
 
                     for (usz r = 0; r < child._state->regions.size(); ++r) {
                         const MemoryRegion& reg = child._state->regions[r];
@@ -1065,17 +1067,54 @@ static void xi_ensure_memory_limits(TaskState* state, usz dest, usz length) {
                             continue;
                         }
 
-                        if (reg.lastAccessTicks < minAccessTicks) {
+                        // Determine priority: check if it overlaps any registered SwapRange
+                        int priority = 1; // Default deprioritized (unlisted)
+                        bool hasHandler = child._state->swapCallback.isValid();
+
+                        for (usz s = 0; s < child._state->swapRanges.size(); ++s) {
+                            const TaskState::SwapRange& sr = child._state->swapRanges[s];
+                            if (reg.base < sr.end && reg.base + reg.size > sr.start) {
+                                priority = 0; // Prioritized (listed)
+                                hasHandler = true;
+                                break;
+                            }
+                        }
+
+                        if (!hasHandler) {
+                            continue; // No swap handler available for this region, cannot evict
+                        }
+
+                        if (priority < bestPriority) {
+                            bestPriority = priority;
                             minAccessTicks = reg.lastAccessTicks;
                             candidateIdx = (long long)r;
+                        } else if (priority == bestPriority) {
+                            if (reg.lastAccessTicks < minAccessTicks) {
+                                minAccessTicks = reg.lastAccessTicks;
+                                candidateIdx = (long long)r;
+                            }
                         }
                     }
 
                     if (candidateIdx != -1) {
                         MemoryRegion regionToEvict = child._state->regions[(usz)candidateIdx];
+                        Func<void(usz, usz)> cb = child._state->swapCallback;
+                        for (usz s = 0; s < child._state->swapRanges.size(); ++s) {
+                            const TaskState::SwapRange& sr = child._state->swapRanges[s];
+                            if (regionToEvict.base < sr.end && regionToEvict.base + regionToEvict.size > sr.start) {
+                                cb = sr.callback;
+                                break;
+                            }
+                        }
+
+                        // Put the triggering task on a temporary sleep
+                        self.stop(1);
+
                         TaskState* prev = xi_get_current_task();
                         xi_set_current_task(nullptr);
-                        child._state->swapCallback(regionToEvict.base, regionToEvict.size);
+                        if (cb) {
+                            cb(regionToEvict.base, regionToEvict.size);
+                        }
                         child.unmap(regionToEvict.base, regionToEvict.size);
                         xi_set_current_task(prev);
                         swappedAny = true;
@@ -1862,11 +1901,11 @@ void Task::OnChangeFrequencyProxy::operator()(usz coreId, u32 proposedFreq) cons
 // Callbacks
 // -------------------------------------------------------------------------
 
-void Task::setOnFetch(Func<void(usz, usz)> cb) {
-    setOnFetch(0, (usz)-1, cb);
+void Task::onFetch(Func<void(usz, usz)> cb) {
+    onFetch(0, (usz)-1, cb);
 }
 
-void Task::setOnFetch(usz start, usz end, Func<void(usz, usz)> cb) {
+void Task::onFetch(usz start, usz end, Func<void(usz, usz)> cb) {
     if (!_state) return;
     Task caller = Task::current();
     if (caller.valid() && caller.id() != 0) {
@@ -2784,7 +2823,7 @@ void Task::forwardInstruction(const String& instruction) {
     AOT::destroyCache(_state->aotCache);
 }
 
-void Task::setOnSwap(Func<void(usz, usz)> cb) {
+void Task::onSwap(Func<void(usz, usz)> cb) {
     if (!_state) return;
     Task caller = Task::current();
     if (caller.valid() && caller.id() != 0) {
@@ -2795,11 +2834,26 @@ void Task::setOnSwap(Func<void(usz, usz)> cb) {
     _state->swapCallback = cb;
 }
 
-void Task::setOnStore(Func<void(usz, usz)> cb) {
-    setOnStore(0, (usz)-1, cb);
+void Task::onSwap(usz start, usz end, Func<void(usz, usz)> cb) {
+    if (!_state) return;
+    Task caller = Task::current();
+    if (caller.valid() && caller.id() != 0) {
+        if (_state->parentId != caller.id() && _state->id != caller.id()) {
+            return; // Blocked
+        }
+    }
+    TaskState::SwapRange sr;
+    sr.start = start;
+    sr.end = end;
+    sr.callback = cb;
+    _state->swapRanges.push(sr);
 }
 
-void Task::setOnStore(usz start, usz end, Func<void(usz, usz)> cb) {
+void Task::onStore(Func<void(usz, usz)> cb) {
+    onStore(0, (usz)-1, cb);
+}
+
+void Task::onStore(usz start, usz end, Func<void(usz, usz)> cb) {
     if (!_state) return;
     Task caller = Task::current();
     if (caller.valid() && caller.id() != 0) {
@@ -2843,7 +2897,7 @@ void xi_reset_task_state_for_tests() {
     Task::reset();
 }
 
-} // namespace Execution
+} // namespace Task
 
 #endif // defined(COMPILING_FOR_GUEST)
 

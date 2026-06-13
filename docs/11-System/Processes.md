@@ -1,6 +1,6 @@
 # Child Processes
 
-The **Execution::Process** module provides a modern, intuitive, and asynchronous interface for managing external executables. It handles the complexity of pipes, file descriptors, and process signals while integrating seamlessly with xic **Streams**.
+The **System::Process** module provides a modern, intuitive, and asynchronous interface for managing external executables. It handles the complexity of pipes, file descriptors, and process signals while integrating seamlessly with xic **Streams**.
 
 ---
 
@@ -9,7 +9,9 @@ The **Execution::Process** module provides a modern, intuitive, and asynchronous
 Running a process is as simple as defining the command and its arguments.
 
 ```cpp
-using namespace Execution;
+#include "System/Process.hpp"
+
+using namespace System;
 
 Process p;
 p.file = "ls";

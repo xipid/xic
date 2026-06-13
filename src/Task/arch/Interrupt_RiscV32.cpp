@@ -8,15 +8,15 @@
 
 #if defined(__riscv) && (__riscv_xlen == 32)
 
-#include "../../../include/Execution/Interrupt.hpp"
-#include "../../../include/Execution/Task.hpp"
+#include "../../../include/Task/Interrupt.hpp"
+#include "../../../include/Task/Task.hpp"
 
 #if defined(ESP_PLATFORM)
 #include <esp_timer.h>
 #include <esp_cpu.h>
 #endif
 
-namespace Execution {
+namespace Task {
 
 // -------------------------------------------------------------------------
 // Timer State (single core)
@@ -94,6 +94,6 @@ usz xi_current_core() {
     return 0; // Always core 0.
 }
 
-} // namespace Execution
+} // namespace Task
 
 #endif // defined(__riscv) && (__riscv_xlen == 32)

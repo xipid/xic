@@ -11,7 +11,7 @@
 
 #include "../Xi/Primitives.hpp"
 
-namespace Execution {
+namespace Task {
 
 using namespace Xi;
 
@@ -137,6 +137,6 @@ void xi_context_init(TaskContext* ctx, void (*entry)(void*), void* arg,
  */
 extern "C" void xi_context_entry_trampoline(void* arg);
 
-} // namespace Execution
+} // namespace Task
 
 #endif // XI_EXECUTION_CONTEXT_HPP

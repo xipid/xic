@@ -8,12 +8,12 @@
 
 #if defined(__riscv) && (__riscv_xlen == 32)
 
-#include "../../../include/Execution/Context.hpp"
-#include "../../../include/Execution/Task.hpp"
+#include "../../../include/Task/Context.hpp"
+#include "../../../include/Task/Task.hpp"
 
 #include <cstring>
 
-namespace Execution {
+namespace Task {
 
 /**
  * @brief Initializes a RISC-V32 TaskContext for a new task.
@@ -63,6 +63,6 @@ void xi_context_init(TaskContext* ctx, void (*entry)(void*), void* arg,
 
 // Note: xi_context_entry_trampoline is defined in Task.cpp (portable).
 
-} // namespace Execution
+} // namespace Task
 
 #endif // defined(__riscv) && (__riscv_xlen == 32)
