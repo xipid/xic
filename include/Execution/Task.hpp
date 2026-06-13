@@ -55,6 +55,7 @@ bool xi_validate_context_before_switch(TaskState* state);
 bool xi_is_task_dead_recursive(usz tid);
 
 extern thread_local usz xi_last_guest_rbx;
+extern thread_local usz xi_last_jit_rip;
 
 struct GuestRegs {
     u64 r11;
@@ -71,6 +72,8 @@ struct GuestRegs {
 };
 
 extern thread_local GuestRegs* xi_guest_regs;
+extern thread_local usz tl_currently_rewriting_physical;
+
 
 // -------------------------------------------------------------------------
 // Supporting Structures
@@ -87,6 +90,7 @@ struct MemoryRegion {
     bool writable;      ///< Whether the task can write to this region.
     bool executable;    ///< Whether the task can execute from this region.
     bool owned;         ///< If true, physical memory is freed on unmap/destroy.
+    u64 lastAccessTicks = 0; ///< Least Recently Used counter.
 };
 
 /**
@@ -172,6 +176,7 @@ struct TaskState {
         bool resolved;
     };
     Array<FetchRange> fetchRanges;
+    Array<FetchRange> originalFetchRanges;
 
     struct CopyMapRegion {
         usz dest;
@@ -208,6 +213,7 @@ struct TaskState {
 
     usz maxChildrenMemory;
     Func<void(usz, usz)> swapCallback;
+    u64 accessCounter = 0;
 
     struct StoreRange {
         usz start;
@@ -226,26 +232,7 @@ struct TaskState {
           isWaitingForMessage(false), isIsolated(false),
           entryFn(nullptr), entryArg(nullptr), waitDeadTarget(0),
           minChildQuotaUs(0), childQuotaUsed(0),
-          maxChildrenMemory(0) {
-        bannedList.push("syscall");
-        bannedList.push("sysenter");
-        bannedList.push("sysexit");
-        bannedList.push("sysret");
-        bannedList.push("int");
-        bannedList.push("int3");
-        bannedList.push("hlt");
-        bannedList.push("cli");
-        bannedList.push("sti");
-        bannedList.push("wrmsr");
-        bannedList.push("rdmsr");
-        bannedList.push("iret");
-        bannedList.push("mov-seg");
-        bannedList.push("lss");
-        bannedList.push("fsgsbase");
-        bannedList.push("call-far");
-        bannedList.push("jmp-far");
-        bannedList.push("sysctl");
-    }
+          maxChildrenMemory(0), accessCounter(0) {}
 };
 
 /**
@@ -372,8 +359,9 @@ public:
                 maxReg = _state->regions[i].size;
             }
         }
-        usz size = maxReg > 0 ? maxReg : XI_DEFAULT_TASK_MEM;
-        return size < XI_DEFAULT_TASK_MEM ? XI_DEFAULT_TASK_MEM : size;
+        usz size = maxReg > 0 ? maxReg : 1024 * 1024;
+        if (size < 1024 * 1024) size = 1024 * 1024;
+        return size;
     }
 
     /** @brief Returns a handle to the currently executing task on this core. */
@@ -472,6 +460,9 @@ public:
     usz totalChildrenMemory() const;
 
     // -- Memory --
+
+    /** @brief Checks if a virtual memory range overlaps with any mapped regions. */
+    bool isMapped(usz base, usz size) const;
 
     /** @brief Adds a memory translation entry. */
     void translate(const MemoryTranslation& mt);
@@ -632,6 +623,8 @@ public:
     static void uncache(usz start, usz end) { current().uncache(start, end); }
     template <typename Dummy = void>
     static void uncache() { current().uncache(); }
+    template <typename Dummy = void>
+    static bool isMapped(usz base, usz size) { return current().isMapped(base, size); }
     template <typename Dummy = void>
     static void copyAndMap(usz source, usz dest, usz length) { current().copyAndMap(source, dest, length); }
     template <typename Dummy = void>

@@ -214,14 +214,14 @@ endforeach()
 # Build XiGuest library target for the guest
 add_library(XiGuest STATIC src/Execution/Task.cpp)
 target_compile_definitions(XiGuest PRIVATE COMPILING_FOR_GUEST)
-target_compile_options(XiGuest PRIVATE -nostdlib -fno-exceptions -fno-rtti -fno-pie -fno-stack-protector -mno-red-zone -mcmodel=large)
+target_compile_options(XiGuest PRIVATE -nostdlib -fno-exceptions -fno-rtti -fno-pie -fno-stack-protector -mno-red-zone -mcmodel=large -ffunction-sections -fdata-sections)
 target_include_directories(XiGuest PRIVATE include)
 
 # Build internal guest binary (statically linked, freestanding, no libc)
 add_executable(internal tests/task/internal.cpp)
-target_compile_options(internal PRIVATE -nostdlib -fno-exceptions -fno-rtti -fno-pie -fno-stack-protector -mno-red-zone -mcmodel=large)
+target_compile_options(internal PRIVATE -nostdlib -fno-exceptions -fno-rtti -fno-pie -fno-stack-protector -mno-red-zone -mcmodel=large -ffunction-sections -fdata-sections)
 target_link_libraries(internal PRIVATE XiGuest)
-target_link_options(internal PRIVATE -nostdlib -static -fno-exceptions -fno-rtti -no-pie -Wl,-Ttext-segment=0x50000000 -Wl,-Ttext=0x50001000 -Wl,-e,_start)
+target_link_options(internal PRIVATE -nostdlib -static -fno-exceptions -fno-rtti -no-pie -Wl,-Ttext-segment=0x50000000 -Wl,-Ttext=0x50001000 -Wl,-e,_start -Wl,--gc-sections)
 target_include_directories(internal PRIVATE include)
 set_target_properties(internal PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
 

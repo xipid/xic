@@ -36,7 +36,7 @@ extern "C" {
 
 // Freestanding Memory Allocator & Helper Stubs
 extern "C" {
-    static char arena[16384];
+    static char arena[8000];
     static size_t arena_offset = 0;
 
     void* malloc(size_t size) {
@@ -159,6 +159,7 @@ void Task::send(Task& receiver, const String& payload) {
 
 void Task::copyAndMap(usz, usz, usz) {}
 usz Task::translate(usz, usz) { return 0; }
+bool Task::isMapped(usz, usz) const { return false; }
 
 void Task::onInstructionTranslate(const String&, Func<Array<u8>(const Array<u8>&)>) {}
 void Task::forwardInstruction(const String&) {}
@@ -251,7 +252,10 @@ Task* Task::instance = nullptr;
 
 static thread_local TaskState* tl_currentTask = nullptr;
 thread_local usz xi_last_guest_rbx = 0;
+thread_local usz xi_last_jit_rip = 0;
 thread_local GuestRegs* xi_guest_regs = nullptr;
+thread_local usz tl_currently_rewriting_physical = 0;
+
 
 Task Task::current() {
     ensureInitialized();
@@ -283,8 +287,8 @@ static void xi_aot_rewrite_task_regions(TaskState* state) {
         MemoryRegion& r = state->regions[i];
         if (r.physical && r.executable) {
             AOTRegion* cached = AOT::findCached(state->aotCache, reinterpret_cast<usz>(r.physical), r.size);
-            if (!cached) {
-                AOTResult res = AOT::rewrite(r.physical, r.size, state->regions, 0);
+             if (!cached) {
+                AOTResult res = AOT::rewrite(r.physical, r.size, state->regions, r.base);
                 if (res.success && res.patchedCode) {
                     AOTRegion reg;
                     reg.originalAddr = reinterpret_cast<usz>(r.physical);
@@ -312,6 +316,27 @@ static void xi_aot_rewrite_task_regions(TaskState* state) {
 static void* xi_translate_to_patched_address(TaskState* state, void* addr) {
     if (!state || !state->isIsolated || !addr) return addr;
     usz target = reinterpret_cast<usz>(addr);
+
+    for (usz i = 0; i < state->aotCache.size(); ++i) {
+        AOTRegion& aot = state->aotCache[i];
+        if (aot.patchedCode && target >= aot.originalAddr && target < aot.originalAddr + aot.originalSize) {
+            if (aot.offsetMap) {
+                usz offset = target - aot.originalAddr;
+                if (offset < aot.originalSize && aot.offsetMap[offset] != 0xFFFFFFFF) {
+                    return aot.patchedCode + aot.offsetMap[offset];
+                }
+            }
+        }
+    }
+
+    Task t(state);
+    t.translate(target, 0);
+
+    xi_aot_rewrite_task_regions(state);
+
+    // Re-translate to ensure the target region is loaded if it got evicted during cascading AOT rewrite
+    t.translate(target, 0);
+
     for (usz i = 0; i < state->regions.size(); ++i) {
         MemoryRegion& r = state->regions[i];
         if (r.physical && r.executable) {
@@ -674,27 +699,6 @@ Task Task::spawn() {
     return child;
 }
 
-static void xi_resolve_fetch_ranges_for_address(TaskState* state, usz addr) {
-    if (!state) return;
-    bool isMapped = false;
-    for (usz i = 0; i < state->regions.size(); ++i) {
-        MemoryRegion& r = state->regions[i];
-        if (r.physical && addr >= r.base && addr < r.base + r.size) {
-            isMapped = true;
-            break;
-        }
-    }
-    if (!isMapped) {
-        for (usz i = 0; i < state->fetchRanges.size(); ++i) {
-            TaskState::FetchRange& fr = state->fetchRanges[i];
-            if (addr >= fr.start && addr < fr.end) {
-                fr.callback(fr.start, fr.end);
-                break;
-            }
-        }
-    }
-}
-
 void Task::resume() {
     if (!_state) return;
 
@@ -722,9 +726,6 @@ void Task::resume() {
     if (_state->status == TaskStatus::Created) {
         // First start: initialize context.
         if (_state->isIsolated) {
-            if (_state->entryFn) {
-                xi_resolve_fetch_ranges_for_address(_state, reinterpret_cast<usz>(_state->entryFn));
-            }
             xi_aot_rewrite_task_regions(_state);
             if (_state->entryFn) {
                 _state->entryFn = (void(*)(void*))xi_translate_to_patched_address(_state, (void*)_state->entryFn);
@@ -843,7 +844,6 @@ void Task::_execute_impl_raw(int mode, usz targetId, void (*fn)(void*), void* ar
 
     if (fn) {
         if (_state->isIsolated) {
-            xi_resolve_fetch_ranges_for_address(_state, reinterpret_cast<usz>(fn));
             xi_aot_rewrite_task_regions(_state);
             void* origFn = (void*)fn;
             fn = (void(*)(void*))xi_translate_to_patched_address(_state, (void*)fn);
@@ -951,6 +951,17 @@ void Task::destroy() {
 // Memory
 // -------------------------------------------------------------------------
 
+bool Task::isMapped(usz base, usz size) const {
+    if (!_state) return false;
+    for (usz i = 0; i < _state->regions.size(); ++i) {
+        const MemoryRegion& r = _state->regions[i];
+        if (base < r.base + r.size && base + size > r.base) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void Task::translate(const MemoryTranslation& mt) {
     if (!_state) return;
     Task caller = Task::current();
@@ -971,19 +982,33 @@ void Task::copy(usz source, usz dest, usz length) {
         }
     }
 
-    // Find source physical address in parent/caller space
     u8* srcPhys = nullptr;
-    if (caller.valid() && caller._state) {
-        for (usz i = 0; i < caller._state->regions.size(); ++i) {
-            MemoryRegion& r = caller._state->regions[i];
-            if (source >= r.base && source < r.base + r.size) {
-                srcPhys = r.physical + (source - r.base);
-                break;
-            }
+
+    // 1. Try to find source in child's own regions (for intra-task copies)
+    for (usz i = 0; i < _state->regions.size(); ++i) {
+        MemoryRegion& r = _state->regions[i];
+        if (source >= r.base && source < r.base + r.size) {
+            srcPhys = r.physical + (source - r.base);
+            break;
         }
-    } else {
-        // If caller is host/kernel, source is a raw host pointer
-        srcPhys = reinterpret_cast<u8*>(source);
+    }
+
+    // 2. If not found in child, find source physical address in parent/caller space
+    if (!srcPhys) {
+        if (caller.valid() && caller._state) {
+            for (usz i = 0; i < caller._state->regions.size(); ++i) {
+                MemoryRegion& r = caller._state->regions[i];
+                if (source >= r.base && source < r.base + r.size) {
+                    srcPhys = r.physical + (source - r.base);
+                    break;
+                }
+            }
+            if (!srcPhys && caller.id() == 0) {
+                srcPhys = reinterpret_cast<u8*>(source);
+            }
+        } else {
+            srcPhys = reinterpret_cast<u8*>(source);
+        }
     }
 
     // Find dest physical address in child task space
@@ -1001,7 +1026,7 @@ void Task::copy(usz source, usz dest, usz length) {
     }
 }
 
-static void xi_ensure_memory_limits(TaskState* state, usz length) {
+static void xi_ensure_memory_limits(TaskState* state, usz dest, usz length) {
     if (!state) return;
     Task self(state);
     Task parent = self.parent();
@@ -1013,11 +1038,49 @@ static void xi_ensure_memory_limits(TaskState* state, usz length) {
                 Task child = Task::findTask(parent._state->childIds[c]);
                 if (!child.valid()) continue;
                 if (child._state->swapCallback && child._state->regions.size() > 0) {
-                    MemoryRegion regionToEvict = child._state->regions[0];
-                    child._state->swapCallback(regionToEvict.base, regionToEvict.size);
-                    child.unmap(regionToEvict.base, regionToEvict.size);
-                    swappedAny = true;
-                    break;
+                    long long candidateIdx = -1;
+                    u64 minAccessTicks = (u64)-1;
+
+                    for (usz r = 0; r < child._state->regions.size(); ++r) {
+                        const MemoryRegion& reg = child._state->regions[r];
+                        if (reinterpret_cast<usz>(reg.physical) == tl_currently_rewriting_physical) {
+                            continue;
+                        }
+                        if (dest >= reg.base && dest < reg.base + reg.size) {
+                            continue;
+                        }
+
+                        // Protect active JIT code region
+                        bool isActiveCode = false;
+                        if (xi_last_jit_rip != 0) {
+                            AOTRegion* cached = AOT::findCached(child._state->aotCache, reinterpret_cast<usz>(reg.physical), reg.size);
+                            if (cached && cached->patchedCode) {
+                                if (xi_last_jit_rip >= reinterpret_cast<usz>(cached->patchedCode) &&
+                                    xi_last_jit_rip < reinterpret_cast<usz>(cached->patchedCode) + cached->patchedSize) {
+                                    isActiveCode = true;
+                                }
+                            }
+                        }
+                        if (isActiveCode) {
+                            continue;
+                        }
+
+                        if (reg.lastAccessTicks < minAccessTicks) {
+                            minAccessTicks = reg.lastAccessTicks;
+                            candidateIdx = (long long)r;
+                        }
+                    }
+
+                    if (candidateIdx != -1) {
+                        MemoryRegion regionToEvict = child._state->regions[(usz)candidateIdx];
+                        TaskState* prev = xi_get_current_task();
+                        xi_set_current_task(nullptr);
+                        child._state->swapCallback(regionToEvict.base, regionToEvict.size);
+                        child.unmap(regionToEvict.base, regionToEvict.size);
+                        xi_set_current_task(prev);
+                        swappedAny = true;
+                        break;
+                    }
                 }
             }
             if (!swappedAny) break;
@@ -1028,7 +1091,7 @@ static void xi_ensure_memory_limits(TaskState* state, usz length) {
 
 void Task::alloc(usz dest, usz length) {
     if (!_state || length == 0) return;
-    xi_ensure_memory_limits(_state, length);
+    xi_ensure_memory_limits(_state, dest, length);
     Task caller = Task::current();
     if (caller.valid() && caller.id() != 0) {
         if (_state->parentId != caller.id() && _state->id != caller.id()) {
@@ -1096,7 +1159,7 @@ static void xi_desensitize_on_fetch(TaskState* state, usz dest, usz length) {
 
 void Task::map(usz source, usz dest, usz length) {
     if (!_state || length == 0) return;
-    xi_ensure_memory_limits(_state, length);
+    xi_ensure_memory_limits(_state, dest, length);
 
     // A task cannot map memory for itself (Task::current() == self is blocked).
     Task caller = Task::current();
@@ -1314,11 +1377,23 @@ void Task::copyAndMap(usz source, usz dest, usz length) {
 usz Task::translate(usz destAddr, usz length) {
     if (!_state) return 0;
 
-    usz queryEnd = (length == 0) ? destAddr + 1 : destAddr + length;
-    for (usz i = 0; i < _state->fetchRanges.size(); ++i) {
-        const TaskState::FetchRange& fr = _state->fetchRanges[i];
-        if (queryEnd > fr.start && destAddr < fr.end) {
-            return 0; // Overlaps with an onFetch region
+    bool foundOverlap = true;
+    while (foundOverlap) {
+        foundOverlap = false;
+        usz queryEnd = (length == 0) ? destAddr + 1 : destAddr + length;
+        for (usz i = 0; i < _state->fetchRanges.size(); ++i) {
+            const TaskState::FetchRange& fr = _state->fetchRanges[i];
+            if (queryEnd > fr.start && destAddr < fr.end) {
+                if (fr.callback) {
+                    Func<void(usz, usz)> cb = fr.callback;
+                    TaskState* prev = xi_get_current_task();
+                    xi_set_current_task(nullptr);
+                    cb(destAddr, queryEnd);
+                    xi_set_current_task(prev);
+                }
+                foundOverlap = true;
+                break;
+            }
         }
     }
 
@@ -1343,8 +1418,11 @@ usz Task::translate(usz destAddr, usz length) {
 void Task::unmap(usz dest, usz length) {
     if (!_state) return;
     Task caller = Task::current();
+    std::printf("[Task::unmap] dest=0x%lx, length=0x%lx, caller.id=%d, caller.valid=%d, parentId=%d\n",
+                (long)dest, (long)length, (int)(caller.valid() ? caller.id() : -1), (int)caller.valid(), (int)_state->parentId);
     if (caller.valid() && caller.id() != 0) {
         if (_state->parentId != caller.id()) {
+            std::printf("[Task::unmap] BLOCKED! caller is not parent\n");
             return; // Blocked: only parent can unmap memory.
         }
     }
@@ -1353,16 +1431,30 @@ void Task::unmap(usz dest, usz length) {
         MemoryRegion& r = _state->regions[(usz)i];
         // Check overlap.
         if (r.base < dest + length && r.base + r.size > dest) {
+            std::printf("[Task::unmap] Removing region base=0x%lx, size=0x%lx\n", (long)r.base, (long)r.size);
             if (r.physical) {
-                AOT::invalidate(_state->aotCache, reinterpret_cast<usz>(r.physical), r.size);
+                // Do not invalidate AOT cache on unmap/eviction so return addresses remain valid.
+                // AOT::invalidate(_state->aotCache, reinterpret_cast<usz>(r.physical), r.size);
                 Task::releaseAllocation(r.physical);
             }
-            // Remove by swap-and-pop.
-            usz last = _state->regions.size() - 1;
-            if ((usz)i != last) {
-                _state->regions[(usz)i] = _state->regions[last];
+            // Remove by shifting elements left to preserve chronological order (FIFO)
+            for (usz j = (usz)i; j + 1 < _state->regions.size(); ++j) {
+                _state->regions[j] = _state->regions[j + 1];
             }
             _state->regions.pop();
+        }
+    }
+
+    // Re-sensitize fetchRanges for the unmapped area from originalFetchRanges
+    for (usz i = 0; i < _state->originalFetchRanges.size(); ++i) {
+        const TaskState::FetchRange& ofr = _state->originalFetchRanges[i];
+        usz intersectStart = dest > ofr.start ? dest : ofr.start;
+        usz intersectEnd = (dest + length) < ofr.end ? (dest + length) : ofr.end;
+        if (intersectStart < intersectEnd) {
+            TaskState::FetchRange newFr = ofr;
+            newFr.start = intersectStart;
+            newFr.end = intersectEnd;
+            _state->fetchRanges.push(newFr);
         }
     }
 }
@@ -1789,6 +1881,7 @@ void Task::setOnFetch(usz start, usz end, Func<void(usz, usz)> cb) {
     fr.cached = false;
     fr.resolved = false;
     _state->fetchRanges.push(fr);
+    _state->originalFetchRanges.push(fr);
 }
 
 
@@ -1983,14 +2076,46 @@ TaskState* Task::allocTask(usz parentId) {
     s->status = TaskStatus::Created;
     s->quotaUs = 0;
 
+    if (parentId < _tasks.size() && _tasks[parentId]) {
+        TaskState* parent = _tasks[parentId];
+        s->bannedList = parent->bannedList;
+    } else {
+        s->bannedList.push("hlt");
+        s->bannedList.push("cli");
+        s->bannedList.push("sti");
+        s->bannedList.push("int");
+        s->bannedList.push("into");
+        s->bannedList.push("in");
+        s->bannedList.push("out");
+        s->bannedList.push("retf");
+        s->bannedList.push("iret");
+        s->bannedList.push("far_call");
+        s->bannedList.push("mov_seg");
+        s->bannedList.push("vex");
+        s->bannedList.push("evex");
+        s->bannedList.push("sysret");
+        s->bannedList.push("wrmsr");
+        s->bannedList.push("rdmsr");
+        s->bannedList.push("sysenter");
+        s->bannedList.push("sysexit");
+        s->bannedList.push("priv_seg");
+        s->bannedList.push("clts");
+        s->bannedList.push("invd");
+        s->bannedList.push("wbinvd");
+        s->bannedList.push("mov_cr_dr");
+        s->bannedList.push("pop_fs_gs");
+        s->bannedList.push("lss");
+        s->bannedList.push("lfs");
+        s->bannedList.push("lgs");
+        s->bannedList.push("rsm");
+        s->bannedList.push("fsgsbase");
+        s->bannedList.push("syscall");
+    }
+
     while (_tasks.size() <= s->id) {
         _tasks.push(nullptr);
     }
     _tasks[s->id] = s;
-
-    if (parentId < _tasks.size() && _tasks[parentId]) {
-        s->bannedList = _tasks[parentId]->bannedList;
-    }
 
     return s;
 }
@@ -2444,6 +2569,38 @@ void Task::ensureInitialized() {
         root->parentId = 0;
         root->status = TaskStatus::Running;
         root->quotaUs = 0; // Unlimited.
+
+        root->bannedList.push("hlt");
+        root->bannedList.push("cli");
+        root->bannedList.push("sti");
+        root->bannedList.push("int");
+        root->bannedList.push("into");
+        root->bannedList.push("in");
+        root->bannedList.push("out");
+        root->bannedList.push("retf");
+        root->bannedList.push("iret");
+        root->bannedList.push("far_call");
+        root->bannedList.push("mov_seg");
+        root->bannedList.push("vex");
+        root->bannedList.push("evex");
+        root->bannedList.push("sysret");
+        root->bannedList.push("wrmsr");
+        root->bannedList.push("rdmsr");
+        root->bannedList.push("sysenter");
+        root->bannedList.push("sysexit");
+        root->bannedList.push("priv_seg");
+        root->bannedList.push("clts");
+        root->bannedList.push("invd");
+        root->bannedList.push("wbinvd");
+        root->bannedList.push("mov_cr_dr");
+        root->bannedList.push("pop_fs_gs");
+        root->bannedList.push("lss");
+        root->bannedList.push("lfs");
+        root->bannedList.push("lgs");
+        root->bannedList.push("rsm");
+        root->bannedList.push("fsgsbase");
+        root->bannedList.push("syscall");
+
         _tasks.push(root);
 
         static Task rootTask(root);

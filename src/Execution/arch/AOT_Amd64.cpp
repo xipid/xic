@@ -51,6 +51,7 @@ namespace Execution {
  * If the access is out-of-bounds, traps with ud2.
  */
 extern "C" void xi_sfi_bounds_check(void* addr, usz size) {
+    xi_last_jit_rip = reinterpret_cast<usz>(__builtin_return_address(0));
     if (addr == nullptr && size == 0) return;
     TaskState* state = xi_get_current_task();
     if (!state) return;
@@ -64,6 +65,7 @@ extern "C" void xi_sfi_bounds_check(void* addr, usz size) {
         if (r.physical) {
             if ((target >= r.physical && target + size <= r.physical + r.size) ||
                 (targetAddr >= r.base && targetAddr + size <= r.base + r.size)) {
+                r.lastAccessTicks = ++state->accessCounter;
                 return; // Access is within a valid region.
             }
         }
@@ -79,7 +81,10 @@ extern "C" void xi_sfi_bounds_check(void* addr, usz size) {
     for (usz i = 0; i < state->fetchRanges.size(); ++i) {
         TaskState::FetchRange fr = state->fetchRanges[i];
         if (targetAddr >= fr.start && targetAddr + size <= fr.end) {
+            TaskState* prev = xi_get_current_task();
+            xi_set_current_task(nullptr);
             fr.callback(fr.start, fr.end);
+            xi_set_current_task(prev);
             // Re-verify that the callback successfully mapped/allocated the region containing targetAddr
             for (usz j = 0; j < state->regions.size(); ++j) {
                 MemoryRegion& r = state->regions[j];
@@ -101,6 +106,7 @@ extern "C" void xi_sfi_bounds_check(void* addr, usz size) {
  * parent's read-only mappings) must not be written to.
  */
 extern "C" void xi_sfi_write_check(void* addr, usz size) {
+    xi_last_jit_rip = reinterpret_cast<usz>(__builtin_return_address(0));
     if (addr == nullptr && size == 0) return;
     TaskState* state = xi_get_current_task();
     if (!state) return;
@@ -114,6 +120,7 @@ extern "C" void xi_sfi_write_check(void* addr, usz size) {
         if (r.physical && r.writable) {
             if ((target >= r.physical && target + size <= r.physical + r.size) ||
                 (targetAddr >= r.base && targetAddr + size <= r.base + r.size)) {
+                r.lastAccessTicks = ++state->accessCounter;
                 return; // Write is within a writable region.
             }
         }
@@ -129,7 +136,10 @@ extern "C" void xi_sfi_write_check(void* addr, usz size) {
     for (usz i = 0; i < state->storeRanges.size(); ++i) {
         TaskState::StoreRange sr = state->storeRanges[i];
         if (targetAddr >= sr.start && targetAddr + size <= sr.end) {
+            TaskState* prev = xi_get_current_task();
+            xi_set_current_task(nullptr);
             sr.callback(sr.start, sr.end);
+            xi_set_current_task(prev);
             // Re-verify that the callback successfully mapped/allocated the region and it is writable
             for (usz j = 0; j < state->regions.size(); ++j) {
                 MemoryRegion& r = state->regions[j];
@@ -144,7 +154,10 @@ extern "C" void xi_sfi_write_check(void* addr, usz size) {
     for (usz i = 0; i < state->fetchRanges.size(); ++i) {
         TaskState::FetchRange fr = state->fetchRanges[i];
         if (targetAddr >= fr.start && targetAddr + size <= fr.end) {
+            TaskState* prev = xi_get_current_task();
+            xi_set_current_task(nullptr);
             fr.callback(fr.start, fr.end);
+            xi_set_current_task(prev);
             // Re-verify that the callback successfully mapped/allocated the region and it is writable
             for (usz j = 0; j < state->regions.size(); ++j) {
                 MemoryRegion& r = state->regions[j];
@@ -267,7 +280,10 @@ extern "C" void* xi_sfi_indirect_jump_resolver(void* target) {
         for (usz i = 0; i < state->fetchRanges.size(); ++i) {
             TaskState::FetchRange fr = state->fetchRanges[i];
             if (targetAddr >= fr.start && targetAddr < fr.end) {
+                TaskState* prevTask = xi_get_current_task();
+                xi_set_current_task(nullptr);
                 fr.callback(fr.start, fr.end);
+                xi_set_current_task(prevTask);
                 // Re-verify if it's now mapped
                 for (usz j = 0; j < state->regions.size(); ++j) {
                     MemoryRegion& r = state->regions[j];
@@ -325,11 +341,12 @@ extern "C" void* xi_sfi_indirect_jump_resolver(void* target) {
     }
 
     // 2. We found the region. Ensure it is AOT-compiled.
+    targetRegion->lastAccessTicks = ++state->accessCounter;
     AOTRegion* cached = AOT::findCached(state->aotCache, reinterpret_cast<usz>(targetRegion->physical), targetRegion->size);
     if (!cached) {
         // Run AOT compilation!
         targetRegion->executable = true; // Make sure it is marked executable
-        AOTResult res = AOT::rewrite(targetRegion->physical, targetRegion->size, state->regions, 0);
+        AOTResult res = AOT::rewrite(targetRegion->physical, targetRegion->size, state->regions, targetRegion->base);
         if (res.success && res.patchedCode) {
             AOTRegion reg;
             reg.originalAddr = reinterpret_cast<usz>(targetRegion->physical);
@@ -432,28 +449,46 @@ static String getInstructionName(const u8* code, usz len) {
     usz remaining = len - pos;
     if (op == 0x90 && remaining == 1) return "nop";
     if (op == 0xF4 && remaining == 1) return "hlt";
+    if (op == 0xFA && remaining == 1) return "cli";
+    if (op == 0xFB && remaining == 1) return "sti";
     if (op == 0xCC && remaining == 1) return "int3";
     if (op == 0xCD) return "int";
-    if (op == 0xC3 && remaining == 1) return "ret";
+    if (op == 0xCE && remaining == 1) return "into";
+    if (op == 0xE4 || op == 0xE5 || op == 0xEC || op == 0xED) return "in";
+    if (op == 0xE6 || op == 0xE7 || op == 0xEE || op == 0xEF) return "out";
+    if (op == 0xCB || (op == 0xCA && remaining >= 3)) return "retf";
     if (op == 0xCF && remaining == 1) return "iret";
-    if (op == 0x8E) return "mov-seg";
-    if (op == 0x9A) return "call-far";
-    if (op == 0xEA) return "jmp-far";
-
+    if (op == 0x9A || op == 0xEA) return "far_call";
+    if (op == 0x8E) return "mov_seg";
+    if (op == 0xC4 || op == 0xC5) return "vex";
+    if (op == 0x62) return "evex";
     if (op == 0xFF && remaining >= 2) {
         u8 modrm = code[pos + 1];
         u8 reg = (modrm >> 3) & 7;
-        if (reg == 3 || reg == 5) return "call-far";
+        if (reg == 3 || reg == 5) return "far_call";
     }
-
     if (op == 0x0F && remaining >= 2) {
         u8 op2 = code[pos + 1];
         if (op2 == 0x05) return "syscall";
         if (op2 == 0xA2) return "cpuid";
         if (op2 == 0x31) return "rdtsc";
         if (op2 == 0x0B) return "ud2";
+        if (op2 == 0x38 || op2 == 0x3A) return "vex";
+        if (op2 == 0x07) return "sysret";
+        if (op2 == 0x30) return "wrmsr";
+        if (op2 == 0x32) return "rdmsr";
+        if (op2 == 0x34) return "sysenter";
+        if (op2 == 0x35) return "sysexit";
+        if (op2 == 0x01) return "priv_seg";
+        if (op2 == 0x06) return "clts";
+        if (op2 == 0x08) return "invd";
+        if (op2 == 0x09) return "wbinvd";
+        if (op2 == 0x20 || op2 == 0x21 || op2 == 0x22 || op2 == 0x23) return "mov_cr_dr";
+        if (op2 == 0xA1 || op2 == 0xA9) return "pop_fs_gs";
         if (op2 == 0xB2) return "lss";
-        if (op2 == 0x01) return "sysctl";
+        if (op2 == 0xB4) return "lfs";
+        if (op2 == 0xB5) return "lgs";
+        if (op2 == 0xAA) return "rsm";
         if (op2 == 0xAE && remaining >= 3) {
             u8 modrm = code[pos + 2];
             u8 mod = (modrm >> 6) & 3;
@@ -467,7 +502,18 @@ static String getInstructionName(const u8* code, usz len) {
 static InstructionMatch checkInstructionHooks(const u8* code, usz len, const String& name) {
     InstructionMatch match = {false, false, nullptr, false, nullptr};
     TaskState* state = xi_get_current_task();
+    if (!state) {
+        Task root = Task::root();
+        state = root._state;
+    }
     if (!state) return match;
+
+    if (name == "syscall" && state->customSyscallCallback) {
+        match.matched = true;
+        match.banned = true;
+        match.callbackPtr = const_cast<void*>(reinterpret_cast<const void*>(&state->customSyscallCallback));
+        return match;
+    }
 
     String op1;
     if (len >= 1) op1 = String(code, 1);
@@ -1596,6 +1642,77 @@ static void emitIndirectJumpStub(u8*& out, const u8* insnSrc, usz instrLen, u64 
     }
 }
 
+static constexpr usz kDirectCrossPageStubSize = 67;
+
+static void emitDirectCrossPageStub(u8*& out, u64 targetGuestVirtualAddr, u64 resolverAddr, bool isCall) {
+    // 1. Save original rdi and rax to compute safely
+    *out++ = 0x57; // push rdi
+    *out++ = 0x50; // push rax
+
+    // 2. Load targetGuestVirtualAddr into rdi
+    *out++ = 0x48; *out++ = 0xBF; // movabs rdi, targetGuestVirtualAddr
+    std::memcpy(out, &targetGuestVirtualAddr, 8);
+    out += 8;
+
+    // 3. Save other caller-saved registers and RFLAGS (8 items = 64 bytes)
+    *out++ = 0x9C; // pushfq
+    *out++ = 0x51; // push rcx
+    *out++ = 0x52; // push rdx
+    *out++ = 0x56; // push rsi
+    *out++ = 0x41; *out++ = 0x50; // push r8
+    *out++ = 0x41; *out++ = 0x51; // push r9
+    *out++ = 0x41; *out++ = 0x52; // push r10
+    *out++ = 0x41; *out++ = 0x53; // push r11
+
+    // 4. Align stack dynamically
+    *out++ = 0x55; // push rbp
+    *out++ = 0x48; *out++ = 0x89; *out++ = 0xE5; // mov rbp, rsp
+    *out++ = 0x48; *out++ = 0x83; *out++ = 0xE4; *out++ = 0xF0; // and rsp, -16
+
+    // 5. Call resolverAddr
+    *out++ = 0x48; *out++ = 0xB8; // movabs rax, resolverAddr
+    std::memcpy(out, &resolverAddr, 8);
+    out += 8;
+    *out++ = 0xFF; *out++ = 0xD0; // call rax
+
+    // 6. Restore stack
+    *out++ = 0xC9; // leave
+
+    // 7. Restore registers (save rax into r11 first!)
+    *out++ = 0x49; *out++ = 0x89; *out++ = 0xC3; // mov r11, rax
+    *out++ = 0x48; *out++ = 0x83; *out++ = 0xC4; *out++ = 0x08; // add rsp, 8 (skip popped r11)
+    *out++ = 0x41; *out++ = 0x5A; // pop r10
+    *out++ = 0x41; *out++ = 0x59; // pop r9
+    *out++ = 0x41; *out++ = 0x58; // pop r8
+    *out++ = 0x5E; // pop rsi
+    *out++ = 0x5A; // pop rdx
+    *out++ = 0x59; // pop rcx
+    *out++ = 0x9D; // popfq
+    *out++ = 0x58; // pop rax
+    *out++ = 0x5F; // pop rdi
+
+    // 8. Execute call or jump
+    if (isCall) {
+        *out++ = 0x41; *out++ = 0xFF; *out++ = 0xD3; // call r11
+    } else {
+        *out++ = 0x41; *out++ = 0xFF; *out++ = 0xE3; // jmp r11
+    }
+}
+
+static bool isTargetInPage(usz pos, usz len, usz relOffset, usz relSize, const u8* code, usz codeSize) {
+    i64 origDisp = 0;
+    if (relSize == 4) {
+        i32 disp32 = 0;
+        std::memcpy(&disp32, code + pos + relOffset, 4);
+        origDisp = disp32;
+    } else if (relSize == 1) {
+        i8 disp8 = static_cast<i8>(code[pos + relOffset]);
+        origDisp = disp8;
+    }
+    i64 origTarget = static_cast<i64>(pos) + static_cast<i64>(len) + origDisp;
+    return origTarget >= 0 && origTarget < static_cast<i64>(codeSize);
+}
+
 
 /**
  * @brief Size of the stack-check stub.
@@ -1721,8 +1838,8 @@ static bool isStoreInstruction(const u8* code, usz len) {
 // -------------------------------------------------------------------------
 
 AOTResult AOT::rewrite(const u8* code, usz codeSize,
-                       const Array<MemoryRegion>& /* regions */,
-                       usz /* taskBase */) {
+                       const Array<MemoryRegion>& regions,
+                       usz taskBase) {
     AOTResult result;
     result.patchedCode = nullptr;
     result.patchedSize = 0;
@@ -1759,6 +1876,16 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         void* translateCallbackPtr;
     };
 
+    struct RewritingGuard {
+        RewritingGuard(usz physical) {
+            tl_currently_rewriting_physical = physical;
+        }
+        ~RewritingGuard() {
+            tl_currently_rewriting_physical = 0;
+        }
+    };
+    RewritingGuard guard(reinterpret_cast<usz>(code));
+
     usz insnCapacity = codeSize;
     InsnInfo* insns = static_cast<InsnInfo*>(std::malloc(insnCapacity * sizeof(InsnInfo)));
     if (!insns) {
@@ -1775,8 +1902,50 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         bool isRspModifying = false;
         usz immSize = 0;
 
-        usz len = xi_x86_insn_length(code + pos, codeSize - pos,
+        usz maxLen = codeSize - pos;
+        if (maxLen < 15) {
+            TaskState* state = xi_get_current_task();
+            if (state) {
+                usz guestBase = 0;
+                for (usz r = 0; r < state->regions.size(); ++r) {
+                    if (state->regions[r].physical == code) {
+                        guestBase = state->regions[r].base;
+                        break;
+                    }
+                }
+                if (guestBase != 0) {
+                    usz nextPageAddr = guestBase + codeSize;
+                    bool nextMapped = false;
+                    for (usz r = 0; r < state->regions.size(); ++r) {
+                        if (nextPageAddr >= state->regions[r].base && 
+                            nextPageAddr < state->regions[r].base + state->regions[r].size) {
+                            nextMapped = true;
+                            break;
+                        }
+                    }
+                    if (!nextMapped) {
+                        for (usz f = 0; f < state->fetchRanges.size(); ++f) {
+                            TaskState::FetchRange fr = state->fetchRanges[f];
+                            if (nextPageAddr >= fr.start && nextPageAddr < fr.end) {
+                                TaskState* prev = xi_get_current_task();
+                                xi_set_current_task(nullptr);
+                                fr.callback(fr.start, fr.end);
+                                xi_set_current_task(prev);
+                                nextMapped = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (nextMapped) {
+                        maxLen = 15;
+                    }
+                }
+            }
+        }
+
+        usz len = xi_x86_insn_length(code + pos, maxLen,
                                       hasMem, isRelJmp, relOffset, relSize, isRspModifying, immSize);
+
         if (len == 0) {
             // Decoding failed — unknown instruction. Trap it.
             len = 1;
@@ -1865,14 +2034,39 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
             insnOutputSize = 58 + len; // Dynamic JIT target check & translation stub
         } else if (isRet) {
             insnOutputSize = kRetCheckStubSize;
-        } else if (isRelJmp && relSize == 1) {
-            u8 op = code[pos + len - 2];
-            if (op == 0xEB) {
-                insnOutputSize = 5; // E9 disp32
-            } else if (op >= 0x70 && op <= 0x7F) {
-                insnOutputSize = 6; // 0F 8x disp32
+        } else if (isRelJmp) {
+            bool inPage = isTargetInPage(pos, len, relOffset, relSize, code, codeSize);
+            if (inPage) {
+                if (relSize == 1) {
+                    u8 op = code[pos + len - 2];
+                    if (op == 0xEB) {
+                        insnOutputSize = 5; // E9 disp32
+                    } else if (op >= 0x70 && op <= 0x7F) {
+                        insnOutputSize = 6; // 0F 8x disp32
+                    } else {
+                        insnOutputSize = len;
+                    }
+                } else {
+                    insnOutputSize = len;
+                }
             } else {
-                insnOutputSize = len;
+                u8 op = code[pos + relOffset - 1];
+                bool isCond = false;
+                if (relSize == 4) {
+                    if (op >= 0x80 && op <= 0x8F && relOffset >= 2 && code[pos + relOffset - 2] == 0x0F) {
+                        isCond = true;
+                    }
+                } else if (relSize == 1) {
+                    if (op >= 0x70 && op <= 0x7F) {
+                        isCond = true;
+                    }
+                }
+
+                if (isCond) {
+                    insnOutputSize = 2 + kDirectCrossPageStubSize; // opposite Jcc + stub
+                } else {
+                    insnOutputSize = kDirectCrossPageStubSize; // stub directly
+                }
             }
         } else if (hasMem) {
             insnOutputSize = 62 + info.leaSize + len;
@@ -1981,89 +2175,115 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
             }
         }
 
-        if (info.isRelJmp && info.relSize == 4) {
-            usz insnRelOffset = info.relOffset;
+        if (info.isRelJmp) {
+            bool inPage = isTargetInPage(info.origOffset, info.instrLen, info.relOffset, info.relSize, code, codeSize);
+            if (inPage) {
+                if (info.relSize == 4) {
+                    usz insnRelOffset = info.relOffset;
+                    std::memcpy(outPtr, insnSrc, insnRelOffset);
 
-            std::memcpy(outPtr, insnSrc, insnRelOffset);
+                    i32 origDisp = 0;
+                    std::memcpy(&origDisp, insnSrc + insnRelOffset, 4);
 
-            i32 origDisp = 0;
-            std::memcpy(&origDisp, insnSrc + insnRelOffset, 4);
+                    usz origTarget = info.origOffset + info.instrLen + static_cast<usz>(
+                        static_cast<i64>(origDisp));
 
-            usz origTarget = info.origOffset + info.instrLen + static_cast<usz>(
-                static_cast<i64>(origDisp));
+                    usz newTargetOffset = 0;
+                    for (usz j = 0; j < insnCount; ++j) {
+                        if (insns[j].origOffset == origTarget) {
+                            newTargetOffset = insns[j].outputOffset;
+                            break;
+                        }
+                    }
 
-            usz newTargetOffset = 0;
-            bool targetFound = false;
-            for (usz j = 0; j < insnCount; ++j) {
-                if (insns[j].origOffset == origTarget) {
-                    newTargetOffset = insns[j].outputOffset;
-                    targetFound = true;
-                    break;
+                    usz curInsnOutputEnd = info.outputOffset + info.instrLen;
+                    if (info.hasMem) {
+                        curInsnOutputEnd += 62 + info.leaSize;
+                    }
+                    if (info.isRspModifying) {
+                        curInsnOutputEnd += kStackCheckStubSize;
+                    }
+
+                    i64 newDisp64 = static_cast<i64>(newTargetOffset) -
+                                    static_cast<i64>(curInsnOutputEnd);
+                    i32 newDisp = static_cast<i32>(newDisp64);
+                    std::memcpy(outPtr + insnRelOffset, &newDisp, 4);
+
+                    usz afterDisp = insnRelOffset + 4;
+                    if (afterDisp < info.instrLen) {
+                        std::memcpy(outPtr + afterDisp, insnSrc + afterDisp,
+                                    info.instrLen - afterDisp);
+                    }
+                    outPtr += info.instrLen;
+
+                } else if (info.relSize == 1 &&
+                           (insnSrc[info.instrLen - 2] == 0xEB || (insnSrc[info.instrLen - 2] >= 0x70 && insnSrc[info.instrLen - 2] <= 0x7F))) {
+                    u8 op = insnSrc[info.instrLen - 2];
+                    i8 origDisp = static_cast<i8>(insnSrc[info.instrLen - 1]);
+                    usz origTarget = info.origOffset + info.instrLen + static_cast<usz>(
+                        static_cast<i64>(origDisp));
+
+                    usz newTargetOffset = 0;
+                    for (usz j = 0; j < insnCount; ++j) {
+                        if (insns[j].origOffset == origTarget) {
+                            newTargetOffset = insns[j].outputOffset;
+                            break;
+                        }
+                    }
+
+                    usz curInsnOutputEnd = info.outputOffset + (op == 0xEB ? 5 : 6);
+                    i64 newDisp64 = static_cast<i64>(newTargetOffset) -
+                                    static_cast<i64>(curInsnOutputEnd);
+                    i32 newDisp = static_cast<i32>(newDisp64);
+
+                    if (op == 0xEB) {
+                        *outPtr++ = 0xE9;
+                        std::memcpy(outPtr, &newDisp, 4);
+                        outPtr += 4;
+                    } else {
+                        *outPtr++ = 0x0F;
+                        *outPtr++ = 0x80 + (op & 0x0F);
+                        std::memcpy(outPtr, &newDisp, 4);
+                        outPtr += 4;
+                    }
                 }
-            }
-
-            if (targetFound) {
-                usz curInsnOutputEnd = info.outputOffset + info.instrLen;
-                if (info.hasMem) {
-                    curInsnOutputEnd += 62 + info.leaSize;
-                }
-                if (info.isRspModifying) {
-                    curInsnOutputEnd += kStackCheckStubSize;
-                }
-
-                i64 newDisp64 = static_cast<i64>(newTargetOffset) -
-                                static_cast<i64>(curInsnOutputEnd);
-                i32 newDisp = static_cast<i32>(newDisp64);
-                std::memcpy(outPtr + insnRelOffset, &newDisp, 4);
             } else {
-                std::memcpy(outPtr + insnRelOffset, &origDisp, 4);
-            }
+                // Cross-page branch!
+                i64 origDisp = 0;
+                if (info.relSize == 4) {
+                    i32 disp32 = 0;
+                    std::memcpy(&disp32, insnSrc + info.relOffset, 4);
+                    origDisp = disp32;
+                } else if (info.relSize == 1) {
+                    i8 disp8 = static_cast<i8>(insnSrc[info.relOffset]);
+                    origDisp = disp8;
+                }
+                u64 targetGuestVirtualAddr = taskBase + info.origOffset + info.instrLen + origDisp;
 
-            usz afterDisp = insnRelOffset + 4;
-            if (afterDisp < info.instrLen) {
-                std::memcpy(outPtr + afterDisp, insnSrc + afterDisp,
-                            info.instrLen - afterDisp);
-            }
-            outPtr += info.instrLen;
+                u8 op = insnSrc[info.relOffset - 1];
+                bool isCond = false;
+                bool isCall = false;
+                if (info.relSize == 4) {
+                    if (op >= 0x80 && op <= 0x8F && info.relOffset >= 2 && insnSrc[info.relOffset - 2] == 0x0F) {
+                        isCond = true;
+                    } else if (op == 0xE8) {
+                        isCall = true;
+                    }
+                } else if (info.relSize == 1) {
+                    if (op >= 0x70 && op <= 0x7F) {
+                        isCond = true;
+                    }
+                }
 
-        } else if (info.isRelJmp && info.relSize == 1 &&
-                   (insnSrc[info.instrLen - 2] == 0xEB || (insnSrc[info.instrLen - 2] >= 0x70 && insnSrc[info.instrLen - 2] <= 0x7F))) {
-            u8 op = insnSrc[info.instrLen - 2];
-            i8 origDisp = static_cast<i8>(insnSrc[info.instrLen - 1]);
-            usz origTarget = info.origOffset + info.instrLen + static_cast<usz>(
-                static_cast<i64>(origDisp));
-
-            usz newTargetOffset = 0;
-            bool targetFound = false;
-            for (usz j = 0; j < insnCount; ++j) {
-                if (insns[j].origOffset == origTarget) {
-                    newTargetOffset = insns[j].outputOffset;
-                    targetFound = true;
-                    break;
+                if (isCond) {
+                    u8 cond = op & 0x0F;
+                    *outPtr++ = 0x70 + (cond ^ 1);
+                    *outPtr++ = kDirectCrossPageStubSize;
+                    emitDirectCrossPageStub(outPtr, targetGuestVirtualAddr, indirectResolverAddr, false);
+                } else {
+                    emitDirectCrossPageStub(outPtr, targetGuestVirtualAddr, indirectResolverAddr, isCall);
                 }
             }
-
-            i32 newDisp = 0;
-            if (targetFound) {
-                usz curInsnOutputEnd = info.outputOffset + (op == 0xEB ? 5 : 6);
-                i64 newDisp64 = static_cast<i64>(newTargetOffset) -
-                                static_cast<i64>(curInsnOutputEnd);
-                newDisp = static_cast<i32>(newDisp64);
-            } else {
-                newDisp = origDisp;
-            }
-
-            if (op == 0xEB) {
-                *outPtr++ = 0xE9;
-                std::memcpy(outPtr, &newDisp, 4);
-                outPtr += 4;
-            } else {
-                *outPtr++ = 0x0F;
-                *outPtr++ = 0x80 + (op & 0x0F);
-                std::memcpy(outPtr, &newDisp, 4);
-                outPtr += 4;
-            }
-
         } else {
             std::memcpy(outPtr, insnSrc, info.instrLen);
             outPtr += info.instrLen;

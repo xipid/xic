@@ -18,8 +18,8 @@ int main() {
     Task task = root.spawn();
     task.unmap(); // Full isolation
 
-    // Set memory limit to 4 pages (16KB) to drive swapping!
-    task.setMaxChildrenMemory(16384);
+    // Set memory limit to 3 pages (12KB) to drive swapping!
+    root.setMaxChildrenMemory(12288);
 
     task.setOnSwap([&](usz base, usz size) {
         std::printf("[Runner Swap] Evicting region: base=0x%lx, size=0x%lx\n", (long)base, (long)size);
@@ -80,15 +80,7 @@ int main() {
 
                 for (usz pageAddr = pageStart; pageAddr < pageEnd; pageAddr += 4096) {
                     // Check if already mapped
-                    bool alreadyMapped = false;
-                    for (usz j = 0; j < task._state->regions.size(); ++j) {
-                        if (pageAddr >= task._state->regions[j].base && 
-                            pageAddr < task._state->regions[j].base + task._state->regions[j].size) {
-                            alreadyMapped = true;
-                            break;
-                        }
-                    }
-                    if (alreadyMapped) continue;
+                    if (task.isMapped(pageAddr, 4096)) continue;
 
                     std::printf("[Runner PageFault] Loading page at 0x%lx on demand\n", (long)pageAddr);
 
