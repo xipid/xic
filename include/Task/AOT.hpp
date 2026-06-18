@@ -73,7 +73,7 @@ public:
      */
     static AOTResult rewrite(const u8* code, usz codeSize,
                              const Array<MemoryRegion>& regions,
-                             usz taskBase);
+                             usz taskBase, void* statePtr = nullptr);
 
     /**
      * @brief Checks if the given address range has a cached AOT rewrite.
@@ -96,6 +96,12 @@ public:
      * @param size   Size of the invalidated region.
      */
     static void invalidate(Array<AOTRegion>& cache, usz addr, usz size);
+
+    /**
+     * @brief Verifies that actual JIT stub sizes match their constexpr size constants.
+     * @return true if verification passes, false otherwise.
+     */
+    static bool verifyStubSizes();
 
     /**
      * @brief Frees all patched code buffers in the cache.

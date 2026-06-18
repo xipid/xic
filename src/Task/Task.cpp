@@ -5,198 +5,7 @@
 
 #include "../../include/Task/Task.hpp"
 
-#ifdef COMPILING_FOR_GUEST
 
-static inline unsigned long long guest_syscall3(unsigned long long num, unsigned long long arg1, unsigned long long arg2, unsigned long long arg3) {
-    register unsigned long long rax asm("rax") = num;
-    register unsigned long long rdi asm("rdi") = arg1;
-    register unsigned long long rsi asm("rsi") = arg2;
-    register unsigned long long rdx asm("rdx") = arg3;
-    asm volatile(
-        "syscall"
-        : "+r"(rax)
-        : "r"(rdi), "r"(rsi), "r"(rdx)
-        : "rcx", "r11", "memory"
-    );
-    return rax;
-}
-
-extern "C" {
-    void _start() {
-        extern int main();
-        main();
-
-        // Exit command
-        guest_syscall3(0x78696304, 0, 0, 0);
-
-        // Fallback infinite loop
-        for (;;) {}
-    }
-}
-
-// Freestanding Memory Allocator & Helper Stubs
-extern "C" {
-    static char arena[8000];
-    static size_t arena_offset = 0;
-
-    void* malloc(size_t size) {
-        size = (size + 7) & ~7; // 8-byte align
-        if (arena_offset + size > sizeof(arena)) {
-            return nullptr;
-        }
-        void* ptr = &arena[arena_offset];
-        arena_offset += size;
-        return ptr;
-    }
-
-    void free(void* ptr) {
-        (void)ptr;
-    }
-
-    void* realloc(void* ptr, size_t size) {
-        void* new_ptr = malloc(size);
-        if (new_ptr && ptr) {
-            for (size_t i = 0; i < size; ++i) {
-                static_cast<char*>(new_ptr)[i] = static_cast<const char*>(ptr)[i];
-            }
-        }
-        return new_ptr;
-    }
-
-    void* memcpy(void* dest, const void* src, size_t count) {
-        char* d = static_cast<char*>(dest);
-        const char* s = static_cast<const char*>(src);
-        for (size_t i = 0; i < count; ++i) {
-            d[i] = s[i];
-        }
-        return dest;
-    }
-
-    void* memset(void* dest, int ch, size_t count) {
-        char* d = static_cast<char*>(dest);
-        for (size_t i = 0; i < count; ++i) {
-            d[i] = static_cast<char>(ch);
-        }
-        return dest;
-    }
-
-    void __cxa_pure_virtual() {
-        for (;;) {}
-    }
-}
-
-// C++ Memory Operators
-void* operator new(size_t size) {
-    return malloc(size);
-}
-void* operator new[](size_t size) {
-    return malloc(size);
-}
-void operator delete(void* ptr) noexcept {
-    free(ptr);
-}
-void operator delete[](void* ptr) noexcept {
-    free(ptr);
-}
-void operator delete(void* ptr, size_t size) noexcept {
-    (void)size;
-    free(ptr);
-}
-void operator delete[](void* ptr, size_t size) noexcept {
-    (void)size;
-    free(ptr);
-}
-
-namespace Collection {
-
-String::String(const char *s) : InlineArray<u8>() {
-    if (s) {
-        while (*s) {
-            push(*s++);
-        }
-    }
-}
-
-const char* String::c_str() {
-    if (!_data) return "";
-    return reinterpret_cast<const char*>(_data);
-}
-
-} // namespace Collection
-
-namespace Task {
-
-// Implement the required Task methods for the guest
-Task Task::current() {
-    unsigned long long id = guest_syscall3(0x78696301, 0, 0, 0);
-    return findTask(id);
-}
-
-Task Task::findTask(usz id) {
-    Task t;
-    // Allocate a TaskState in our arena
-    TaskState* s = static_cast<TaskState*>(malloc(sizeof(TaskState)));
-    if (s) {
-        // Zero out to prevent garbage values in other fields
-        for (size_t i = 0; i < sizeof(TaskState); ++i) {
-            reinterpret_cast<char*>(s)[i] = 0;
-        }
-        s->id = id;
-
-        // Fetch parent ID
-        unsigned long long parentId = guest_syscall3(0x78696302, id, 0, 0);
-        s->parentId = parentId;
-    }
-    t._state = s;
-    return t;
-}
-
-void Task::send(Task& receiver, const String& payload) {
-    if (_state && receiver.valid()) {
-        guest_syscall3(0x78696303, receiver.id(), reinterpret_cast<unsigned long long>(payload.c_str()), payload.size());
-    }
-}
-
-void Task::copyAndMap(usz, usz, usz) {}
-usz Task::translate(usz, usz) { return 0; }
-bool Task::isMapped(usz, usz) const { return false; }
-
-void Task::onInstructionTranslate(const String&, Func<Array<u8>(const Array<u8>&)>) {}
-void Task::forwardInstruction(const String&) {}
-void Task::onSwap(Func<void(usz, usz)>) {}
-void Task::onSwap(usz, usz, Func<void(usz, usz)>) {}
-void Task::onStore(Func<void(usz, usz)>) {}
-void Task::onStore(usz, usz, Func<void(usz, usz)>) {}
-void Task::setMaxChildrenMemory(usz) {}
-usz Task::totalChildrenMemory() const { return 0; }
-
-// Dummy/empty implementations of other methods declared in Task.hpp to satisfy the linker
-void Task::ensureInitialized() {}
-Task Task::root() { return findTask(0); }
-usz Task::taskCount() { return 0; }
-void Task::registerAllocation(u8*, usz, bool) {}
-void Task::retainAllocation(u8*) {}
-void Task::releaseAllocation(u8*) {}
-TaskState* Task::allocTask(usz) { return nullptr; }
-void Task::enqueue(usz) {}
-void Task::dequeue(usz) {}
-void Task::destroyTask(usz) {}
-CoreState* Task::coreState(usz) { return nullptr; }
-TaskState* Task::currentTask(usz) { return nullptr; }
-TaskState* Task::pickNext(usz) { return nullptr; }
-void Task::proposeFrequency(usz) {}
-usz Task::assignCore(usz) { return 0; }
-void Task::resetPeriod(usz) {}
-void Task::OnChangeFrequencyProxy::operator=(Func<void(usz, u32)>) {}
-Task::OnChangeFrequencyProxy::operator bool() const { return false; }
-void Task::OnChangeFrequencyProxy::operator()(usz, u32) const {}
-
-void Task::_execute_impl_raw(int, usz, void (*)(void*), void*) {}
-void Task::reset() {}
-
-} // namespace Task
-
-#else // !defined(COMPILING_FOR_GUEST)
 
 struct GuestMessage {
     unsigned int cmd;
@@ -209,8 +18,10 @@ struct GuestMessage {
 #include "../../include/Task/Interrupt.hpp"
 #include <cstdio>
 #include <cstring>
+#include <cerrno>
 #ifndef _WIN32
 #include <sys/mman.h>
+#include <unistd.h>
 #endif
 
 // Portable microsecond timestamp.
@@ -245,21 +56,30 @@ static void xi_desensitize_on_fetch(TaskState* state, usz dest, usz length);
 Array<TaskState*> Task::_tasks;
 Array<CoreState> Task::_cores;
 usz Task::_nextTaskId = 1;
+usz Task::_nextTid = 1;
 u64 Task::_schedulePeriodUs = 10000;
 u32 Task::_interruptIntervalUs = 1000;
 Func<void(usz, u32)> Task::_onChangeFrequency;
 Array<Task::PhysicalAllocation> Task::_allocations;
 Task* Task::instance = nullptr;
+Array<Pipe*> TaskState::_allPipes;
+usz TaskState::_nextPipeId = 3; // Start at 3 (0=stdin, 1=stdout, 2=stderr reserved)
 
 // -------------------------------------------------------------------------
 // Static: current task
 // -------------------------------------------------------------------------
 
 static thread_local TaskState* tl_currentTask = nullptr;
+static u64 g_host_fs_base = 0;
 thread_local usz xi_last_guest_rbx = 0;
 thread_local usz xi_last_jit_rip = 0;
 thread_local GuestRegs* xi_guest_regs = nullptr;
 thread_local usz tl_currently_rewriting_physical = 0;
+void xi_assign_tid_if_needed(TaskState* state) {
+    if (state && state->tid == 0) {
+        state->tid = Task::_nextTid++;
+    }
+}
 
 
 Task Task::current() {
@@ -283,7 +103,7 @@ TaskState* xi_get_current_task() {
 }
 
 static void xi_aot_rewrite_task_regions(TaskState* state) {
-    if (!state || !state->isIsolated) return;
+    if (!state || (!state->isMemoryIsolated && !state->isInstructionIsolated)) return;
 
     TaskState* prev = xi_get_current_task();
     xi_set_current_task(state);
@@ -293,7 +113,7 @@ static void xi_aot_rewrite_task_regions(TaskState* state) {
         if (r.physical && r.executable) {
             AOTRegion* cached = AOT::findCached(state->aotCache, reinterpret_cast<usz>(r.physical), r.size);
              if (!cached) {
-                AOTResult res = AOT::rewrite(r.physical, r.size, state->regions, r.base);
+                AOTResult res = AOT::rewrite(r.physical, r.size, state->regions, r.base, state);
                 if (res.success && res.patchedCode) {
                     AOTRegion reg;
                     reg.originalAddr = reinterpret_cast<usz>(r.physical);
@@ -319,7 +139,7 @@ static void xi_aot_rewrite_task_regions(TaskState* state) {
 }
 
 static void* xi_translate_to_patched_address(TaskState* state, void* addr) {
-    if (!state || !state->isIsolated || !addr) return addr;
+    if (!state || (!state->isMemoryIsolated && !state->isInstructionIsolated) || !addr) return addr;
     usz target = reinterpret_cast<usz>(addr);
 
     for (usz i = 0; i < state->aotCache.size(); ++i) {
@@ -507,7 +327,7 @@ bool xi_validate_context_before_switch(TaskState* state) {
     u8* ipPtr = reinterpret_cast<u8*>(ip);
 
     // If isolated, rewrite regions and translate context RIP
-    if (state->isIsolated) {
+    if (state->isMemoryIsolated || state->isInstructionIsolated) {
         xi_aot_rewrite_task_regions(state);
         for (usz i = 0; i < state->regions.size(); ++i) {
             MemoryRegion& r = state->regions[i];
@@ -565,7 +385,7 @@ bool xi_validate_context_before_switch(TaskState* state) {
     }
 
     // For non-isolated tasks, walk parent chain and check their regions.
-    if (!state->isIsolated) {
+    if (!state->isMemoryIsolated) {
         usz parentId = state->parentId;
         while (parentId < Task::_tasks.size() && Task::_tasks[parentId]) {
             TaskState* parent = Task::_tasks[parentId];
@@ -622,6 +442,9 @@ static void xi_context_switch_validated(TaskContext* from, TaskState* toState) {
 static void xi_context_switch_validated_core(TaskContext* from, TaskState* toState, CoreState& core) {
     if (!toState) {
         ::printf("[Context Switch] Switching to idle context\n"); ::fflush(stdout);
+#ifndef _WIN32
+        ::syscall(158, 0x1002, g_host_fs_base);
+#endif
         xi_context_switch(from, &core.idleContext);
         return;
     }
@@ -633,12 +456,28 @@ static void xi_context_switch_validated_core(TaskContext* from, TaskState* toSta
         toState->status = TaskStatus::Destroyed;
         core.currentTaskId = 0;
         xi_set_current_task(nullptr);
+#ifndef _WIN32
+        ::syscall(158, 0x1002, g_host_fs_base);
+#endif
         xi_context_switch(from, &core.idleContext);
         return;
     }
     ::printf("[Context Switch] Switching to task %lu, rip=0x%lx\n", (unsigned long)toState->id, (unsigned long)toState->context.rip);
     ::fflush(stdout);
+
+#ifndef _WIN32
+    if (toState->fsBase != 0) {
+        ::syscall(158, 0x1002, toState->fsBase);
+    } else {
+        ::syscall(158, 0x1002, g_host_fs_base);
+    }
+#endif
+
     xi_context_switch(from, &toState->context);
+
+#ifndef _WIN32
+    ::syscall(158, 0x1002, g_host_fs_base);
+#endif
 }
 
 // -------------------------------------------------------------------------
@@ -696,6 +535,11 @@ Task Task::spawn() {
     // Inherit parent's minChildQuotaUs — cascading protection.
     cs->minChildQuotaUs = _state->minChildQuotaUs;
 
+    // Inherit instruction configurations
+    cs->instructionHooks = _state->instructionHooks;
+    cs->instructionTranslators = _state->instructionTranslators;
+    cs->bannedList = _state->bannedList;
+
     _state->childIds.push(cs->id);
 
     // Parent is always implicitly shared to child.
@@ -730,7 +574,7 @@ void Task::resume() {
 
     if (_state->status == TaskStatus::Created) {
         // First start: initialize context.
-        if (_state->isIsolated) {
+        if (_state->isMemoryIsolated || _state->isInstructionIsolated) {
             xi_aot_rewrite_task_regions(_state);
             if (_state->entryFn) {
                 _state->entryFn = (void(*)(void*))xi_translate_to_patched_address(_state, (void*)_state->entryFn);
@@ -848,7 +692,7 @@ void Task::_execute_impl_raw(int mode, usz targetId, void (*fn)(void*), void* ar
     }
 
     if (fn) {
-        if (_state->isIsolated) {
+        if (_state->isMemoryIsolated || _state->isInstructionIsolated) {
             xi_aot_rewrite_task_regions(_state);
             void* origFn = (void*)fn;
             fn = (void(*)(void*))xi_translate_to_patched_address(_state, (void*)fn);
@@ -872,6 +716,7 @@ void Task::_execute_impl_raw(int mode, usz targetId, void (*fn)(void*), void* ar
             if (!xi_validate_context_before_switch(_state)) {
                 std::abort();
             }
+            xi_assign_tid_if_needed(_state);
             _state->status = TaskStatus::Running;
             TaskContext dummyContext;
             xi_context_switch(&dummyContext, &_state->context);
@@ -890,6 +735,7 @@ void Task::_execute_impl_raw(int mode, usz targetId, void (*fn)(void*), void* ar
                         xi_set_current_task(nullptr);
                         xi_context_switch(&_state->context, &core.idleContext);
                     } else {
+                        xi_assign_tid_if_needed(next);
                         next->status = TaskStatus::Running;
                         core.currentTaskId = next->id;
                         xi_set_current_task(next);
@@ -969,6 +815,7 @@ bool Task::isMapped(usz base, usz size) const {
 
 void Task::translate(const MemoryTranslation& mt) {
     if (!_state) return;
+    _state->isMemoryIsolated = true;
     Task caller = Task::current();
     if (caller.valid() && caller.id() != 0) {
         if (_state->parentId != caller.id()) {
@@ -980,6 +827,101 @@ void Task::translate(const MemoryTranslation& mt) {
 
 void Task::copy(usz source, usz dest, usz length) {
     if (!_state || length == 0) return;
+    _state->isMemoryIsolated = true;
+    Task caller = Task::current();
+    if (caller.valid() && caller.id() != 0) {
+        if (_state->parentId != caller.id()) {
+            return; // Blocked: only parent can copy memory.
+        }
+    }
+
+    u8* srcPhys = nullptr;
+    MemoryRegion* srcRegion = nullptr;
+
+    // 1. Try to find source in child's own regions (for intra-task copies)
+    for (usz i = 0; i < _state->regions.size(); ++i) {
+        MemoryRegion& r = _state->regions[i];
+        if (source >= r.base && source < r.base + r.size) {
+            srcPhys = r.physical + (source - r.base);
+            srcRegion = &r;
+            break;
+        }
+    }
+
+    // If dest is within the same region as source, perform immediate copy and split if CoW.
+    if (srcRegion && dest >= srcRegion->base && dest < srcRegion->base + srcRegion->size) {
+        if (dest + length <= srcRegion->base + srcRegion->size) {
+            if (srcRegion->cow) {
+                u8* oldPhys = srcRegion->physical;
+                usz sz = srcRegion->size;
+                u8* newPhys = new u8[sz];
+                std::memcpy(newPhys, oldPhys, sz);
+                Task::registerAllocation(newPhys, sz, false);
+                srcRegion->physical = newPhys;
+                srcRegion->writable = true;
+                srcRegion->cow = false;
+                Task::releaseAllocation(oldPhys);
+                xi_invalidate_sfi_cache();
+                srcPhys = srcRegion->physical + (source - srcRegion->base);
+            }
+            std::memmove(srcRegion->physical + (dest - srcRegion->base), srcPhys, length);
+            return;
+        }
+    }
+
+    // 2. If not found in child, find source physical address in parent/caller space
+    if (!srcPhys) {
+        if (caller.valid() && caller._state) {
+            for (usz i = 0; i < caller._state->regions.size(); ++i) {
+                MemoryRegion& r = caller._state->regions[i];
+                if (source >= r.base && source < r.base + r.size) {
+                    srcPhys = r.physical + (source - r.base);
+                    break;
+                }
+            }
+            if (!srcPhys && caller.id() == 0) {
+                srcPhys = reinterpret_cast<u8*>(source);
+            }
+        } else {
+            srcPhys = reinterpret_cast<u8*>(source);
+        }
+    }
+
+    if (srcPhys) {
+        // Unmap the destination range first
+        unmap(dest, length);
+
+        // Map the source physical memory into dest as read-only, cow = true
+        MemoryRegion region;
+        region.base = dest;
+        region.size = length;
+        region.physical = srcPhys;
+        region.writable = false;
+        region.cow = true;
+        region.owned = true;
+
+        Task::retainAllocation(srcPhys);
+        _state->regions.push(region);
+
+        // Also mark the source region as CoW too!
+        if (caller.valid() && caller._state) {
+            for (usz i = 0; i < caller._state->regions.size(); ++i) {
+                MemoryRegion& r = caller._state->regions[i];
+                if (srcPhys >= r.physical && srcPhys < r.physical + r.size) {
+                    r.writable = false;
+                    r.cow = true;
+                    break;
+                }
+            }
+        }
+
+        xi_invalidate_sfi_cache();
+    }
+}
+
+void Task::physicalCopy(usz source, usz dest, usz length) {
+    if (!_state || length == 0) return;
+    _state->isMemoryIsolated = true;
     Task caller = Task::current();
     if (caller.valid() && caller.id() != 0) {
         if (_state->parentId != caller.id()) {
@@ -989,7 +931,7 @@ void Task::copy(usz source, usz dest, usz length) {
 
     u8* srcPhys = nullptr;
 
-    // 1. Try to find source in child's own regions (for intra-task copies)
+    // 1. Try to find source in child's own regions
     for (usz i = 0; i < _state->regions.size(); ++i) {
         MemoryRegion& r = _state->regions[i];
         if (source >= r.base && source < r.base + r.size) {
@@ -1021,6 +963,18 @@ void Task::copy(usz source, usz dest, usz length) {
     for (usz i = 0; i < _state->regions.size(); ++i) {
         MemoryRegion& r = _state->regions[i];
         if (dest >= r.base && dest < r.base + r.size) {
+            if (r.cow) {
+                u8* oldPhys = r.physical;
+                usz sz = r.size;
+                u8* newPhys = new u8[sz];
+                std::memcpy(newPhys, oldPhys, sz);
+                Task::registerAllocation(newPhys, sz, false);
+                r.physical = newPhys;
+                r.writable = true;
+                r.cow = false;
+                Task::releaseAllocation(oldPhys);
+                xi_invalidate_sfi_cache();
+            }
             dstPhys = r.physical + (dest - r.base);
             break;
         }
@@ -1037,6 +991,9 @@ static void xi_ensure_memory_limits(TaskState* state, usz dest, usz length) {
     Task parent = self.parent();
     if (parent.valid() && parent._state && parent._state->maxChildrenMemory > 0) {
         usz currentTotal = parent.totalChildrenMemory();
+        // ::printf("[xi_ensure_memory_limits] dest=0x%lx, length=%lu, currentTotal=%lu, max=%lu\n",
+        //          (unsigned long)dest, (unsigned long)length, (unsigned long)currentTotal, (unsigned long)parent._state->maxChildrenMemory);
+        // ::fflush(stdout);
         while (currentTotal + length > parent._state->maxChildrenMemory) {
             bool swappedAny = false;
             for (usz c = 0; c < parent._state->childIds.size(); ++c) {
@@ -1134,6 +1091,7 @@ static void xi_ensure_memory_limits(TaskState* state, usz dest, usz length) {
 
 void Task::alloc(usz dest, usz length) {
     if (!_state || length == 0) return;
+    _state->isMemoryIsolated = true;
     xi_ensure_memory_limits(_state, dest, length);
     Task caller = Task::current();
     if (caller.valid() && caller.id() != 0) {
@@ -1144,13 +1102,17 @@ void Task::alloc(usz dest, usz length) {
 
     u8* mem = nullptr;
 #ifndef _WIN32
-    if (_state->isIsolated && dest >= 65536) {
+    if (_state->isMemoryIsolated && dest >= 65536) {
         usz mapAddr = dest & ~4095;
         usz mapLen = (length + 4095) & ~4095;
         void* mapped = ::mmap(reinterpret_cast<void*>(mapAddr), mapLen, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
         if (mapped != MAP_FAILED) {
             mem = static_cast<u8*>(mapped) + (dest - mapAddr);
             Task::registerAllocation(mem, length, true);
+        } else {
+            ::printf("[Task::alloc] mmap FIXED failed: dest=0x%lx, mapAddr=0x%lx, length=%lu, errno=%d\n",
+                     (unsigned long)dest, (unsigned long)mapAddr, (unsigned long)length, errno);
+            ::fflush(stdout);
         }
     }
 #endif
@@ -1203,6 +1165,7 @@ static void xi_desensitize_on_fetch(TaskState* state, usz dest, usz length) {
 
 void Task::map(usz source, usz dest, usz length) {
     if (!_state || length == 0) return;
+    _state->isMemoryIsolated = true;
     xi_ensure_memory_limits(_state, dest, length);
 
     // A task cannot map memory for itself (Task::current() == self is blocked).
@@ -1463,6 +1426,7 @@ usz Task::translate(usz destAddr, usz length) {
 
 void Task::unmap(usz dest, usz length) {
     if (!_state) return;
+    _state->isMemoryIsolated = true;
     Task caller = Task::current();
     std::printf("[Task::unmap] dest=0x%lx, length=0x%lx, caller.id=%d, caller.valid=%d, parentId=%d\n",
                 (long)dest, (long)length, (int)(caller.valid() ? caller.id() : -1), (int)caller.valid(), (int)_state->parentId);
@@ -1529,87 +1493,857 @@ void Task::unmap() {
     // Clear all registered fetch ranges.
     _state->fetchRanges.clear();
 
-    // Invalidate AOT cache since memory layout changed.
-    AOT::destroyCache(_state->aotCache);
+    // Activate memory isolation
+    _state->isMemoryIsolated = true;
+    xi_invalidate_sfi_cache();
+}
 
-    // Activate memory isolation — the task now sees its own address space from 0.
-    _state->isIsolated = true;
+#if defined(__x86_64__) || defined(_M_X64)
+extern "C" __attribute__((noinline)) void xi_context_save(TaskContext* ctx) {
+    __asm__ volatile(
+        "mov %%rbx, 24(%0)\n\t"
+        "mov %%r12, 32(%0)\n\t"
+        "mov %%r13, 40(%0)\n\t"
+        "mov %%r14, 48(%0)\n\t"
+        "mov %%r15, 56(%0)\n\t"
+        "mov %%rbp, 16(%0)\n\t"
+        "leaq 8(%%rsp), %%rax\n\t"
+        "mov %%rax, 8(%0)\n\t"
+        "mov (%%rsp), %%rax\n\t"
+        "mov %%rax, 0(%0)\n\t"
+        :
+        : "r"(ctx)
+        : "rax", "memory"
+    );
+}
+#endif
+
+static usz sys_mmap(usz addr, usz length, int prot, int flags, int fd, usz offset, TaskState* state) {
+    if (length == 0) return (usz)-1;
+    usz dest = addr;
+    if (dest == 0) {
+        if (state->mmapAddr == 0) {
+            state->mmapAddr = 0x40000000;
+        }
+        dest = state->mmapAddr;
+        state->mmapAddr += (length + 4095) & ~4095;
+    }
+    dest = dest & ~4095;
+    length = (length + 4095) & ~4095;
+    
+    Task t(state);
+    t.unmap(dest, length);
+    t.alloc(dest, length);
+    
+    bool writable = (prot & 2) != 0;
+    bool executable = (prot & 4) != 0;
+    for (usz i = 0; i < state->regions.size(); ++i) {
+        MemoryRegion& r = state->regions[i];
+        if (r.base == dest && r.size == length) {
+            r.writable = writable;
+            r.executable = executable;
+            break;
+        }
+    }
+    return dest;
+}
+
+static usz sys_mprotect(usz addr, usz len, int prot, TaskState* state) {
+    bool writable = (prot & 2) != 0;
+    bool executable = (prot & 4) != 0;
+    
+    usz start = addr;
+    usz end = addr + len;
+    
+    for (usz i = 0; i < state->regions.size(); ++i) {
+        MemoryRegion& r = state->regions[i];
+        if (r.base < end && r.base + r.size > start) {
+            if (start > r.base) {
+                MemoryRegion left = r;
+                left.size = start - r.base;
+                Task::retainAllocation(r.physical);
+                
+                r.physical += (start - r.base);
+                r.size -= (start - r.base);
+                r.base = start;
+                
+                state->regions.push(left);
+                i = 0;
+                continue;
+            }
+            if (end < r.base + r.size) {
+                MemoryRegion right = r;
+                right.base = end;
+                right.size = (r.base + r.size) - end;
+                right.physical += (end - r.base);
+                Task::retainAllocation(r.physical);
+                
+                r.size = end - r.base;
+                
+                state->regions.push(right);
+                i = 0;
+                continue;
+            }
+            r.writable = writable;
+            r.executable = executable;
+        }
+    }
+    
+    xi_invalidate_sfi_cache();
+    return 0;
+}
+
+static usz sys_fork(TaskState* state) {
+    if (!xi_guest_regs) return (usz)-1;
+
+    Task parent(state);
+    Task child = parent.spawn();
+    if (!child.valid()) {
+        return (usz)-1;
+    }
+    usz child_id = child.id();
+
+    // Copy memory regions with CoW
+    for (usz i = 0; i < state->regions.size(); ++i) {
+        MemoryRegion& r = state->regions[i];
+        MemoryRegion childRegion = r;
+        childRegion.writable = false;
+        childRegion.cow = true;
+        childRegion.owned = true;
+        Task::retainAllocation(r.physical);
+        child._state->regions.push(childRegion);
+        
+        r.writable = false;
+        r.cow = true;
+    }
+
     xi_invalidate_sfi_cache();
 
-    // Register default syscall hypercall handler for isolated guest tasks
-    onInstruction("syscall", [state = _state]() {
-        if (!xi_guest_regs) return;
+    // Copy stack
+    child._state->stackSize = state->stackSize;
+    child._state->stack = new u8[state->stackSize];
+    child._state->stackOwned = true;
+    Task::registerAllocation(child._state->stack, child._state->stackSize, false);
+    std::memcpy(child._state->stack, state->stack, state->stackSize);
 
-        u64 rax = xi_guest_regs->rax;
-        if (rax >= 0x78696301 && rax <= 0x78696304) {
-            if (rax == 0x78696301) {
-                // Task::current()
-                xi_guest_regs->rax = state->id;
-            } else if (rax == 0x78696302) {
-                // Task::findTask(id)
-                usz id = xi_guest_regs->rdi;
-                Task t = Task::findTask(id);
-                xi_guest_regs->rax = t.valid() ? t.parentId() : 0;
-            } else if (rax == 0x78696303) {
-                // Task::send(receiverId, payloadPtr, payloadLen)
-                usz receiverId = xi_guest_regs->rdi;
-                usz payloadVirt = xi_guest_regs->rsi;
-                usz payloadLen = xi_guest_regs->rdx;
+    // Save parent context first
+#if defined(__x86_64__) || defined(_M_X64)
+    xi_context_save(&state->context);
+#endif
 
-                char* payloadPhys = nullptr;
-                for (usz i = 0; i < state->regions.size(); ++i) {
-                    MemoryRegion& r = state->regions[i];
-                    if (payloadVirt >= r.base && payloadVirt + payloadLen <= r.base + r.size) {
-                        payloadPhys = reinterpret_cast<char*>(r.physical + (payloadVirt - r.base));
-                        break;
-                    }
-                }
-                if (!payloadPhys && state->stack &&
-                    payloadVirt >= reinterpret_cast<usz>(state->stack) &&
-                    payloadVirt + payloadLen <= reinterpret_cast<usz>(state->stack) + state->stackSize) {
-                    payloadPhys = reinterpret_cast<char*>(payloadVirt);
-                }
+    TaskState* cur = xi_get_current_task();
+    if (cur && cur->id == child_id) {
+        // Child execution path
+        usz regsOffset = reinterpret_cast<usz>(xi_guest_regs) - reinterpret_cast<usz>(state->stack);
+        xi_guest_regs = reinterpret_cast<GuestRegs*>(cur->stack + regsOffset);
+        if (xi_guest_regs) {
+            xi_guest_regs->rax = 0;
+        }
+        return 0;
+    }
 
-                if (payloadPhys) {
-                    String payload(reinterpret_cast<const u8*>(payloadPhys), payloadLen);
-                    Task receiver = Task::findTask(receiverId);
-                    if (receiver.valid()) {
-                        Task sender(state);
-                        sender.send(receiver, payload);
-                        xi_guest_regs->rax = 0; // success
-                    } else {
-                        xi_guest_regs->rax = 1; // receiver invalid
-                    }
-                } else {
-                    xi_guest_regs->rax = 2; // invalid payload pointer
-                }
-            } else if (rax == 0x78696304) {
-                // Exit
-                state->status = TaskStatus::Finished;
-                xi_guest_regs->rax = 0;
-                yield();
+    // Parent execution path
+    child._state->context = state->context;
+    usz stackOffset = reinterpret_cast<usz>(child._state->stack) - reinterpret_cast<usz>(state->stack);
+    child._state->context.rsp += stackOffset;
+    child._state->context.rbp += stackOffset;
+
+    usz regsOffset = reinterpret_cast<usz>(xi_guest_regs) - reinterpret_cast<usz>(state->stack);
+    GuestRegs* child_regs = reinterpret_cast<GuestRegs*>(child._state->stack + regsOffset);
+    child_regs->rax = 0;
+
+    child._state->status = TaskStatus::Ready;
+    Task::enqueue(child_id);
+
+    return child_id;
+}
+
+static usz sys_clone(usz flags, usz child_stack, TaskState* state) {
+    if (!xi_guest_regs) return (usz)-1;
+
+    if (child_stack == 0) {
+        return sys_fork(state);
+    }
+
+    Task parent(state);
+    Task child = parent.spawn();
+    if (!child.valid()) return (usz)-1;
+    usz child_id = child.id();
+
+    // Copy memory regions with CoW
+    for (usz i = 0; i < state->regions.size(); ++i) {
+        MemoryRegion& r = state->regions[i];
+        MemoryRegion childRegion = r;
+        childRegion.writable = false;
+        childRegion.cow = true;
+        childRegion.owned = true;
+        Task::retainAllocation(r.physical);
+        child._state->regions.push(childRegion);
+        r.writable = false;
+        r.cow = true;
+    }
+
+    xi_invalidate_sfi_cache();
+
+    // Copy stack
+    child._state->stackSize = state->stackSize;
+    child._state->stack = new u8[state->stackSize];
+    child._state->stackOwned = true;
+    Task::registerAllocation(child._state->stack, child._state->stackSize, false);
+    std::memcpy(child._state->stack, state->stack, state->stackSize);
+
+    // Save parent context
+#if defined(__x86_64__) || defined(_M_X64)
+    xi_context_save(&state->context);
+#endif
+
+    TaskState* cur = xi_get_current_task();
+    if (cur && cur->id == child_id) {
+        usz child_stack_phys = child.translate(child_stack);
+        if (child_stack_phys) {
+            xi_guest_regs = reinterpret_cast<GuestRegs*>(child_stack_phys - sizeof(GuestRegs));
+        } else {
+            usz regsOffset = reinterpret_cast<usz>(xi_guest_regs) - reinterpret_cast<usz>(state->stack);
+            xi_guest_regs = reinterpret_cast<GuestRegs*>(cur->stack + regsOffset);
+        }
+        if (xi_guest_regs) {
+            xi_guest_regs->rax = 0;
+        }
+        return 0;
+    }
+
+    // Parent path
+    child._state->context = state->context;
+    usz child_stack_phys = child.translate(child_stack);
+    if (child_stack_phys) {
+        child_stack_phys -= sizeof(GuestRegs);
+        std::memcpy(reinterpret_cast<void*>(child_stack_phys), xi_guest_regs, sizeof(GuestRegs));
+        GuestRegs* child_regs = reinterpret_cast<GuestRegs*>(child_stack_phys);
+        child_regs->rax = 0;
+        child._state->context.rsp = child_stack_phys;
+    } else {
+        usz stackOffset = reinterpret_cast<usz>(child._state->stack) - reinterpret_cast<usz>(state->stack);
+        child._state->context.rsp += stackOffset;
+        child._state->context.rbp += stackOffset;
+        usz regsOffset = reinterpret_cast<usz>(xi_guest_regs) - reinterpret_cast<usz>(state->stack);
+        GuestRegs* child_regs = reinterpret_cast<GuestRegs*>(child._state->stack + regsOffset);
+        child_regs->rax = 0;
+    }
+
+    child._state->status = TaskStatus::Ready;
+    Task::enqueue(child_id);
+
+    return child_id;
+}
+
+static void sys_exit(int code, TaskState* state) {
+    state->status = TaskStatus::Finished;
+    if (state->returnValue) {
+        delete[] static_cast<u8*>(state->returnValue);
+    }
+    state->returnValueSize = sizeof(int);
+    state->returnValue = new u8[sizeof(int)];
+    std::memcpy(state->returnValue, &code, sizeof(int));
+    Task::yield();
+}
+
+static usz translate_guest_addr(TaskState* state, usz addr, usz length) {
+    if (!state) return 0;
+    if (state->stack) {
+        usz stack_start = reinterpret_cast<usz>(state->stack);
+        usz stack_end = stack_start + state->stackSize;
+        if (addr >= stack_start && addr < stack_end) {
+            if (addr + length >= addr && addr + length <= stack_end) {
+                return addr;
             }
-            return;
         }
+    }
+    Task t(state);
+    usz phys = t.translate(addr, length);
+    if (!phys && !state->isMemoryIsolated) {
+        phys = addr;
+    }
+    return phys;
+}
 
-        // Custom system call forwarding
-        if (state->customSyscallCallback) {
-            state->customSyscallCallback();
-            return;
-        }
+extern "C" void xi_emulate_syscall(TaskState* state, GuestRegs* regs) {
+    if (!state || !regs) return;
 
-        // Default: if syscall is banned in hook list, crash/abort
-        bool isBanned = false;
-        for (usz i = 0; i < state->instructionHooks.size(); ++i) {
-            if (state->instructionHooks[i].name == "syscall") {
-                isBanned = state->instructionHooks[i].banned;
+    u64 rax = regs->rax;
+
+    // 1. Check if there is a custom hook or sub-handler
+    TaskState* curr = state;
+    Func<void()> cb;
+    bool hasHook = false;
+    while (curr) {
+        std::printf("[xi_emulate_syscall] curr->id=%lu, hooks.size=%lu\n", (unsigned long)curr->id, (unsigned long)curr->instructionHooks.size());
+        std::fflush(stdout);
+        String subName = "syscall:";
+        subName += String(rax);
+        for (usz i = 0; i < curr->instructionHooks.size(); ++i) {
+            const auto& hook = curr->instructionHooks[i];
+            std::printf("  hook name=%s, callback.isValid=%d, banned=%d\n", hook.name.c_str(), (int)hook.callback.isValid(), (int)hook.banned);
+            std::fflush(stdout);
+            if (hook.name == subName) {
+                if (hook.callback.isValid()) {
+                    cb = hook.callback;
+                    hasHook = true;
+                }
                 break;
             }
         }
-        if (isBanned) {
-            std::abort();
+        if (hasHook) break;
+
+        for (usz i = 0; i < curr->instructionHooks.size(); ++i) {
+            const auto& hook = curr->instructionHooks[i];
+            if (hook.name == "syscall") {
+                if (hook.callback.isValid()) {
+                    cb = hook.callback;
+                    hasHook = true;
+                }
+                break;
+            }
         }
-    });
+        if (hasHook) break;
+
+        if (curr->parentId < Task::_tasks.size() && Task::_tasks[curr->parentId] && curr->id != 0) {
+            curr = Task::_tasks[curr->parentId];
+        } else {
+            curr = nullptr;
+        }
+    }
+
+    if (hasHook) {
+        if (cb.isValid()) {
+            GuestRegs* prevRegs = xi_guest_regs;
+            xi_guest_regs = regs;
+            cb();
+            xi_guest_regs = prevRegs;
+        }
+        return;
+    }
+
+    // 1.5. Emulate custom magic guest system calls
+    if (rax == 0x78696301) { // get task id
+        regs->rax = state->id;
+        return;
+    }
+    if (rax == 0x78696302) { // get parent id
+        regs->rax = state->parentId;
+        return;
+    }
+    if (rax == 0x78696304) { // exit task
+        sys_exit((int)regs->rdi, state);
+        return;
+    }
+    if (rax == 0x78696303) { // open pipe
+        Task t(state);
+        regs->rax = t.openPipe();
+        return;
+    }
+    if (rax == 0x78696305) { // log
+        usz guest_addr = regs->rdi;
+        usz size = regs->rsi;
+        Task t(state);
+        usz phys = t.translate(guest_addr, size);
+        if (phys) {
+            u8* buf = new u8[size];
+            std::memcpy(buf, reinterpret_cast<void*>(phys), size);
+            LogEntry entry;
+            entry.ptr = buf;
+            entry.size = size;
+            state->log.push(entry);
+        }
+        regs->rax = 0;
+        return;
+    }
+
+    // 2. Emulate standard Linux system calls natively
+    // -- Process identity syscalls --
+    if (rax == 39) { // getpid
+        regs->rax = state->id;
+        return;
+    }
+    if (rax == 110) { // getppid
+        regs->rax = state->parentId;
+        return;
+    }
+    if (rax == 186) { // gettid
+        xi_assign_tid_if_needed(state);
+        regs->rax = state->tid;
+        return;
+    }
+    if (rax == 102 || rax == 104) { // getuid / getgid -> return task id
+        regs->rax = state->id;
+        return;
+    }
+    if (rax == 107 || rax == 108) { // geteuid / getegid -> return task id
+        regs->rax = state->id;
+        return;
+    }
+    if (rax == 218) { // set_tid_address -> return tid
+        xi_assign_tid_if_needed(state);
+        regs->rax = state->tid;
+        return;
+    }
+    if (rax == 158) { // arch_prctl
+        int code = (int)regs->rdi;
+        usz addr = regs->rsi;
+        if (code == 0x1002) { // ARCH_SET_FS
+            state->fsBase = addr;
+            regs->rax = 0;
+            return;
+        } else if (code == 0x1001) { // ARCH_SET_GS
+            regs->rax = 0;
+            return;
+        } else if (code == 0x1003) { // ARCH_GET_FS
+            Task t(state);
+            usz phys = t.translate(addr, sizeof(usz));
+            if (phys) {
+                *reinterpret_cast<usz*>(phys) = state->fsBase;
+                regs->rax = 0;
+            } else {
+                regs->rax = (usz)-14; // -EFAULT
+            }
+            return;
+        }
+        regs->rax = (usz)-22; // -EINVAL
+        return;
+    }
+
+    // -- Memory syscalls --
+    if (rax == 12) { // brk
+        usz new_brk = regs->rdi;
+        if (state->brkAddr == 0) {
+            usz highest = 0x20000000;
+            for (usz i = 0; i < state->regions.size(); ++i) {
+                usz end = state->regions[i].base + state->regions[i].size;
+                if (end > highest) highest = end;
+            }
+            state->brkAddr = (highest + 4095) & ~4095;
+        }
+        if (new_brk == 0 || new_brk < state->brkAddr) {
+            regs->rax = state->brkAddr;
+        } else {
+            Task t(state);
+            t.alloc(state->brkAddr, new_brk - state->brkAddr);
+            state->brkAddr = new_brk;
+            regs->rax = new_brk;
+        }
+        return;
+    }
+    if (rax == 9) { // mmap
+        usz addr = regs->rdi;
+        usz length = regs->rsi;
+        int prot = (int)regs->rdx;
+        int flags = (int)regs->r10;
+        int fd = (int)regs->r8;
+        usz offset = regs->r9;
+        regs->rax = sys_mmap(addr, length, prot, flags, fd, offset, state);
+        return;
+    }
+    if (rax == 11) { // munmap
+        usz addr = regs->rdi;
+        usz length = regs->rsi;
+        Task(state).unmap(addr, length);
+        regs->rax = 0;
+        return;
+    }
+    if (rax == 10) { // mprotect
+        usz addr = regs->rdi;
+        usz length = regs->rsi;
+        int prot = (int)regs->rdx;
+        regs->rax = sys_mprotect(addr, length, prot, state);
+        return;
+    }
+    if (rax == 28) { // madvise - silently succeed
+        regs->rax = 0;
+        return;
+    }
+    if (rax == 25) { // mremap
+        usz old_addr = regs->rdi;
+        usz old_size = regs->rsi;
+        usz new_size = regs->rdx;
+        // Simple implementation: alloc new, copy, unmap old
+        Task t(state);
+        usz new_addr = sys_mmap(0, new_size, 3 /* PROT_READ|PROT_WRITE */, 0x22 /* MAP_PRIVATE|MAP_ANON */, -1, 0, state);
+        if (new_addr != (usz)-1) {
+            // Copy old data
+            usz copy_size = old_size < new_size ? old_size : new_size;
+            usz src_phys = t.translate(old_addr, copy_size);
+            usz dst_phys = t.translate(new_addr, copy_size);
+            if (src_phys && dst_phys) {
+                std::memcpy(reinterpret_cast<void*>(dst_phys), reinterpret_cast<void*>(src_phys), copy_size);
+            }
+            t.unmap(old_addr, old_size);
+        }
+        regs->rax = new_addr;
+        return;
+    }
+
+    // -- Process lifecycle syscalls --
+    if (rax == 57) { // fork
+        regs->rax = sys_fork(state);
+        return;
+    }
+    if (rax == 56) { // clone
+        usz flags = regs->rdi;
+        usz child_stack = regs->rsi;
+        regs->rax = sys_clone(flags, child_stack, state);
+        return;
+    }
+    if (rax == 60 || rax == 231) { // exit / exit_group
+        sys_exit((int)regs->rdi, state);
+        return;
+    }
+    if (rax == 61) { // wait4
+        // Simple: check if any child is finished
+        regs->rax = (usz)-1; // ECHILD by default
+        for (usz i = 0; i < state->childIds.size(); ++i) {
+            usz cid = state->childIds[i];
+            if (cid < Task::_tasks.size() && Task::_tasks[cid]) {
+                TaskState* child = Task::_tasks[cid];
+                if (child->status == TaskStatus::Finished || child->status == TaskStatus::Destroyed) {
+                    regs->rax = cid;
+                    break;
+                }
+            }
+        }
+        return;
+    }
+
+    // -- Pipe / File descriptor syscalls --
+    if (rax == 22) { // pipe (int pipefd[2])
+        Task t(state);
+        usz pipeId = t.openPipe();
+        usz pipefd_addr = regs->rdi;
+        usz phys = translate_guest_addr(state, pipefd_addr, 8);
+        if (phys) {
+            reinterpret_cast<int*>(phys)[0] = (int)pipeId; // read end
+            reinterpret_cast<int*>(phys)[1] = (int)pipeId; // write end (same pipe, bidirectional)
+        }
+        regs->rax = 0;
+        return;
+    }
+    if (rax == 293) { // pipe2 (int pipefd[2], int flags)
+        Task t(state);
+        usz pipeId = t.openPipe();
+        int sysFlags = (int)regs->rsi;
+        Pipe* pipe = t.getPipe(pipeId);
+        if (pipe && (sysFlags & 0x800)) { // O_NONBLOCK
+            pipe->setBlocking(false);
+        }
+        if (pipe && (sysFlags & 0x80000)) { // O_CLOEXEC
+            pipe->flags |= 0x80000;
+        }
+        usz pipefd_addr = regs->rdi;
+        usz phys = translate_guest_addr(state, pipefd_addr, 8);
+        if (phys) {
+            reinterpret_cast<int*>(phys)[0] = (int)pipeId;
+            reinterpret_cast<int*>(phys)[1] = (int)pipeId;
+        }
+        regs->rax = 0;
+        return;
+    }
+    if (rax == 0) { // read(fd, buf, count)
+        int fd = (int)regs->rdi;
+        usz buf_addr = regs->rsi;
+        usz count = regs->rdx;
+        Task t(state);
+        Pipe* pipe = t.getPipe((usz)fd);
+        if (pipe) {
+            usz buf_phys = translate_guest_addr(state, buf_addr, count);
+            if (buf_phys) {
+                regs->rax = t.read(pipe, reinterpret_cast<void*>(buf_phys), count);
+            } else {
+                regs->rax = (u64)-14; // -EFAULT
+            }
+            return;
+        }
+        if (fd == 0 || fd == 1 || fd == 2) {
+            usz buf_phys = translate_guest_addr(state, buf_addr, count);
+            if (buf_phys) {
+                regs->rax = (u64)::read(fd, reinterpret_cast<void*>(buf_phys), count);
+            } else {
+                regs->rax = (u64)-14; // -EFAULT
+            }
+            return;
+        }
+        // Fall through to native syscall for real fds
+    }
+    if (rax == 1) { // write(fd, buf, count)
+        int fd = (int)regs->rdi;
+        usz buf_addr = regs->rsi;
+        usz count = regs->rdx;
+        Task t(state);
+        Pipe* pipe = t.getPipe((usz)fd);
+        if (pipe && !pipe->closed) {
+            usz buf_phys = translate_guest_addr(state, buf_addr, count);
+            if (buf_phys) {
+                regs->rax = t.write(pipe, reinterpret_cast<void*>(buf_phys), count);
+            } else {
+                regs->rax = (u64)-14; // -EFAULT
+            }
+            return;
+        }
+        if (fd == 0 || fd == 1 || fd == 2) {
+            usz buf_phys = translate_guest_addr(state, buf_addr, count);
+            if (buf_phys) {
+                regs->rax = (u64)::write(fd, reinterpret_cast<void*>(buf_phys), count);
+            } else {
+                regs->rax = (u64)-14; // -EFAULT
+            }
+            return;
+        }
+        // Fall through to native syscall for real fds (stdout, stderr)
+    }
+    if (rax == 3) { // close(fd)
+        int fd = (int)regs->rdi;
+        Task t(state);
+        Pipe* pipe = t.getPipe((usz)fd);
+        if (pipe) {
+            t.closePipe((usz)fd);
+            regs->rax = 0;
+            return;
+        }
+        // Fall through for real fds
+        regs->rax = 0;
+        return;
+    }
+    if (rax == 8) { // lseek(fd, offset, whence)
+        int fd = (int)regs->rdi;
+        long offset = (long)regs->rsi;
+        int whence = (int)regs->rdx;
+        Task t(state);
+        Pipe* pipe = t.getPipe((usz)fd);
+        if (pipe) {
+            switch (whence) {
+                case 0: // SEEK_SET
+                    t.seek(pipe, (usz)offset);
+                    regs->rax = (u64)pipe->position;
+                    break;
+                case 1: // SEEK_CUR
+                    t.seek(pipe, pipe->position + (usz)offset);
+                    regs->rax = (u64)pipe->position;
+                    break;
+                case 2: // SEEK_END
+                    t.seek(pipe, pipe->writePosition + (usz)offset);
+                    regs->rax = (u64)pipe->position;
+                    break;
+                default:
+                    regs->rax = (u64)-22; // -EINVAL
+            }
+            return;
+        }
+        // Fall through for real fds
+    }
+    if (rax == 17) { // pread64(fd, buf, count, offset)
+        int fd = (int)regs->rdi;
+        usz buf_addr = regs->rsi;
+        usz count = regs->rdx;
+        usz offset = regs->r10;
+        Task t(state);
+        Pipe* pipe = t.getPipe((usz)fd);
+        if (pipe) {
+            usz buf_phys = translate_guest_addr(state, buf_addr, count);
+            if (buf_phys) {
+                regs->rax = t.pread(pipe, reinterpret_cast<void*>(buf_phys), count, offset);
+            } else {
+                regs->rax = (u64)-14; // -EFAULT
+            }
+            return;
+        }
+    }
+    if (rax == 18) { // pwrite64(fd, buf, count, offset)
+        int fd = (int)regs->rdi;
+        usz buf_addr = regs->rsi;
+        usz count = regs->rdx;
+        usz offset = regs->r10;
+        Task t(state);
+        Pipe* pipe = t.getPipe((usz)fd);
+        if (pipe) {
+            usz buf_phys = translate_guest_addr(state, buf_addr, count);
+            if (buf_phys) {
+                regs->rax = t.pwrite(pipe, reinterpret_cast<void*>(buf_phys), count, offset);
+            } else {
+                regs->rax = (u64)-14; // -EFAULT
+            }
+            return;
+        }
+    }
+    if (rax == 32) { // dup(oldfd)
+        Task t(state);
+        usz result = t.dup((usz)regs->rdi);
+        regs->rax = result ? result : (u64)-9; // -EBADF
+        return;
+    }
+    if (rax == 33) { // dup2(oldfd, newfd)
+        Task t(state);
+        usz result = t.dup2((usz)regs->rdi, (usz)regs->rsi);
+        regs->rax = result ? result : (u64)-9;
+        return;
+    }
+    if (rax == 292) { // dup3(oldfd, newfd, flags)
+        Task t(state);
+        usz result = t.dup3((usz)regs->rdi, (usz)regs->rsi, (int)regs->rdx);
+        regs->rax = result ? result : (u64)-9;
+        return;
+    }
+    if (rax == 72) { // fcntl(fd, cmd, arg)
+        int fd = (int)regs->rdi;
+        int cmd = (int)regs->rsi;
+        long arg = (long)regs->rdx;
+        Task t(state);
+        Pipe* pipe = t.getPipe((usz)fd);
+        if (pipe) {
+            regs->rax = (u64)t.fcntl(pipe, cmd, arg);
+            return;
+        }
+        // Fall through for real fds
+    }
+    if (rax == 5) { // fstat(fd, statbuf)
+        int fd = (int)regs->rdi;
+        Task t(state);
+        Pipe* pipe = t.getPipe((usz)fd);
+        if (pipe) {
+            // Fill in a minimal stat struct for a pipe
+            usz statbuf_addr = regs->rsi;
+            usz phys = translate_guest_addr(state, statbuf_addr, 144); // sizeof(struct stat) on x86_64
+            if (phys) {
+                std::memset(reinterpret_cast<void*>(phys), 0, 144);
+                // st_mode = S_IFIFO | 0600
+                reinterpret_cast<u32*>(phys + 24)[0] = 0010600;
+                // st_size = bytes available
+                reinterpret_cast<u64*>(phys + 48)[0] = pipe->writePosition;
+                // st_blksize = 4096
+                reinterpret_cast<u64*>(phys + 56)[0] = 4096;
+            }
+            regs->rax = 0;
+            return;
+        }
+    }
+    // -- select/poll/epoll syscalls --
+    if (rax == 23) { // select(nfds, readfds, writefds, exceptfds, timeout)
+        // Simplified: check if any pipe fds in readfds have data
+        int nfds = (int)regs->rdi;
+        usz readfds_addr = regs->rsi;
+        Task t(state);
+        int ready = 0;
+        if (readfds_addr) {
+            usz phys = translate_guest_addr(state, readfds_addr, (usz)((nfds + 7) / 8));
+            if (phys) {
+                u8* fds = reinterpret_cast<u8*>(phys);
+                // Clear the set, then re-set fds that are ready
+                u8 resultSet[128] = {};
+                for (int fd = 0; fd < nfds && fd < 1024; ++fd) {
+                    if (fds[fd / 8] & (1 << (fd % 8))) {
+                        Pipe* pipe = t.getPipe((usz)fd);
+                        if (pipe && t.poll(pipe)) {
+                            resultSet[fd / 8] |= (1 << (fd % 8));
+                            ready++;
+                        }
+                    }
+                }
+                std::memcpy(fds, resultSet, (usz)((nfds + 7) / 8));
+            }
+        }
+        regs->rax = (u64)ready;
+        return;
+    }
+    if (rax == 7) { // poll(fds, nfds, timeout)
+        // struct pollfd { int fd; short events; short revents; }
+        usz fds_addr = regs->rdi;
+        usz nfds = regs->rsi;
+        Task t(state);
+        int ready = 0;
+        usz phys = translate_guest_addr(state, fds_addr, nfds * 8);
+        if (phys) {
+            for (usz i = 0; i < nfds; ++i) {
+                int* pollfd = reinterpret_cast<int*>(phys + i * 8);
+                int fd = pollfd[0];
+                short events = reinterpret_cast<short*>(phys + i * 8 + 4)[0];
+                short revents = 0;
+                Pipe* pipe = t.getPipe((usz)fd);
+                if (pipe) {
+                    if ((events & 1) && t.poll(pipe)) { // POLLIN
+                        revents |= 1;
+                    }
+                    if ((events & 4) && !pipe->closed) { // POLLOUT
+                        revents |= 4;
+                    }
+                    if (pipe->closed) {
+                        revents |= 0x10; // POLLHUP
+                    }
+                }
+                reinterpret_cast<short*>(phys + i * 8 + 6)[0] = revents;
+                if (revents) ready++;
+            }
+        }
+        regs->rax = (u64)ready;
+        return;
+    }
+    if (rax == 291) { // epoll_create1(flags)
+        // Create a dummy epoll fd (it's just a pipe internally)
+        Task t(state);
+        usz epfd = t.openPipe();
+        regs->rax = epfd;
+        return;
+    }
+    if (rax == 213) { // epoll_create(size) -- deprecated, same as epoll_create1(0)
+        Task t(state);
+        usz epfd = t.openPipe();
+        regs->rax = epfd;
+        return;
+    }
+    if (rax == 233) { // epoll_ctl(epfd, op, fd, event)
+        // We accept but largely no-op this - our poll is simpler
+        regs->rax = 0;
+        return;
+    }
+    if (rax == 232) { // epoll_wait(epfd, events, maxevents, timeout)
+        // Simplified: check all task pipes for data
+        Task t(state);
+        usz events_addr = regs->rsi;
+        int maxevents = (int)regs->rdx;
+        int ready = 0;
+        // Check all owned pipes for data
+        if (state->pipes.size() > 0 && events_addr) {
+            usz phys = translate_guest_addr(state, events_addr, (usz)(maxevents * 12)); // struct epoll_event = 12 bytes
+            if (phys) {
+                for (usz i = 0; i < state->pipes.size() && ready < maxevents; ++i) {
+                    Pipe* pipe = state->pipes[i];
+                    if (pipe && t.poll(pipe)) {
+                        u32* ev = reinterpret_cast<u32*>(phys + (usz)ready * 12);
+                        ev[0] = 1; // EPOLLIN
+                        ev[1] = (u32)pipe->id;
+                        ev[2] = 0;
+                        ready++;
+                    }
+                }
+            }
+        }
+        regs->rax = (u64)ready;
+        return;
+    }
+
+    // 3. Fallback: run natively on CPU
+#if defined(__x86_64__) || defined(_M_X64)
+    register u64 r10 asm("r10") = regs->r10;
+    register u64 r8  asm("r8")  = regs->r8;
+    register u64 r9  asm("r9")  = regs->r9;
+    register u64 sys_rax asm("rax") = regs->rax;
+    register u64 rdi asm("rdi") = regs->rdi;
+    register u64 rsi asm("rsi") = regs->rsi;
+    register u64 rdx asm("rdx") = regs->rdx;
+
+    __asm__ volatile(
+        "syscall"
+        : "+r"(sys_rax)
+        : "r"(rdi), "r"(rsi), "r"(rdx), "r"(r10), "r"(r8), "r"(r9)
+        : "rcx", "r11", "memory"
+    );
+    regs->rax = sys_rax;
+#endif
 }
 
 
@@ -1617,54 +2351,237 @@ void Task::unmap() {
 // IPC
 // -------------------------------------------------------------------------
 
-void Task::send(Task& receiver, const String& payload) {
-    if (!_state || !receiver._state) return;
+usz translate_address_to_task(Task sourceTask, usz sourceAddr, usz size, Task targetTask) {
+    if (!sourceTask.valid() || !targetTask.valid()) return 0;
+    
+    // 1. Get physical address of sourceAddr in sourceTask's memory space
+    usz phys = 0;
+    if (sourceTask.id() == 0 || !sourceTask._state->isMemoryIsolated) {
+        phys = sourceAddr;
+    } else {
+        phys = sourceTask.translate(sourceAddr, size);
+    }
+    if (!phys) return 0;
 
-    Task caller = Task::current();
-    if (caller.valid() && caller.id() != 0) {
-        bool allowed = false;
-        if (receiver.id() == caller.id() ||
-            receiver.parentId() == caller.id() ||
-            receiver.id() == caller.parentId() ||
-            receiver.parentId() == caller.parentId()) {
-            allowed = true;
-        } else {
-            for (usz i = 0; i < caller._state->sharedIds.size(); ++i) {
-                if (caller._state->sharedIds[i] == receiver.id()) {
-                    allowed = true;
-                    break;
+    // 2. Find if this physical address is already mapped in targetTask
+    if (targetTask.id() == 0 || !targetTask._state->isMemoryIsolated) {
+        return phys;
+    }
+    
+    for (usz i = 0; i < targetTask._state->regions.size(); ++i) {
+        const MemoryRegion& r = targetTask._state->regions[i];
+        if (r.physical) {
+            usz physStart = reinterpret_cast<usz>(r.physical);
+            if (phys >= physStart && phys < physStart + r.size) {
+                if (size > 0 && phys + size > physStart + r.size) {
+                    continue;
                 }
+                return r.base + (phys - physStart);
             }
         }
-        if (!allowed) {
-            return; // Blocked: receiver escapes the container.
+    }
+    return 0;
+}
+
+void Task::log(void* ptr, usz size) {
+    if (!_state) return;
+    LogEntry entry;
+    entry.ptr = ptr;
+    entry.size = size;
+    _state->log.push(entry);
+}
+
+LogEntry Task::getLogEntry(usz index, Task reader) const {
+    if (!_state || index >= _state->log.size()) return LogEntry{nullptr, 0};
+    const LogEntry& original = _state->log[index];
+
+    // Check if reader is parent or grandparent of this task
+    bool is_ancestor = false;
+    usz checkId = _state->id;
+    while (true) {
+        if (checkId == reader.id()) {
+            is_ancestor = true;
+            break;
         }
-    }
-
-    TaskState* currentTaskState = xi_get_current_task();
-    usz senderId = currentTaskState ? currentTaskState->id : _state->id;
-
-    Message msg;
-    msg.senderId = senderId;
-    msg.payload = payload;
-    receiver._state->inbox.push(msg);
-
-    if (receiver._state->status == TaskStatus::Paused && receiver._state->isWaitingForMessage) {
-        receiver._state->isWaitingForMessage = false;
-        receiver._state->status = TaskStatus::Ready;
-    }
-
-    // Sender is automatically shared to receiver.
-    bool alreadyShared = false;
-    for (usz i = 0; i < receiver._state->sharedIds.size(); ++i) {
-        if (receiver._state->sharedIds[i] == senderId) {
-            alreadyShared = true;
+        if (checkId == 0) {
+            break;
+        }
+        Task parent = Task::findTask(checkId);
+        if (parent.valid()) {
+            checkId = parent._state->parentId;
+        } else {
             break;
         }
     }
-    if (!alreadyShared) {
-        receiver._state->sharedIds.push(senderId);
+
+    void* translated_ptr = nullptr;
+    if (is_ancestor) {
+        // Case 1: parent/grandparent -> just translation
+        usz translated = translate_address_to_task(*this, reinterpret_cast<usz>(original.ptr), original.size, reader);
+        if (translated) {
+            translated_ptr = reinterpret_cast<void*>(translated);
+        } else {
+            usz phys = 0;
+            if (!_state->isMemoryIsolated) {
+                phys = reinterpret_cast<usz>(original.ptr);
+            } else {
+                phys = translate(reinterpret_cast<usz>(original.ptr), original.size);
+                if (!phys) {
+                    phys = reinterpret_cast<usz>(original.ptr);
+                }
+            }
+            if (phys) {
+                if (!reader._state->isMemoryIsolated) {
+                    translated_ptr = reinterpret_cast<void*>(phys);
+                } else {
+                    for (usz i = 0; i < reader._state->regions.size(); ++i) {
+                        const MemoryRegion& r = reader._state->regions[i];
+                        if (r.physical) {
+                            usz physStart = reinterpret_cast<usz>(r.physical);
+                            if (phys >= physStart && phys < physStart + r.size) {
+                                translated_ptr = reinterpret_cast<void*>(r.base + (phys - physStart));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        // Case 2: via sharing (not ancestor) -> CoW mapping in reader
+        usz src_phys = 0;
+        if (!_state->isMemoryIsolated) {
+            src_phys = reinterpret_cast<usz>(original.ptr);
+        } else {
+            src_phys = translate(reinterpret_cast<usz>(original.ptr), original.size);
+            if (!src_phys) {
+                src_phys = reinterpret_cast<usz>(original.ptr);
+            }
+        }
+
+        if (src_phys) {
+            if (!reader._state->isMemoryIsolated) {
+                u8* buf = new u8[original.size];
+                std::memcpy(buf, reinterpret_cast<void*>(src_phys), original.size);
+                translated_ptr = buf;
+            } else {
+                usz dest_vaddr = 0x60000000;
+                for (usz i = 0; i < reader._state->regions.size(); ++i) {
+                    usz r_end = reader._state->regions[i].base + reader._state->regions[i].size;
+                    if (r_end > dest_vaddr) {
+                        dest_vaddr = (r_end + 4095) & ~4095;
+                    }
+                }
+                
+                reader.unmap(dest_vaddr, original.size);
+                MemoryRegion region;
+                region.base = dest_vaddr;
+                region.size = original.size;
+                region.physical = reinterpret_cast<u8*>(src_phys);
+                region.writable = false;
+                region.cow = true;
+                region.owned = true;
+                
+                Task::retainAllocation(reinterpret_cast<u8*>(src_phys));
+                reader._state->regions.push(region);
+                
+                for (usz i = 0; i < _state->regions.size(); ++i) {
+                    MemoryRegion& r = _state->regions[i];
+                    if (reinterpret_cast<u8*>(src_phys) >= r.physical && reinterpret_cast<u8*>(src_phys) < r.physical + r.size) {
+                        r.writable = false;
+                        r.cow = true;
+                        break;
+                    }
+                }
+                
+                reader._state->isMemoryIsolated = true;
+                translated_ptr = reinterpret_cast<void*>(dest_vaddr);
+            }
+        }
     }
+
+    return LogEntry{translated_ptr, original.size};
+}
+
+void* Task::getReturnValue(Task reader) const {
+    if (!_state || !_state->returnValue) return nullptr;
+
+    // Check if reader is parent or grandparent of this task
+    bool is_ancestor = false;
+    usz checkId = _state->id;
+    while (true) {
+        if (checkId == reader.id()) {
+            is_ancestor = true;
+            break;
+        }
+        if (checkId == 0) {
+            break;
+        }
+        Task parent = Task::findTask(checkId);
+        if (parent.valid()) {
+            checkId = parent._state->parentId;
+        } else {
+            break;
+        }
+    }
+
+    void* translated_ptr = nullptr;
+    if (is_ancestor) {
+        // Case 1: parent/grandparent
+        if (!reader._state->isMemoryIsolated) {
+            translated_ptr = _state->returnValue;
+        } else {
+            usz dest_vaddr = 0x60000000;
+            for (usz i = 0; i < reader._state->regions.size(); ++i) {
+                usz r_end = reader._state->regions[i].base + reader._state->regions[i].size;
+                if (r_end > dest_vaddr) {
+                    dest_vaddr = (r_end + 4095) & ~4095;
+                }
+            }
+            reader.unmap(dest_vaddr, _state->returnValueSize);
+            MemoryRegion region;
+            region.base = dest_vaddr;
+            region.size = _state->returnValueSize;
+            region.physical = static_cast<u8*>(_state->returnValue);
+            region.writable = false;
+            region.cow = true;
+            region.owned = true;
+            
+            Task::retainAllocation(static_cast<u8*>(_state->returnValue));
+            reader._state->regions.push(region);
+            reader._state->isMemoryIsolated = true;
+            translated_ptr = reinterpret_cast<void*>(dest_vaddr);
+        }
+    } else {
+        // Case 2: via sharing (not ancestor) -> CoW mapping in reader
+        if (!reader._state->isMemoryIsolated) {
+            u8* buf = new u8[_state->returnValueSize];
+            std::memcpy(buf, _state->returnValue, _state->returnValueSize);
+            translated_ptr = buf;
+        } else {
+            usz dest_vaddr = 0x60000000;
+            for (usz i = 0; i < reader._state->regions.size(); ++i) {
+                usz r_end = reader._state->regions[i].base + reader._state->regions[i].size;
+                if (r_end > dest_vaddr) {
+                    dest_vaddr = (r_end + 4095) & ~4095;
+                }
+            }
+            reader.unmap(dest_vaddr, _state->returnValueSize);
+            MemoryRegion region;
+            region.base = dest_vaddr;
+            region.size = _state->returnValueSize;
+            region.physical = static_cast<u8*>(_state->returnValue);
+            region.writable = false;
+            region.cow = true;
+            region.owned = true;
+            
+            Task::retainAllocation(static_cast<u8*>(_state->returnValue));
+            reader._state->regions.push(region);
+            reader._state->isMemoryIsolated = true;
+            translated_ptr = reinterpret_cast<void*>(dest_vaddr);
+        }
+    }
+    return translated_ptr;
 }
 
 void Task::share(Task& taskObj) {
@@ -1705,6 +2622,635 @@ void Task::share(Task& taskObj) {
     }
     if (!alreadyShared) {
         _state->sharedIds.push(taskObj._state->id);
+    }
+}
+
+static Pipe* getRealPipe(Pipe* p) {
+    while (p && p->source) {
+        p = p->source;
+    }
+    return p;
+}
+
+static Pipe* xi_find_pipe(usz pipeId) {
+    for (usz i = 0; i < TaskState::_allPipes.size(); ++i) {
+        if (TaskState::_allPipes[i] && TaskState::_allPipes[i]->id == pipeId) {
+            return TaskState::_allPipes[i];
+        }
+    }
+    return nullptr;
+}
+
+static Pipe* xi_first_owned_pipe(TaskState* state) {
+    if (!state) return nullptr;
+    for (usz i = 0; i < state->ownedPipeIds.size(); ++i) {
+        Pipe* p = xi_find_pipe(state->ownedPipeIds[i]);
+        if (p && !p->closed) return p;
+    }
+    return nullptr;
+}
+
+static void xi_auto_share_on_send(TaskState* sender, TaskState* receiver) {
+    if (!sender || !receiver) return;
+    usz senderId = sender->id;
+    bool alreadyShared = false;
+    for (usz i = 0; i < receiver->sharedIds.size(); ++i) {
+        if (receiver->sharedIds[i] == senderId) {
+            alreadyShared = true;
+            break;
+        }
+    }
+    if (!alreadyShared) {
+        receiver->sharedIds.push(senderId);
+    }
+}
+
+static bool xi_can_send_to(TaskState* sender, TaskState* receiver) {
+    if (!sender || !receiver) return false;
+    // Can send to: self, parent, children, shared tasks
+    if (sender->id == receiver->id) return true;
+    if (sender->parentId == receiver->id) return true; // parent
+    if (receiver->parentId == sender->id) return true; // child
+    if (sender->parentId == receiver->parentId) return true; // sibling
+    for (usz i = 0; i < sender->sharedIds.size(); ++i) {
+        if (sender->sharedIds[i] == receiver->id) return true;
+    }
+    for (usz i = 0; i < receiver->sharedIds.size(); ++i) {
+        if (receiver->sharedIds[i] == sender->id) return true;
+    }
+    return false;
+}
+
+static void xi_write_pipe_entry(TaskState* senderState, Pipe* pipe, const void* ptr, usz length, usz senderId) {
+    pipe = getRealPipe(pipe);
+    if (!pipe || pipe->closed || length == 0) return;
+
+    u8* physData = reinterpret_cast<u8*>(const_cast<void*>(ptr));
+
+    if (senderState && senderState->isMemoryIsolated) {
+        usz phys = Task(senderState).translate(reinterpret_cast<usz>(ptr), length);
+        if (phys) {
+            physData = reinterpret_cast<u8*>(phys);
+        }
+    }
+
+    TaskState* ownerState = nullptr;
+    if (pipe->ownerId < Task::_tasks.size()) {
+        ownerState = Task::_tasks[pipe->ownerId];
+    }
+
+    bool sameTask = (senderState && ownerState && senderState->id == ownerState->id);
+    bool isAncestor = false;
+    if (senderState && ownerState) {
+        usz checkId = ownerState->id;
+        while (true) {
+            if (checkId == senderState->id) { isAncestor = true; break; }
+            if (checkId == 0) break;
+            if (checkId < Task::_tasks.size() && Task::_tasks[checkId]) {
+                checkId = Task::_tasks[checkId]->parentId;
+            } else break;
+        }
+    }
+
+    PipeEntry entry;
+    entry.senderId = senderId;
+    entry.size = length;
+    entry.position = pipe->writePosition;
+
+    entry.data = physData;
+    entry.cow = true;
+    entry.isDummy = false;
+    Task::retainAllocation(physData);
+
+    pipe->entries.push(entry);
+    pipe->writePosition += length;
+    if (pipe->writePosition > pipe->logicalSize) {
+        pipe->logicalSize = pipe->writePosition;
+    }
+
+    if (pipe->onWrite) {
+        pipe->onWrite(pipe);
+    }
+    pipe->checkEviction();
+
+    if (ownerState && ownerState->status == TaskStatus::Paused && ownerState->isWaitingForMessage) {
+        ownerState->isWaitingForMessage = false;
+        ownerState->status = TaskStatus::Ready;
+    }
+
+    if (ownerState && ownerState->status == TaskStatus::Paused && ownerState->isWaitingForMessage) {
+        ownerState->isWaitingForMessage = false;
+        ownerState->status = TaskStatus::Ready;
+    }
+}
+
+// Helper: read from pipe at a given byte offset, without modifying pipe->position
+static usz xi_pipe_read_at(Pipe* pipe, void* buf, usz length, usz offset) {
+    pipe = getRealPipe(pipe);
+    if (!pipe || length == 0 || !buf) return 0;
+
+    u8* dst = reinterpret_cast<u8*>(buf);
+    usz total_read = 0;
+
+    for (usz i = 0; i < pipe->entries.size() && total_read < length; ++i) {
+        PipeEntry& entry = pipe->entries[i];
+        usz entryStart = entry.position;
+        usz entryEnd = entryStart + entry.size;
+
+        // Skip entries entirely before our read offset
+        if (entryEnd <= offset) continue;
+        // Stop if entry starts beyond our read range
+        if (entryStart >= offset + length) break;
+
+        // Calculate overlap
+        usz readStart = (offset > entryStart) ? (offset - entryStart) : 0;
+        usz readEnd = ((offset + length - total_read) < entry.size) 
+                      ? (offset + length - total_read - entryStart + readStart)
+                      : entry.size;
+        if (readEnd > entry.size) readEnd = entry.size;
+        usz to_copy = readEnd - readStart;
+        if (to_copy > length - total_read) to_copy = length - total_read;
+
+        if (entry.isDummy || entry.data == nullptr) {
+            std::memset(dst + total_read, 0, to_copy);
+        } else {
+            std::memcpy(dst + total_read, entry.data + readStart, to_copy);
+        }
+        total_read += to_copy;
+        offset += to_copy;
+    }
+
+    return total_read;
+}
+
+static void xi_pipe_handle_cache_misses(TaskState* state, Pipe* pipe, usz offset, usz length) {
+    if (!pipe->onRead) return;
+
+    usz end = offset + length;
+    if (pipe->logicalSize > 0 && end > pipe->logicalSize) {
+        end = pipe->logicalSize;
+    }
+    if (offset >= end) return;
+
+    usz current_pos = offset;
+    while (current_pos < end) {
+        bool covered = false;
+        usz next_entry_start = end;
+
+        for (usz i = 0; i < pipe->entries.size(); ++i) {
+            PipeEntry& entry = pipe->entries[i];
+            usz entry_start = entry.position;
+            usz entry_end = entry_start + entry.size;
+
+            if (entry_start <= current_pos && entry_end > current_pos) {
+                covered = true;
+                current_pos = entry_end;
+                break;
+            }
+            if (entry_start > current_pos && entry_start < next_entry_start) {
+                next_entry_start = entry_start;
+            }
+        }
+
+        if (!covered) {
+            usz gap_start = current_pos;
+            usz gap_len = next_entry_start - gap_start;
+
+            pipe->onRead(gap_start, state->id, gap_len);
+
+            current_pos = gap_start + gap_len;
+        }
+    }
+}
+
+void Pipe::dummyWrite(usz pos, usz length) {
+    if (length == 0) return;
+
+    usz senderId = 0;
+    Task caller = Task::current();
+    if (caller.valid()) {
+        senderId = caller.id();
+    } else {
+        senderId = ownerId;
+    }
+
+    PipeEntry entry;
+    entry.senderId = senderId;
+    entry.data = nullptr;
+    entry.size = length;
+    entry.position = pos;
+    entry.cow = false;
+    entry.isDummy = true;
+
+    entries.push(entry);
+
+    if (pos + length > writePosition) {
+        writePosition = pos + length;
+    }
+    if (pos + length > logicalSize) {
+        logicalSize = pos + length;
+    }
+
+    checkEviction();
+}
+
+void Pipe::setCaching(usz bytes) {
+    maxCachedBytes = bytes;
+    checkEviction();
+}
+
+void Pipe::checkEviction() {
+    if (maxCachedBytes == 0) return;
+
+    usz total_cached = 0;
+    for (usz i = 0; i < entries.size(); ++i) {
+        if (!entries[i].isDummy && entries[i].data != nullptr) {
+            total_cached += entries[i].size;
+        }
+    }
+
+    usz idx = 0;
+    while (total_cached > maxCachedBytes && idx < entries.size()) {
+        PipeEntry& entry = entries[idx];
+        if (!entry.isDummy && entry.data != nullptr) {
+            total_cached -= entry.size;
+            if (entry.cow) {
+                Task::releaseAllocation(entry.data);
+            }
+            entries.splice(idx, 1);
+        } else {
+            idx++;
+        }
+    }
+}
+
+void Pipe::flush() {
+    for (usz i = 0; i < entries.size(); ++i) {
+        PipeEntry& entry = entries[i];
+        if (entry.cow && entry.data != nullptr) {
+            Task::releaseAllocation(entry.data);
+        }
+    }
+    entries.clear();
+    writePosition = 0;
+    position = 0;
+    logicalSize = 0;
+}
+
+void Pipe::flush(usz pos, usz length) {
+    if (length == 0) return;
+    usz flush_start = pos;
+    usz flush_end = pos + length;
+
+    for (long long i = (long long)entries.size() - 1; i >= 0; --i) {
+        PipeEntry& entry = entries[(usz)i];
+        usz entry_start = entry.position;
+        usz entry_end = entry_start + entry.size;
+
+        if (entry_end <= flush_start || entry_start >= flush_end) {
+            continue;
+        }
+
+        if (entry_start >= flush_start && entry_end <= flush_end) {
+            if (entry.cow && entry.data != nullptr) {
+                Task::releaseAllocation(entry.data);
+            }
+            entries.splice((usz)i, 1);
+            continue;
+        }
+
+        if (entry_start < flush_start && entry_end > flush_start && entry_end <= flush_end) {
+            entry.size = flush_start - entry_start;
+            continue;
+        }
+
+        if (entry_start >= flush_start && entry_start < flush_end && entry_end > flush_end) {
+            usz diff = flush_end - entry_start;
+            entry.position = flush_end;
+            entry.size -= diff;
+            if (entry.data != nullptr) {
+                entry.data += diff;
+            }
+            continue;
+        }
+
+        if (entry_start < flush_start && entry_end > flush_end) {
+            usz left_size = flush_start - entry_start;
+            usz right_size = entry_end - flush_end;
+            u8* right_data = entry.data ? (entry.data + (flush_end - entry_start)) : nullptr;
+
+            PipeEntry right_entry;
+            right_entry.senderId = entry.senderId;
+            right_entry.data = right_data;
+            right_entry.size = right_size;
+            right_entry.position = flush_end;
+            right_entry.cow = entry.cow;
+            right_entry.isDummy = entry.isDummy;
+
+            if (right_entry.cow && right_entry.data != nullptr) {
+                Task::retainAllocation(right_entry.data);
+            }
+
+            entry.size = left_size;
+
+            usz insert_idx = (usz)i + 1;
+            entries.push(PipeEntry());
+            for (usz k = entries.size() - 1; k > insert_idx; --k) {
+                entries[k] = entries[k - 1];
+            }
+            entries[insert_idx] = right_entry;
+
+            continue;
+        }
+    }
+}
+
+usz Task::openPipe() {
+    if (!_state) return 0;
+
+    Pipe* pipe = new Pipe();
+    pipe->id = TaskState::_nextPipeId++;
+    pipe->ownerId = _state->id;
+
+    TaskState::_allPipes.push(pipe);
+    _state->ownedPipeIds.push(pipe->id);
+    _state->pipes.push(pipe);
+
+    return pipe->id;
+}
+
+void Task::closePipe(usz pipeId) {
+    if (!_state) return;
+
+    Pipe* pipe = xi_find_pipe(pipeId);
+    if (!pipe) return;
+    if (pipe->ownerId != _state->id) return;
+
+    pipe->closed = true;
+
+    for (usz i = 0; i < pipe->entries.size(); ++i) {
+        PipeEntry& entry = pipe->entries[i];
+        if (entry.cow) {
+            Task::releaseAllocation(entry.data);
+        }
+    }
+
+    for (long long i = (long long)_state->ownedPipeIds.size() - 1; i >= 0; --i) {
+        if (_state->ownedPipeIds[(usz)i] == pipeId) {
+            usz last = _state->ownedPipeIds.size() - 1;
+            if ((usz)i != last) _state->ownedPipeIds[(usz)i] = _state->ownedPipeIds[last];
+            _state->ownedPipeIds.pop();
+            break;
+        }
+    }
+    for (long long i = (long long)_state->pipes.size() - 1; i >= 0; --i) {
+        if (_state->pipes[(usz)i] == pipe) {
+            usz last = _state->pipes.size() - 1;
+            if ((usz)i != last) _state->pipes[(usz)i] = _state->pipes[last];
+            _state->pipes.pop();
+            break;
+        }
+    }
+    for (long long i = (long long)TaskState::_allPipes.size() - 1; i >= 0; --i) {
+        if (TaskState::_allPipes[(usz)i] == pipe) {
+            usz last = TaskState::_allPipes.size() - 1;
+            if ((usz)i != last) TaskState::_allPipes[(usz)i] = TaskState::_allPipes[last];
+            TaskState::_allPipes.pop();
+            break;
+        }
+    }
+    delete pipe;
+}
+
+Pipe* Task::getPipe(usz pipeId) {
+    if (!_state) return nullptr;
+    for (usz i = 0; i < _state->pipes.size(); ++i) {
+        if (_state->pipes[i] && _state->pipes[i]->id == pipeId) {
+            return _state->pipes[i];
+        }
+    }
+    Pipe* p = xi_find_pipe(pipeId);
+    if (p) {
+        if (p->ownerId == _state->id) return p;
+        if (p->ownerId == _state->parentId) return p;
+        for (usz i = 0; i < _state->childIds.size(); ++i) {
+            if (p->ownerId == _state->childIds[i]) return p;
+        }
+        for (usz i = 0; i < _state->sharedIds.size(); ++i) {
+            if (p->ownerId == _state->sharedIds[i]) return p;
+        }
+    }
+    return nullptr;
+}
+
+usz Task::write(Pipe* pipe, const void* data, usz length) {
+    pipe = getRealPipe(pipe);
+    if (!_state || !pipe || pipe->closed || length == 0) return 0;
+    std::printf("[Host Task::write] pipe->id=%lu, length=%lu, data=%.*s\n",
+                (unsigned long)pipe->id, (unsigned long)length, (int)length, (const char*)data);
+    std::fflush(stdout);
+    usz senderId = 0;
+    Task caller = Task::current();
+    if (caller.valid()) {
+        senderId = caller.id();
+    } else {
+        senderId = _state->id;
+    }
+    xi_write_pipe_entry(_state, pipe, data, length, senderId);
+    return length;
+}
+
+usz Task::read(Pipe* pipe, void* buf, usz length) {
+    pipe = getRealPipe(pipe);
+    if (!_state || !pipe || length == 0 || !buf) return 0;
+
+    xi_pipe_handle_cache_misses(_state, pipe, pipe->position, length);
+
+    // Check if data is available at current position
+    if (pipe->position >= pipe->writePosition) {
+        // No data available
+        if (!pipe->blocking) {
+            // Non-blocking: return 0, caller gets nothing
+            return 0;
+        }
+        // Blocking: return 0 (task should yield and retry)
+        return 0;
+    }
+
+    usz available = pipe->writePosition - pipe->position;
+    usz to_read = (length < available) ? length : available;
+    usz bytes_read = xi_pipe_read_at(pipe, buf, to_read, pipe->position);
+    pipe->position += bytes_read;
+    return bytes_read;
+}
+
+usz Task::pread(Pipe* pipe, void* buf, usz length, usz offset) {
+    pipe = getRealPipe(pipe);
+    if (!_state || !pipe || length == 0 || !buf) return 0;
+
+    xi_pipe_handle_cache_misses(_state, pipe, offset, length);
+
+    return xi_pipe_read_at(pipe, buf, length, offset);
+}
+
+usz Task::pwrite(Pipe* pipe, const void* data, usz length, usz offset) {
+    pipe = getRealPipe(pipe);
+    if (!_state || !pipe || pipe->closed || length == 0) return 0;
+    // pwrite: write at offset without changing writePosition
+    u8* physData = reinterpret_cast<u8*>(const_cast<void*>(data));
+    if (_state->isMemoryIsolated) {
+        usz phys = translate(reinterpret_cast<usz>(data), length);
+        if (phys) physData = reinterpret_cast<u8*>(phys);
+    }
+    usz senderId = 0;
+    Task caller = Task::current();
+    if (caller.valid()) {
+        senderId = caller.id();
+    } else {
+        senderId = _state->id;
+    }
+    PipeEntry entry;
+    entry.senderId = senderId;
+    entry.size = length;
+    entry.position = offset;
+    entry.data = physData;
+    entry.cow = true;
+    entry.isDummy = false;
+    Task::retainAllocation(physData);
+    pipe->entries.push(entry);
+    // Update writePosition if this extends beyond current end
+    if (offset + length > pipe->writePosition) {
+        pipe->writePosition = offset + length;
+    }
+    if (offset + length > pipe->logicalSize) {
+        pipe->logicalSize = offset + length;
+    }
+
+    if (pipe->onWrite) {
+        pipe->onWrite(pipe);
+    }
+    pipe->checkEviction();
+
+    return length;
+}
+
+usz Task::dup(Pipe* pipe, int flags) {
+    if (!_state || !pipe) return 0;
+
+    Pipe* newPipe = new Pipe();
+    newPipe->id = TaskState::_nextPipeId++;
+    newPipe->ownerId = _state->id;
+    newPipe->source = pipe;
+    newPipe->flags = flags;
+    if (flags & 0x80000) { // O_CLOEXEC
+        newPipe->flags |= 0x80000;
+    }
+
+    TaskState::_allPipes.push(newPipe);
+    _state->ownedPipeIds.push(newPipe->id);
+    _state->pipes.push(newPipe);
+
+    return newPipe->id;
+}
+
+usz Task::dup2(usz oldfd, usz newfd) {
+    if (oldfd == newfd) {
+        Pipe* oldPipe = getPipe(oldfd);
+        if (!oldPipe) return 0;
+        return newfd;
+    }
+    return dup3(oldfd, newfd, 0);
+}
+
+usz Task::dup3(usz oldfd, usz newfd, int flags) {
+    if (!_state) return 0;
+    if (oldfd == newfd) return 0; // invalid argument for dup3
+    Pipe* oldPipe = getPipe(oldfd);
+    if (!oldPipe) return 0;
+
+    // If newfd is already open, close it first
+    Pipe* existing = getPipe(newfd);
+    if (existing && existing->ownerId == _state->id) {
+        closePipe(newfd);
+    }
+
+    Pipe* newPipe = new Pipe();
+    newPipe->id = newfd;
+    newPipe->ownerId = _state->id;
+    newPipe->source = oldPipe;
+    newPipe->flags = flags;
+    if (flags & 0x80000) { // O_CLOEXEC
+        newPipe->flags |= 0x80000;
+    }
+
+    TaskState::_allPipes.push(newPipe);
+    _state->ownedPipeIds.push(newPipe->id);
+    _state->pipes.push(newPipe);
+
+    return newPipe->id;
+}
+
+bool Task::poll(Pipe* pipe) {
+    pipe = getRealPipe(pipe);
+    if (!pipe) return false;
+    return pipe->position < pipe->writePosition;
+}
+
+PipeEntry* Task::poll(Pipe* pipe, void* outBuf) {
+    pipe = getRealPipe(pipe);
+    if (!pipe || !outBuf) return nullptr;
+    if (pipe->position >= pipe->writePosition) {
+        if (!pipe->blocking) return nullptr;
+        return nullptr; // Blocking: caller should yield and retry
+    }
+    // Find the entry containing data at current position
+    for (usz i = 0; i < pipe->entries.size(); ++i) {
+        PipeEntry& entry = pipe->entries[i];
+        if (entry.position + entry.size > pipe->position && entry.position <= pipe->position) {
+            usz offset = pipe->position - entry.position;
+            usz available = entry.size - offset;
+            std::memcpy(outBuf, entry.data + offset, available);
+            pipe->position += available;
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+bool Task::poll(Pipe* pipe, Func<void()> fn) {
+    pipe = getRealPipe(pipe);
+    if (!pipe || !fn) return false;
+    if (pipe->position < pipe->writePosition) {
+        fn();
+        return true;
+    }
+    return false;
+}
+
+void Task::seek(Pipe* pipe, usz pos) {
+    pipe = getRealPipe(pipe);
+    if (!pipe) return;
+    pipe->position = pos;
+}
+
+long Task::fcntl(Pipe* pipe, int cmd, long arg) {
+    pipe = getRealPipe(pipe);
+    if (!pipe) return -1;
+    switch (cmd) {
+        case 1: // F_GETFD
+            return (pipe->flags & 0x80000) ? 1 : 0; // FD_CLOEXEC
+        case 2: // F_SETFD
+            if (arg & 1) pipe->flags |= 0x80000;
+            else pipe->flags &= ~0x80000;
+            return 0;
+        case 3: // F_GETFL
+            return pipe->flags & 0xFFF; // Return status flags
+        case 4: // F_SETFL
+            pipe->flags = (pipe->flags & ~0xFFF) | ((int)arg & 0xFFF);
+            pipe->blocking = !(pipe->flags & 0x800); // O_NONBLOCK
+            return 0;
+        default:
+            return -1;
     }
 }
 
@@ -2118,6 +3664,18 @@ void Task::releaseAllocation(u8* ptr) {
     delete[] ptr;
 }
 
+usz Task::getAllocationRefCount(u8* ptr) {
+    if (!ptr) return 0;
+    ensureInitialized();
+    for (usz i = 0; i < _allocations.size(); ++i) {
+        PhysicalAllocation& alloc = _allocations[i];
+        if (ptr >= alloc.ptr && ptr < alloc.ptr + alloc.size) {
+            return alloc.refCount;
+        }
+    }
+    return 0;
+}
+
 TaskState* Task::allocTask(usz parentId) {
     ensureInitialized();
     TaskState* s = new TaskState();
@@ -2267,6 +3825,15 @@ void Task::destroyTask(usz taskId) {
         releaseAllocation(s->stack);
     }
 
+    // Destroy all pipes owned by this task
+    {
+        Array<usz> pipeIds = s->ownedPipeIds; // Copy to avoid modification during iteration
+        for (usz i = 0; i < pipeIds.size(); ++i) {
+            Task t(s);
+            t.closePipe(pipeIds[i]);
+        }
+    }
+
     s->status = TaskStatus::Destroyed;
     delete s;
     _tasks[taskId] = nullptr;
@@ -2371,6 +3938,7 @@ void Task::yield(usz coreId) {
 
         if (!next) {
             if (current && current->status == TaskStatus::Ready) {
+                xi_assign_tid_if_needed(current);
                 current->status = TaskStatus::Running;
                 resetPeriod(coreId);
             }
@@ -2379,6 +3947,7 @@ void Task::yield(usz coreId) {
         }
 
         if (next == current) {
+            xi_assign_tid_if_needed(next);
             next->status = TaskStatus::Running;
             if (next->remainingUs == 0) {
                 resetPeriod(coreId);
@@ -2393,6 +3962,7 @@ void Task::yield(usz coreId) {
             fromCtx = &current->context;
         }
 
+        xi_assign_tid_if_needed(next);
         next->status = TaskStatus::Running;
         next->currentCore = coreId;
         core.currentTaskId = next->id;
@@ -2429,6 +3999,7 @@ void Task::yield(usz coreId) {
                     return;
                 } else {
                     if (current) {
+                        xi_assign_tid_if_needed(current);
                         current->status = TaskStatus::Running;
                     }
                     proposeFrequency(coreId);
@@ -2436,6 +4007,7 @@ void Task::yield(usz coreId) {
                 }
             } else {
                 if (current) {
+                    xi_assign_tid_if_needed(current);
                     current->status = TaskStatus::Running;
                 }
                 proposeFrequency(coreId);
@@ -2443,6 +4015,7 @@ void Task::yield(usz coreId) {
             }
         }
 
+        xi_assign_tid_if_needed(next);
         next->status = TaskStatus::Running;
         next->currentCore = coreId;
         core.currentTaskId = next->id;
@@ -2613,10 +4186,14 @@ void Task::proposeFrequency(usz coreId) {
 
 void Task::ensureInitialized() {
     if (_tasks.size() == 0) {
+#ifndef _WIN32
+        ::syscall(158, 0x1003, &g_host_fs_base); // ARCH_GET_FS
+#endif
         // Create the root task (id=0).
         TaskState* root = new TaskState();
         root->id = 0;
         root->parentId = 0;
+        xi_assign_tid_if_needed(root);
         root->status = TaskStatus::Running;
         root->quotaUs = 0; // Unlimited.
 
@@ -2672,19 +4249,50 @@ void Task::reset() {
     _tasks.clear();
 
     for (usz i = 0; i < _allocations.size(); ++i) {
-        delete[] _allocations[i].ptr;
+        std::printf("[Task::reset] Deleting allocation %lu: ptr=%p, size=%lu, refCount=%d\n",
+                    (unsigned long)i, _allocations[i].ptr, (unsigned long)_allocations[i].size, (int)_allocations[i].refCount);
+        std::fflush(stdout);
+        if (_allocations[i].isMmap) {
+#ifndef _WIN32
+            usz ptrVal = reinterpret_cast<usz>(_allocations[i].ptr);
+            usz mapAddr = ptrVal & ~4095;
+            usz mapLen = (_allocations[i].size + (ptrVal - mapAddr) + 4095) & ~4095;
+            ::munmap(reinterpret_cast<void*>(mapAddr), mapLen);
+#endif
+        } else {
+            delete[] _allocations[i].ptr;
+        }
     }
     _allocations.clear();
 
     _cores.clear();
 
     _nextTaskId = 1;
+    _nextTid = 1;
     _schedulePeriodUs = 10000;
     _interruptIntervalUs = 1000;
     _onChangeFrequency._clear();
     instance = nullptr;
 
+    // Clean up all pipes
+    for (usz i = 0; i < TaskState::_allPipes.size(); ++i) {
+        delete TaskState::_allPipes[i];
+    }
+    TaskState::_allPipes.clear();
+    TaskState::_nextPipeId = 3;
+
     ensureInitialized();
+}
+
+static void xi_destroy_aot_cache_recursive(TaskState* state) {
+    if (!state) return;
+    AOT::destroyCache(state->aotCache);
+    for (usz i = 0; i < state->childIds.size(); ++i) {
+        Task child = Task::findTask(state->childIds[i]);
+        if (child.valid()) {
+            xi_destroy_aot_cache_recursive(child._state);
+        }
+    }
 }
 
 void Task::onInstruction(const String& instruction, Func<void()> callback) {
@@ -2694,27 +4302,28 @@ void Task::onInstruction(const String& instruction, Func<void()> callback) {
     bool isParent = (caller.valid() && _state->parentId == caller.id());
     bool isKernel = (!caller.valid() || caller.id() == 0);
 
-    // Self can register callbacks. Parent or kernel can register and unban.
     if (!isSelf && !isParent && !isKernel) {
         return; // Blocked: not self, not parent, not kernel.
     }
 
-    if (instruction == "syscall") {
-        _state->customSyscallCallback = callback;
-        return;
+    // Ensure unique copy of instructionHooks
+    {
+        Array<TaskState::InstructionHook> uniqueHooks;
+        for (usz i = 0; i < _state->instructionHooks.size(); ++i) {
+            uniqueHooks[i] = _state->instructionHooks[i];
+        }
+        _state->instructionHooks = uniqueHooks;
     }
+
+    _state->isInstructionIsolated = true;
 
     bool found = false;
     for (usz i = 0; i < _state->instructionHooks.size(); ++i) {
         if (_state->instructionHooks[i].name == instruction) {
             _state->instructionHooks[i].callback = callback;
-            // Self CANNOT unban — only parent/kernel can change banned state.
             if (!isSelf) {
                 _state->instructionHooks[i].banned = false;
             }
-            // If self is calling on a banned instruction, callback is registered
-            // but the instruction stays banned. The callback fires (if AOT allows)
-            // but the instruction itself remains replaced by ud2.
             found = true;
             break;
         }
@@ -2726,23 +4335,77 @@ void Task::onInstruction(const String& instruction, Func<void()> callback) {
         hook.banned = false; // New hooks start unbanned.
         _state->instructionHooks.push(hook);
     }
-    AOT::destroyCache(_state->aotCache);
+    xi_destroy_aot_cache_recursive(_state);
+}
+
+void Task::onInstruction(const Array<String>& instructions, Func<void()> callback) {
+    for (usz i = 0; i < instructions.size(); ++i) {
+        onInstruction(instructions[i], callback);
+    }
 }
 
 void Task::offInstruction(const String& instruction) {
     if (!_state) return;
     Task caller = Task::current();
-    // offInstruction is FINAL: only parent or kernel can ban.
-    // Self CANNOT call offInstruction — that would be an escape vector.
-    if (caller.valid() && caller.id() != 0) {
-        if (_state->parentId != caller.id()) {
-            return; // Blocked: only parent can ban instructions.
-        }
+    bool isSelf = (caller.valid() && _state->id == caller.id());
+    bool isParent = (caller.valid() && _state->parentId == caller.id());
+    bool isKernel = (!caller.valid() || caller.id() == 0);
+
+    if (!isSelf && !isParent && !isKernel) {
+        return; // Blocked: not self, not parent, not kernel.
     }
 
-    if (instruction == "syscall") {
-        _state->customSyscallCallback = Func<void()>();
+    // Ensure unique copy of instructionHooks
+    {
+        Array<TaskState::InstructionHook> uniqueHooks;
+        for (usz i = 0; i < _state->instructionHooks.size(); ++i) {
+            uniqueHooks[i] = _state->instructionHooks[i];
+        }
+        _state->instructionHooks = uniqueHooks;
     }
+
+    _state->isInstructionIsolated = true;
+
+    bool found = false;
+    for (usz i = 0; i < _state->instructionHooks.size(); ++i) {
+        if (_state->instructionHooks[i].name == instruction) {
+            _state->instructionHooks[i].callback = Func<void()>();
+            _state->instructionHooks[i].banned = false;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        TaskState::InstructionHook hook;
+        hook.name = instruction;
+        hook.callback = Func<void()>();
+        hook.banned = false;
+        _state->instructionHooks.push(hook);
+    }
+    xi_destroy_aot_cache_recursive(_state);
+}
+
+void Task::trapInstruction(const String& instruction) {
+    if (!_state) return;
+    Task caller = Task::current();
+    bool isSelf = (caller.valid() && _state->id == caller.id());
+    bool isParent = (caller.valid() && _state->parentId == caller.id());
+    bool isKernel = (!caller.valid() || caller.id() == 0);
+
+    if (!isSelf && !isParent && !isKernel) {
+        return; // Blocked: not self, not parent, not kernel.
+    }
+
+    // Ensure unique copy of instructionHooks
+    {
+        Array<TaskState::InstructionHook> uniqueHooks;
+        for (usz i = 0; i < _state->instructionHooks.size(); ++i) {
+            uniqueHooks[i] = _state->instructionHooks[i];
+        }
+        _state->instructionHooks = uniqueHooks;
+    }
+
+    _state->isInstructionIsolated = true;
 
     bool found = false;
     for (usz i = 0; i < _state->instructionHooks.size(); ++i) {
@@ -2760,7 +4423,7 @@ void Task::offInstruction(const String& instruction) {
         hook.banned = true;
         _state->instructionHooks.push(hook);
     }
-    AOT::destroyCache(_state->aotCache);
+    xi_destroy_aot_cache_recursive(_state);
 }
 
 void Task::setMinChildQuota(u64 us) {
@@ -2785,6 +4448,17 @@ void Task::onInstructionTranslate(const String& instruction, Func<Array<u8>(cons
         return;
     }
 
+    // Ensure unique copy of instructionTranslators
+    {
+        Array<TaskState::InstructionTranslator> uniqueTranslators;
+        for (usz i = 0; i < _state->instructionTranslators.size(); ++i) {
+            uniqueTranslators[i] = _state->instructionTranslators[i];
+        }
+        _state->instructionTranslators = uniqueTranslators;
+    }
+
+    _state->isInstructionIsolated = true;
+
     bool found = false;
     for (usz i = 0; i < _state->instructionTranslators.size(); ++i) {
         if (_state->instructionTranslators[i].name == instruction) {
@@ -2799,40 +4473,9 @@ void Task::onInstructionTranslate(const String& instruction, Func<Array<u8>(cons
         translator.callback = callback;
         _state->instructionTranslators.push(translator);
     }
-    AOT::destroyCache(_state->aotCache);
+    xi_destroy_aot_cache_recursive(_state);
 }
 
-void Task::forwardInstruction(const String& instruction) {
-    if (!_state) return;
-    Task caller = Task::current();
-    if (caller.valid() && _state->id == caller.id()) {
-        return; // Blocked: self cannot call forwardInstruction (escape risk).
-    }
-    if (caller.valid() && caller.id() != 0 && _state->parentId != caller.id()) {
-        return; // Blocked: only parent or kernel can call forwardInstruction.
-    }
-
-    // Remove from hooks
-    for (long long i = (long long)_state->instructionHooks.size() - 1; i >= 0; --i) {
-        if (_state->instructionHooks[i].name == instruction) {
-            _state->instructionHooks.splice(i, 1);
-        }
-    }
-    // Remove from translators
-    for (long long i = (long long)_state->instructionTranslators.size() - 1; i >= 0; --i) {
-        if (_state->instructionTranslators[i].name == instruction) {
-            _state->instructionTranslators.splice(i, 1);
-        }
-    }
-    // Remove from bannedList
-    for (long long i = (long long)_state->bannedList.size() - 1; i >= 0; --i) {
-        if (_state->bannedList[i] == instruction) {
-            _state->bannedList.splice(i, 1);
-        }
-    }
-
-    AOT::destroyCache(_state->aotCache);
-}
 
 void Task::onSwap(Func<void(usz, usz)> cb) {
     if (!_state) return;
@@ -2909,6 +4552,4 @@ void xi_reset_task_state_for_tests() {
 }
 
 } // namespace Task
-
-#endif // defined(COMPILING_FOR_GUEST)
 

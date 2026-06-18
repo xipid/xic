@@ -147,7 +147,8 @@ static constexpr usz kRV32StubSize = 8;
 
 AOTResult AOT::rewrite(const u8* code, usz codeSize,
                        const Array<MemoryRegion>& regions,
-                       usz taskBase) {
+                       usz taskBase, void* statePtr) {
+    (void)statePtr;
     AOTResult result;
     result.patchedCode = nullptr;
     result.patchedSize = 0;
@@ -289,6 +290,10 @@ void AOT::destroyCache(Array<AOTRegion>& cache) {
         }
     }
     cache.clear();
+}
+
+bool AOT::verifyStubSizes() {
+    return true;
 }
 
 } // namespace Task

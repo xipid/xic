@@ -4,7 +4,7 @@
  *
  * Demonstrates how a developer uses the Task subsystem:
  *   1. Spawning background tasks with clean function overloads.
- *   2. Message sending / inbox IPC using static and dynamic APIs.
+ *   2. Message sending / pipe IPC using static and dynamic APIs.
  *   3. Enforcing W^X, instruction hooks, and fork bomb protection automatically.
  *   4. Cooperative yielding and task scheduling.
  */
@@ -29,11 +29,15 @@ void backgroundWorker(void* arg) {
     Task::yield();
 
     std::printf("[Worker %d] Sending log update...\n", id);
-    Task::current().log().push("Finished worker job");
+    String* logMsg = new String("Finished worker job");
+    Task::current().log(logMsg);
 
-    // Send a message to root (parentId = 0)
+    // Send a message to root (parentId = 0) via pipe 3
     Task parent = Task::findTask(0);
-    Task::current().send(parent, "Done!");
+    Pipe* pipe = parent.getPipe(3);
+    if (pipe) {
+        Task::current().write(pipe, "Done!", 5);
+    }
 }
 
 void fibonacciTask(int n) {
@@ -45,7 +49,8 @@ void fibonacciTask(int n) {
         b = temp;
     }
     std::printf("[Fibonacci] Result: %d\n", a);
-    Task::current().log().push(String("Result is ") + String(a));
+    String* logMsg = new String(String("Result is ") + String(a));
+    Task::current().log(logMsg);
 }
 
 int main() {
@@ -57,6 +62,10 @@ int main() {
     // Get handle to current task (root)
     Task root = Task::current();
     std::printf("[Main] Root task ID is %d\n", (int)root.id());
+
+    // Open pipe on root (will be ID 3)
+    usz pipeId = root.openPipe();
+    assert(pipeId == 3);
 
     // 1. Spawning raw function pointers (very lazy)
     std::printf("[Main] Spawning background worker tasks...\n");
@@ -74,19 +83,32 @@ int main() {
 
     // Verify worker tasks ran and logged output
     assert(worker1.log().size() > 0);
-    std::printf("[Main] Worker 1 Log: %s\n", worker1.log()[0].c_str());
+    std::printf("[Main] Worker 1 Log: %s\n", worker1.log()[0].as<String>()->c_str());
     assert(worker2.log().size() > 0);
-    std::printf("[Main] Worker 2 Log: %s\n", worker2.log()[0].c_str());
+    std::printf("[Main] Worker 2 Log: %s\n", worker2.log()[0].as<String>()->c_str());
 
     // Verify fibonacci task ran
     assert(fib.log().size() > 0);
-    std::printf("[Main] Fibonacci Log: %s\n", fib.log()[0].c_str());
+    std::printf("[Main] Fibonacci Log: %s\n", fib.log()[0].as<String>()->c_str());
 
-    // 3. IPC (Inbox/Outbox)
-    std::printf("[Main] Checking inbox messages...\n");
-    assert(root.inbox().size() >= 2);
-    std::printf("[Main] Received: %s from Task %d\n", root.inbox()[0].payload.c_str(), (int)root.inbox()[0].senderId);
-    std::printf("[Main] Received: %s from Task %d\n", root.inbox()[1].payload.c_str(), (int)root.inbox()[1].senderId);
+    // 3. IPC (Inbox/Outbox replacement via Pipes)
+    std::printf("[Main] Checking pipe messages...\n");
+    char msgBuf1[10] = {0};
+    char msgBuf2[10] = {0};
+    Pipe* pipe = root.getPipe(3);
+    assert(pipe != nullptr);
+    root.read(pipe, msgBuf1, 5);
+    root.read(pipe, msgBuf2, 5);
+    std::printf("[Main] Received: %s from pipe\n", msgBuf1);
+    std::printf("[Main] Received: %s from pipe\n", msgBuf2);
+
+    assert(std::strcmp(msgBuf1, "Done!") == 0);
+    assert(std::strcmp(msgBuf2, "Done!") == 0);
+
+    // Cleanup log memory
+    delete worker1.log()[0].as<String>();
+    delete worker2.log()[0].as<String>();
+    delete fib.log()[0].as<String>();
 
     // 4. Fork bomb protection
     std::printf("[Main] Testing fork bomb protection (minChildQuota)...\n");

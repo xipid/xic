@@ -135,18 +135,33 @@ void testIPC() {
     Task sender = root.spawn();
     Task receiver = root.spawn();
 
-    sender.send(receiver, "hello");
-    TEST("receiver has 1 message", receiver.inbox().size() == 1);
-    TEST("message sender is correct", receiver.inbox()[0].senderId == sender.id());
-    TEST("message payload is correct", receiver.inbox()[0].payload == "hello");
+    // Receiver opens a pipe
+    xi_set_current_task(receiver._state);
+    usz pipeId = receiver.openPipe();
+    Pipe* pipe = receiver.getPipe(pipeId);
+    xi_set_current_task(nullptr);
 
-    // Sender should be auto-shared to receiver.
+    TEST("pipe created successfully", pipe != nullptr);
+
+    // Sender writes to it
+    xi_set_current_task(sender._state);
+    usz written = sender.write(pipe, "hello", 5);
+    xi_set_current_task(nullptr);
+
+    TEST("write returns bytes written", written == 5);
+
+    // Sender is automatically shared to receiver on write
     TEST("sender shared to receiver",
          receiver._state->sharedIds.size() >= 1);
 
-    // Send another message.
-    sender.send(receiver, "world");
-    TEST("receiver has 2 messages", receiver.inbox().size() == 2);
+    // Read and verify
+    char buf[10] = {0};
+    xi_set_current_task(receiver._state);
+    usz n = receiver.read(pipe, buf, 5);
+    xi_set_current_task(nullptr);
+
+    TEST("read returns correct size", n == 5);
+    TEST("message payload is correct", std::strcmp(buf, "hello") == 0);
 }
 
 void testMemory() {
@@ -256,12 +271,12 @@ void testLog() {
     Task root = Task::root();
     Task task = root.spawn();
 
-    task.log().push("output line 1");
-    task.log().push("output line 2");
+    task.log("output line 1");
+    task.log("output line 2");
 
     TEST("log has 2 entries", task.log().size() == 2);
-    TEST("log[0] correct", task.log()[0] == "output line 1");
-    TEST("log[1] correct", task.log()[1] == "output line 2");
+    TEST("log[0] correct", std::strcmp(task.log()[0].as<const char>(), "output line 1") == 0);
+    TEST("log[1] correct", std::strcmp(task.log()[1].as<const char>(), "output line 2") == 0);
 }
 
 void testFindTask() {
@@ -347,16 +362,23 @@ void testSpoofPrevention() {
     Task t2 = root.spawn();
     Task receiver = root.spawn();
 
+    // Receiver opens a pipe
+    xi_set_current_task(receiver._state);
+    usz pipeId = receiver.openPipe();
+    Pipe* pipe = receiver.getPipe(pipeId);
+    xi_set_current_task(nullptr);
+
     // Mock t1 as currently executing.
     xi_set_current_task(t1._state);
 
-    // Even if t2 calls send, the actual sender must be t1.
-    t2.send(receiver, "spoof attempt");
+    // Even if t2 calls write, the actual sender must be t1.
+    t2.write(pipe, "spoof attempt", 13);
 
-    TEST("receiver inbox has 1 message", receiver.inbox().size() == 1);
-    TEST("message sender is actually t1 (the running task)", receiver.inbox()[0].senderId == t1.id());
-
+    // Clear mocked current task.
     xi_set_current_task(nullptr);
+
+    TEST("pipe has 1 entry", pipe->entries.size() == 1);
+    TEST("message sender is actually t1 (the running task)", pipe->entries[0].senderId == t1.id());
 }
 
 void testRefCountedMapping() {
@@ -545,12 +567,15 @@ void testTaskWaitAndWake() {
     Task root = Task::root();
     Task child = root.spawn(waitStarter, nullptr); // Auto-starts
     
+    usz pipeId = child.openPipe();
+    Pipe* pipe = child.getPipe(pipeId);
+
     yield();
     TEST("child is paused (waiting)", child._state->status == TaskStatus::Paused);
     TEST("child is flagged as waiting for message", child._state->isWaitingForMessage);
     
     waitRan = false;
-    root.send(child, "Wake up!");
+    root.write(pipe, "Wake up!", 8);
     
     TEST("child woke up and is Ready", child._state->status == TaskStatus::Ready);
     TEST("child is no longer flagged as waiting", !child._state->isWaitingForMessage);
@@ -591,11 +616,14 @@ void testNormalMessageNoWake() {
     Task child = root.spawn();
     child.resume();
     
+    usz pipeId = child.openPipe();
+    Pipe* pipe = child.getPipe(pipeId);
+
     child.stop();
     TEST("child is paused", child._state->status == TaskStatus::Paused);
     TEST("child is not waiting for message", !child._state->isWaitingForMessage);
     
-    root.send(child, "regular message");
+    root.write(pipe, "regular message", 15);
     
     TEST("regular message does not wake child", child._state->status == TaskStatus::Paused);
 }
@@ -645,11 +673,12 @@ void testUnmapIsolation() {
     Task root = Task::root();
 
     Task task = root.spawn();
+    TEST("task is not isolated initially", !task._state->isMemoryIsolated);
+
     task.alloc(0x1000, 256);
     task.alloc(0x2000, 512);
 
     TEST("task has 2 regions before unmap()", task._state->regions.size() == 2);
-    TEST("task is not isolated initially", !task._state->isIsolated);
 
     // Set an onFetch callback.
     bool fetchSet = false;
@@ -662,7 +691,7 @@ void testUnmapIsolation() {
     TEST("all regions removed", task._state->regions.size() == 0);
     TEST("translations cleared", task._state->translations.size() == 0);
     TEST("onFetch cleared", task._state->fetchRanges.size() == 0);
-    TEST("task is now isolated", task._state->isIsolated);
+    TEST("task is now isolated", task._state->isMemoryIsolated);
 }
 
 void testSelfMapPrevention() {
@@ -702,13 +731,70 @@ void testIsolatedTaskContainment() {
 
     // Isolate the task.
     task.unmap();
-    TEST("task is isolated", task._state->isIsolated);
+    TEST("task is isolated", task._state->isMemoryIsolated);
     TEST("no regions after isolation", task._state->regions.size() == 0);
 
     // Parent can still allocate new memory for the isolated task.
     task.alloc(0, 1024);
     TEST("parent can alloc for isolated task", task._state->regions.size() == 1);
     TEST("new region starts at 0", task._state->regions[0].base == 0);
+}
+
+static int returnValTarget(int a, int b) {
+    return a + b;
+}
+
+void testTidAndReturnValue() {
+    std::printf("\n[TID and Return Value]\n");
+    xi_reset_task_state_for_tests();
+    Task::setup(0, false);
+    Task root = Task::root();
+    
+    TEST("root tid is > 0", root.tid() > 0);
+    
+    Task child = root.spawn(returnValTarget, 10, 20);
+    TEST("child tid is initially 0", child.tid() == 0);
+    TEST("child has no return value yet", !child.hasReturnValue());
+    
+    // Resume to run the task
+    child.resume();
+    yield();
+    
+    TEST("child tid is now > 0", child.tid() > 0);
+    TEST("child has return value", child.hasReturnValue());
+    TEST("child return value is correct", child.returnValue<int>() == 30);
+
+    // Test getReturnValue and getLogEntry with lazy copy
+    Task peer = root.spawn();
+    peer.share(child);
+    
+    // Child logs a message
+    child.log("test_log");
+    
+    // 1. Access log by root (ancestor, not isolated):
+    LogEntry rootLog = child.getLogEntry(0, root);
+    TEST("root getLogEntry has correct size", rootLog.size == 9);
+    TEST("root getLogEntry content is correct", std::strcmp(rootLog.as<const char>(), "test_log") == 0);
+    
+    // 2. Access log by peer (non-ancestor, not isolated):
+    LogEntry peerLog = child.getLogEntry(0, peer);
+    TEST("peer getLogEntry has correct size", peerLog.size == 9);
+    TEST("peer getLogEntry content is correct", std::strcmp(peerLog.as<const char>(), "test_log") == 0);
+    TEST("peer log pointer is a copy", peerLog.ptr != rootLog.ptr);
+    delete[] static_cast<u8*>(peerLog.ptr);
+    
+    // 3. Access return value by root (ancestor, not isolated):
+    void* rootRet = child.getReturnValue(root);
+    TEST("root getReturnValue correct", *static_cast<int*>(rootRet) == 30);
+    
+    // 4. Access return value by peer (non-ancestor, not isolated):
+    void* peerRet = child.getReturnValue(peer);
+    TEST("peer getReturnValue correct", *static_cast<int*>(peerRet) == 30);
+    TEST("peer return value pointer is a copy", peerRet != rootRet);
+    delete[] static_cast<u8*>(peerRet);
+    
+    peer.destroy();
+    child.destroy();
 }
 
 static bool waitDeadTask1Ran = false;
@@ -812,8 +898,8 @@ void testOnInstructionSelfRegister() {
     Task root = Task::root();
     Task task = root.spawn();
 
-    // Parent bans an instruction.
-    task.offInstruction("nop");
+    // Parent traps an instruction.
+    task.trapInstruction("nop");
     TEST("nop is banned", task._state->instructionHooks.size() == 1 &&
          task._state->instructionHooks[0].banned == true);
 
@@ -830,13 +916,198 @@ void testOnInstructionSelfRegister() {
     TEST("instruction still banned after self-register",
          task._state->instructionHooks[0].banned == true);
 
-    // Task tries offInstruction on itself — should be BLOCKED.
-    task.offInstruction("ret");
-    // Should NOT have added a new hook (blocked).
-    TEST("self offInstruction blocked",
-         task._state->instructionHooks.size() == 1);
+    // Task tries trapInstruction on itself — should work.
+    task.trapInstruction("ret");
+    TEST("self trapInstruction works",
+         task._state->instructionHooks.size() == 2 &&
+         task._state->instructionHooks[1].name == "ret" &&
+         task._state->instructionHooks[1].banned == true);
 
     xi_set_current_task(nullptr);
+}
+
+void testInstructionConfigInheritance() {
+    std::printf("\n[Instruction Config Inheritance]\n");
+
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+    Task parent = root.spawn();
+
+    parent.trapInstruction("nop");
+    parent.onInstruction("cpuid", []() {});
+
+    // Mock parent as currently executing to spawn
+    xi_set_current_task(parent._state);
+    Task child = parent.spawn();
+    xi_set_current_task(nullptr);
+
+    TEST("child inherited trapInstruction config",
+         child._state->instructionHooks.size() == 2 &&
+         child._state->instructionHooks[0].name == "nop" &&
+         child._state->instructionHooks[0].banned == true &&
+         child._state->instructionHooks[1].name == "cpuid" &&
+         (bool)child._state->instructionHooks[1].callback);
+}
+
+extern "C" void xi_emulate_syscall(TaskState* state, GuestRegs* regs);
+extern "C" void xi_sfi_write_check(void* addr, usz size);
+
+void testInstructionIsolationAndDelegation() {
+    std::printf("\n[Instruction Isolation and Delegation]\n");
+
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+    Task parent = root.spawn();
+
+    // 1. parent hooks "syscall:99" with a callback.
+    bool parentHookRan = false;
+    parent.onInstruction("syscall:99", [&]() { parentHookRan = true; });
+
+    // 2. Spawn a child. It inherits parent's hooks.
+    xi_set_current_task(parent._state);
+    Task child = parent.spawn();
+    xi_set_current_task(nullptr);
+
+    TEST("child inherited syscall:99 hook", child._state->instructionHooks.size() == 1 &&
+                                            child._state->instructionHooks[0].name == "syscall:99" &&
+                                            child._state->instructionHooks[0].callback.isValid());
+
+    // Run the hook via child's inherited state
+    GuestRegs regs;
+    regs.rax = 99;
+    regs.rdi = 0;
+    regs.rsi = 0;
+    regs.rdx = 0;
+    
+    parentHookRan = false;
+    xi_guest_regs = &regs;
+    xi_emulate_syscall(child._state, &regs);
+    TEST("child inherited hook executed parent callback", parentHookRan);
+
+    // 3. Child offInstruction("syscall:99"). This should clear the callback and delegate to parent.
+    xi_set_current_task(child._state);
+    child.offInstruction("syscall:99");
+    xi_set_current_task(nullptr);
+
+    TEST("child syscall:99 hook cleared by offInstruction", child._state->instructionHooks.size() == 1 &&
+                                                            child._state->instructionHooks[0].name == "syscall:99" &&
+                                                            !child._state->instructionHooks[0].callback.isValid() &&
+                                                            !child._state->instructionHooks[0].banned);
+
+    // 4. Test checkInstructionHooks / xi_emulate_syscall resolving through parent chain.
+    parentHookRan = false;
+    xi_emulate_syscall(child._state, &regs);
+    TEST("parent hook executed via delegation after child offInstruction", parentHookRan);
+
+    // 5. Test trapInstruction on parent.
+    parent.trapInstruction("cpuid");
+    TEST("parent cpuid is trapped", parent._state->instructionHooks.size() == 2 &&
+                                    parent._state->instructionHooks[1].name == "cpuid" &&
+                                    parent._state->instructionHooks[1].banned);
+
+    // 6. Test sub-instruction hook (syscall:39) vs general syscall hook.
+    regs.rax = 39; // getpid
+    regs.rdi = 0;
+    
+    // By default, xi_emulate_syscall for getpid returns state->id.
+    xi_emulate_syscall(parent._state, &regs);
+    TEST("default getpid syscall returns pid", regs.rax == parent.id());
+
+    // Hook specific syscall:39 on parent.
+    bool customSyscallRan = false;
+    parent.onInstruction("syscall:39", [&]() {
+        customSyscallRan = true;
+        xi_guest_regs->rax = 9999;
+    });
+
+    regs.rax = 39;
+    xi_guest_regs = &regs;
+    xi_emulate_syscall(parent._state, &regs);
+    TEST("sub-hooked syscall:39 callback runs", customSyscallRan);
+    TEST("sub-hooked syscall:39 returns custom val", regs.rax == 9999);
+
+    // Other syscalls (e.g. 12 / brk) should not trigger the syscall:39 hook.
+    regs.rax = 12;
+    regs.rdi = 0;
+    xi_emulate_syscall(parent._state, &regs);
+    TEST("other syscalls run default implementation", regs.rax != 9999);
+    
+    xi_guest_regs = nullptr;
+}
+
+void testForkAndCoW() {
+    std::printf("\n[Fork and Copy-on-Write]\n");
+
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+    Task parent = root.spawn();
+
+    // 1. Allocate stack for parent so sys_fork doesn't crash on pointer offsets
+    parent._state->stackSize = 0x1000;
+    parent._state->stack = new u8[0x1000];
+    parent._state->stackOwned = true;
+    Task::registerAllocation(parent._state->stack, 0x1000, false);
+    std::memset(parent._state->stack, 0, 0x1000);
+
+    // 2. Set up guest registers inside the stack
+    GuestRegs* parentRegs = reinterpret_cast<GuestRegs*>(parent._state->stack + 0x800);
+    parentRegs->rax = 57; // fork syscall number
+    parentRegs->rdi = 0;
+    parentRegs->rsi = 0;
+    xi_guest_regs = parentRegs;
+
+    // 3. Map a memory region with some data
+    parent.alloc(0x10000, 4096);
+    u8* parentPhys = parent._state->regions[0].physical;
+    parentPhys[0] = 42;
+    parentPhys[1] = 99;
+
+    TEST("parent memory initialized", parentPhys[0] == 42 && parentPhys[1] == 99);
+    TEST("parent region writable initially", parent._state->regions[0].writable);
+    TEST("parent region not CoW initially", !parent._state->regions[0].cow);
+
+    // 4. Run sys_fork via xi_emulate_syscall
+    xi_set_current_task(parent._state);
+    xi_emulate_syscall(parent._state, parentRegs);
+    xi_set_current_task(nullptr);
+
+    usz child_id = parentRegs->rax;
+    TEST("sys_fork returned child id", child_id > 0 && child_id != (usz)-1);
+    Task child = Task::findTask(child_id);
+    TEST("child task is valid", child.valid());
+
+    // 5. Verify regions in parent and child are marked CoW and readonly
+    TEST("parent region marked readonly", !parent._state->regions[0].writable);
+    TEST("parent region marked CoW", parent._state->regions[0].cow);
+    TEST("child region marked readonly", !child._state->regions[0].writable);
+    TEST("child region marked CoW", child._state->regions[0].cow);
+    TEST("child shares parent physical memory initially", child._state->regions[0].physical == parentPhys);
+
+    // 6. Test CoW splitting in xi_sfi_write_check
+    // Mock writing to child region
+    xi_set_current_task(child._state);
+    xi_sfi_write_check(reinterpret_cast<void*>(0x10000), 4);
+    xi_set_current_task(nullptr);
+
+    TEST("child region now writable after write check", child._state->regions[0].writable);
+    TEST("child region not CoW after write check", !child._state->regions[0].cow);
+    TEST("child region has new physical memory", child._state->regions[0].physical != parentPhys);
+    TEST("child region copied parent data", child._state->regions[0].physical[0] == 42 && child._state->regions[0].physical[1] == 99);
+
+    // Parent region should still be readonly and CoW until written to
+    TEST("parent region still readonly", !parent._state->regions[0].writable);
+    TEST("parent region still CoW", parent._state->regions[0].cow);
+
+    // Mock write to parent region
+    xi_set_current_task(parent._state);
+    xi_sfi_write_check(reinterpret_cast<void*>(0x10000), 4);
+    xi_set_current_task(nullptr);
+
+    TEST("parent region now writable after write check", parent._state->regions[0].writable);
+    TEST("parent region not CoW after write check", !parent._state->regions[0].cow);
+    TEST("parent region kept physical memory", parent._state->regions[0].physical == parentPhys);
+
+    xi_guest_regs = nullptr;
 }
 
 void testWxEnforcement() {
@@ -850,6 +1121,12 @@ void testWxEnforcement() {
     task.alloc(0x1000, 256);
     TEST("alloc: writable", task._state->regions[0].writable);
     TEST("alloc: executable", task._state->regions[0].executable);
+}
+
+void testJitStubSizes() {
+    std::printf("\n[JIT Stub Sizing Verification]\n");
+    assert(AOT::verifyStubSizes());
+    std::printf("  ✓ JIT stub sizes verified\n");
 }
 
 void testJitExecution() {
@@ -1100,6 +1377,185 @@ void testSecurityHardening() {
 #endif
 }
 
+extern "C" void xi_emulate_syscall(TaskState* state, GuestRegs* regs);
+
+void testVfsPipes() {
+    std::printf("\n[VFS Cache Pipes: Callbacks, Eviction, Flush, Dummy Writes]\n");
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+
+    // 1. Open a pipe
+    usz pipeId = root.openPipe();
+    TEST("openPipe returns valid ID", pipeId > 0);
+    Pipe* pipe = root.getPipe(pipeId);
+    TEST("pipe exists", pipe != nullptr);
+
+    // Set logical size to 1000 bytes
+    pipe->setLogicalSize(1000);
+
+    // 2. Test onWrite callback
+    bool writeCalled = false;
+    pipe->onWrite = [&](Pipe* p) {
+        writeCalled = true;
+    };
+    u8* hello = new u8[5];
+    std::memcpy(hello, "Hello", 5);
+    Task::registerAllocation(hello, 5, false);
+    root.write(pipe, hello, 5);
+    TEST("onWrite callback triggered on write", writeCalled == true);
+
+    // 3. Test onRead callback (cache miss / page fault)
+    usz lastMissOffset = 9999;
+    usz lastMissLength = 0;
+    pipe->onRead = [&](usz pos, usz readerTaskId, usz length) {
+        lastMissOffset = pos;
+        lastMissLength = length;
+        // satisfying cache miss by writing dummy at that offset
+        pipe->dummyWrite(pos, length);
+    };
+
+    // Read from an uncached offset (e.g. offset 100, length 20)
+    char readBuf[20] = {0};
+    usz bytesRead = root.pread(pipe, readBuf, 20, 100);
+    TEST("onRead callback triggered with correct offset", lastMissOffset == 100);
+    TEST("onRead callback triggered with correct length", lastMissLength == 20);
+    TEST("dummyWrite makes read return zeroed buffer", bytesRead == 20);
+    for (int i = 0; i < 20; ++i) {
+        TEST("read buffer is zeroed", readBuf[i] == 0);
+    }
+
+    // Read again at 100. It should be a cache hit (onRead not triggered again).
+    lastMissOffset = 9999;
+    lastMissLength = 0;
+    bytesRead = root.pread(pipe, readBuf, 20, 100);
+    TEST("onRead callback not triggered again on cache hit", lastMissOffset == 9999);
+
+    // 4. Test caching limit (setCaching)
+    pipe->flush();
+    pipe->setCaching(10); // set limit to 10 bytes
+    
+    // Write 6 bytes
+    u8* sixBytes1 = new u8[6];
+    std::memcpy(sixBytes1, "123456", 6);
+    Task::registerAllocation(sixBytes1, 6, false);
+    root.pwrite(pipe, sixBytes1, 6, 0);
+    TEST("caching under limit has 1 entry", pipe->entries.size() == 1);
+
+    // Write another 6 bytes (total 12 bytes -> exceeds limit of 10)
+    // The first entry (6 bytes at offset 0) should be evicted.
+    u8* sixBytes2 = new u8[6];
+    std::memcpy(sixBytes2, "123456", 6);
+    Task::registerAllocation(sixBytes2, 6, false);
+    root.pwrite(pipe, sixBytes2, 6, 6);
+    TEST("older entry is evicted, size remains 1", pipe->entries.size() == 1);
+    TEST("remaining entry is the newer one at offset 6", pipe->entries[0].position == 6);
+
+    // 5. Test flush(pos, length) invalidation and splitting
+    pipe->flush();
+    pipe->setLogicalSize(100);
+    pipe->setCaching(0); // disable limit
+
+    // Write three entries:
+    // [0, 20)
+    // [20, 40)
+    // [40, 60)
+    u8* chunk1 = new u8[20];
+    std::memcpy(chunk1, "12345678901234567890", 20);
+    Task::registerAllocation(chunk1, 20, false);
+    
+    u8* chunk2 = new u8[20];
+    std::memcpy(chunk2, "12345678901234567890", 20);
+    Task::registerAllocation(chunk2, 20, false);
+    
+    u8* chunk3 = new u8[20];
+    std::memcpy(chunk3, "12345678901234567890", 20);
+    Task::registerAllocation(chunk3, 20, false);
+    
+    root.pwrite(pipe, chunk1, 20, 0);
+    root.pwrite(pipe, chunk2, 20, 20);
+    root.pwrite(pipe, chunk3, 20, 40);
+    TEST("has 3 entries initially", pipe->entries.size() == 3);
+
+    // Flush a range that doesn't overlap (e.g. [80, 90)) -> should do nothing
+    pipe->flush(80, 10);
+    TEST("flush non-overlapping does nothing", pipe->entries.size() == 3);
+
+    // Flush fully inside second entry: flush [25, 35) (inside [20, 40))
+    // This should split the second entry into two: [20, 25) and [35, 40)
+    // Total entries: 4
+    pipe->flush(25, 10);
+    TEST("flush inside entry splits it", pipe->entries.size() == 4);
+    TEST("entry 0: [0, 20)", pipe->entries[0].position == 0 && pipe->entries[0].size == 20);
+    TEST("entry 1: [20, 25)", pipe->entries[1].position == 20 && pipe->entries[1].size == 5);
+    TEST("entry 2: [35, 40)", pipe->entries[2].position == 35 && pipe->entries[2].size == 5);
+    TEST("entry 3: [40, 60)", pipe->entries[3].position == 40 && pipe->entries[3].size == 20);
+
+    // Flush a range spanning entry 1 completely: flush [10, 30)
+    // Spans [10, 20) of entry 0, [20, 25) of entry 1, [35, 40) of entry 2 (none, it starts at 35)
+    // - Entry 0 [0, 20) becomes [0, 10)
+    // - Entry 1 [20, 25) is deleted (completely inside [10, 30))
+    // Remaining: 3 entries
+    pipe->flush(10, 20);
+    TEST("flush overlapping deletes and truncates", pipe->entries.size() == 3);
+    TEST("entry 0 is truncated to 10 bytes", pipe->entries[0].position == 0 && pipe->entries[0].size == 10);
+    TEST("entry 1 is [35, 40)", pipe->entries[1].position == 35 && pipe->entries[1].size == 5);
+    TEST("entry 2 is [40, 60)", pipe->entries[2].position == 40 && pipe->entries[2].size == 20);
+
+    // Flush the final remaining entries so they clean up their heap memory correctly
+    pipe->flush();
+}
+
+void testPipeRedirection() {
+    std::printf("\n[Pipe Redirection & Standard Streams (0, 1, 2)]\n");
+    xi_reset_task_state_for_tests();
+    Task root = Task::root();
+
+    // 1. Open a pipe (host-side)
+    usz pipeId = root.openPipe();
+    TEST("openPipe returns valid pipe id", pipeId > 0);
+    Pipe* pipe = root.getPipe(pipeId);
+    TEST("pipe exists", pipe != nullptr);
+
+    // 2. Redirect stdout (fd 1) to this pipe using dup2
+    usz dupResult = root.dup2(pipeId, 1);
+    TEST("dup2 to stdout returns 1", dupResult == 1);
+    Pipe* stdoutPipe = root.getPipe(1);
+    TEST("stdoutPipe is retrieved by getPipe(1)", stdoutPipe != nullptr);
+
+    // 3. Write to stdout via pipe and verify it is captured in the pipe
+    char testMsg[] = "Redirection test!";
+    root.write(stdoutPipe, testMsg, 17);
+
+    char readBuf[32] = {0};
+    root.read(pipe, readBuf, 17);
+    TEST("message successfully redirected and read back", std::strcmp(readBuf, "Redirection test!") == 0);
+
+    // 4. Test dup2 oldfd == newfd
+    usz dup2_same = root.dup2(1, 1);
+    TEST("dup2 oldfd == newfd returns newfd", dup2_same == 1);
+
+    // 5. Test dup3
+    usz dup3_res = root.dup3(pipeId, 2, 0);
+    TEST("dup3 to stderr returns 2", dup3_res == 2);
+    Pipe* stderrPipe = root.getPipe(2);
+    TEST("stderrPipe is retrieved by getPipe(2)", stderrPipe != nullptr);
+
+    // 6. Test emulated syscall redirection
+    GuestRegs regs;
+    std::memset(&regs, 0, sizeof(GuestRegs));
+    regs.rax = 1; // sys_write
+    regs.rdi = 1; // fd 1 (stdout)
+    regs.rsi = reinterpret_cast<usz>("Syscall Redirect!");
+    regs.rdx = 17;
+    
+    xi_emulate_syscall(root._state, &regs);
+
+    TEST("emulated write returns bytes written", regs.rax == 17);
+    char readBuf2[32] = {0};
+    root.read(pipe, readBuf2, 17);
+    TEST("emulated syscall redirected write read back", std::strcmp(readBuf2, "Syscall Redirect!") == 0);
+}
+
 // -------------------------------------------------------------------------
 // Main
 // -------------------------------------------------------------------------
@@ -1111,6 +1567,8 @@ int main() {
     testTaskCreation();
     testCustomTask();
     testIPC();
+    testPipeRedirection();
+    testVfsPipes();
     testMemory();
     testMemoryAutoAlloc();
     testScheduling();
@@ -1127,11 +1585,16 @@ int main() {
     testUnmapIsolation();
     testSelfMapPrevention();
     testIsolatedTaskContainment();
+    testTidAndReturnValue();
 
     // --- Security tests (no context switches) ---
     testForkBombProtection();
     testOnInstructionSelfRegister();
+    testInstructionConfigInheritance();
+    testInstructionIsolationAndDelegation();
+    testForkAndCoW();
     testWxEnforcement();
+    testJitStubSizes();
     testJitExecution();
     testDynamicJitExecution();
     testDemandPaging();
