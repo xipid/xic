@@ -614,6 +614,52 @@ public:
     res._rank = _rank;
     return res;
   }
+
+  bool includes(const T& val) const {
+      for (usz i = 0; i < size(); ++i) {
+          if (((Array<T>*)this)->operator[](i) == val) return true;
+      }
+      return false;
+  }
+
+  Array<T> intersect(const Array<T>& o) const {
+      Array<T> res;
+      for (usz i = 0; i < size(); ++i) {
+          T val = ((Array<T>*)this)->operator[](i);
+          if (o.includes(val) && !res.includes(val)) {
+              res.push(val);
+          }
+      }
+      return res;
+  }
+
+  Array<T> uni(const Array<T>& o) const {
+      Array<T> res;
+      for (usz i = 0; i < size(); ++i) {
+          T val = ((Array<T>*)this)->operator[](i);
+          if (!res.includes(val)) res.push(val);
+      }
+      for (usz i = 0; i < o.size(); ++i) {
+          T val = ((Array<T>&)o)[i];
+          if (!res.includes(val)) res.push(val);
+      }
+      return res;
+  }
+
+  Array<T> difference(const Array<T>& o) const {
+      Array<T> res;
+      for (usz i = 0; i < size(); ++i) {
+          T val = ((Array<T>*)this)->operator[](i);
+          if (!o.includes(val) && !res.includes(val)) {
+              res.push(val);
+          }
+      }
+      return res;
+  }
+
+  Array<T> operator&(const Array<T>& o) const { return intersect(o); }
+  Array<T> operator|(const Array<T>& o) const { return uni(o); }
+  Array<T> operator-(const Array<T>& o) const { return difference(o); }
 };
 
 // -------------------------------------------------------------------------

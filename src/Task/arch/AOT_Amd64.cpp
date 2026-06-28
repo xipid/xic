@@ -31,14 +31,106 @@
 
 #include <cstring>
 #include <cstdlib>
+#include <atomic>
+
 
 #ifndef _WIN32
 #include <sys/mman.h>
 #include <cerrno>
 #include <cstdio>
+#include <sys/syscall.h>
+#include <unistd.h>
 #endif
 
 namespace Task {
+
+#ifndef _WIN32
+extern u64 g_host_fs_base;
+
+struct FsBaseGuard {
+    usz savedFsBase = 0;
+    bool swapped = false;
+
+    FsBaseGuard() {
+        // Read the CURRENT FS base (which may be the guest's TLS).
+        usz currentFs = 0;
+        ::syscall(158, 0x1003, &currentFs);  // ARCH_GET_FS
+
+        // If it differs from the host's, swap to host and remember to restore.
+        if (currentFs != 0 && currentFs != ::Task::g_host_fs_base) {
+            savedFsBase = currentFs;
+            ::syscall(158, 0x1002, ::Task::g_host_fs_base);  // ARCH_SET_FS
+            swapped = true;
+        }
+    }
+
+    ~FsBaseGuard() {
+        if (swapped) {
+            // Check if the guest updated fsBase during the host call.
+            TaskState* state = xi_get_current_task();
+            usz restoreFs = savedFsBase;
+            if (state && state->fsBase != 0 && state->fsBase != savedFsBase) {
+                restoreFs = state->fsBase;
+            }
+            ::syscall(158, 0x1002, restoreFs);  // ARCH_SET_FS
+        }
+    }
+};
+#else
+struct FsBaseGuard {};
+#endif
+
+/**
+ * @brief Patch aligned SSE move instructions to unaligned equivalents.
+ *
+ * movaps (0F 28 / 0F 29) -> movups (0F 10 / 0F 11)
+ * movapd (66 0F 28 / 66 0F 29) -> movupd (66 0F 10 / 66 0F 11)
+ *
+ * The JIT stubs may leave the stack not 16-byte aligned, which causes
+ * movaps/movapd to fault. movups/movupd are functionally identical
+ * but tolerate any alignment, with no performance penalty on modern CPUs.
+ */
+static void patchAlignedSSEMoves(u8* insnStart, usz instrLen) {
+    usz pos = 0;
+    // Skip legacy prefixes
+    while (pos < instrLen) {
+        u8 b = insnStart[pos];
+        if (b == 0x66 || b == 0x67 || b == 0xF0 || b == 0xF2 || b == 0xF3 ||
+            b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 || b == 0x64 || b == 0x65) {
+            pos++;
+        } else break;
+    }
+
+    if (pos >= instrLen) return;
+    u8 b0 = insnStart[pos];
+
+    // Handle 2-byte VEX prefix (C5 xx): vmovaps/vmovapd
+    if (b0 == 0xC5 && pos + 2 < instrLen) {
+        u8 op = insnStart[pos + 2];
+        if (op == 0x28) insnStart[pos + 2] = 0x10; // vmovaps/vmovapd load  -> vmovups/vmovupd load
+        else if (op == 0x29) insnStart[pos + 2] = 0x11; // vmovaps/vmovapd store -> vmovups/vmovupd store
+        return;
+    }
+
+    // Handle 3-byte VEX prefix (C4 xx xx): vmovaps/vmovapd
+    if (b0 == 0xC4 && pos + 3 < instrLen) {
+        u8 op = insnStart[pos + 3];
+        if (op == 0x28) insnStart[pos + 3] = 0x10; // vmovaps/vmovapd load  -> vmovups/vmovupd load
+        else if (op == 0x29) insnStart[pos + 3] = 0x11; // vmovaps/vmovapd store -> vmovups/vmovupd store
+        return;
+    }
+
+    // Skip REX prefix
+    if ((b0 & 0xF0) == 0x40) {
+        pos++;
+    }
+    // Check for 0F escape byte + aligned move opcode
+    if (pos + 1 < instrLen && insnStart[pos] == 0x0F) {
+        u8 op2 = insnStart[pos + 1];
+        if (op2 == 0x28) insnStart[pos + 1] = 0x10; // movaps/movapd load -> movups/movupd load
+        else if (op2 == 0x29) insnStart[pos + 1] = 0x11; // movaps/movapd store -> movups/movupd store
+    }
+}
 
 // -------------------------------------------------------------------------
 // SFI Bounds-Check Functions
@@ -50,19 +142,19 @@ namespace Task {
  *
  * If the access is out-of-bounds, traps with ud2.
  */
-thread_local usz tl_last_task_id = (usz)-1;
+static usz tl_last_task_id = (usz)-1;
 
 // Read/Write bounds cache
-thread_local u8* tl_last_phys_base = nullptr;
-thread_local u8* tl_last_phys_limit = nullptr;
-thread_local usz tl_last_virt_base = 0;
-thread_local usz tl_last_virt_limit = 0;
+static u8* tl_last_phys_base = nullptr;
+static u8* tl_last_phys_limit = nullptr;
+static usz tl_last_virt_base = 0;
+static usz tl_last_virt_limit = 0;
 
 // Write bounds cache
-thread_local u8* tl_last_write_phys_base = nullptr;
-thread_local u8* tl_last_write_phys_limit = nullptr;
-thread_local usz tl_last_write_virt_base = 0;
-thread_local usz tl_last_write_virt_limit = 0;
+static u8* tl_last_write_phys_base = nullptr;
+static u8* tl_last_write_phys_limit = nullptr;
+static usz tl_last_write_virt_base = 0;
+static usz tl_last_write_virt_limit = 0;
 
 extern "C" void xi_invalidate_sfi_cache() {
     tl_last_task_id = (usz)-1;
@@ -77,6 +169,9 @@ extern "C" void xi_invalidate_sfi_cache() {
 }
 
 extern "C" void xi_sfi_bounds_check(void* addr, usz size) {
+    usz guestFs = 0;
+    ::syscall(158, 0x1003, &guestFs);
+    FsBaseGuard guard;  // Restore host FS base before accessing host TLS!
     xi_last_jit_rip = reinterpret_cast<usz>(__builtin_return_address(0));
     if (addr == nullptr && size == 0) return;
     TaskState* state = xi_get_current_task();
@@ -84,6 +179,10 @@ extern "C" void xi_sfi_bounds_check(void* addr, usz size) {
 
     u8* target = static_cast<u8*>(addr);
     usz targetAddr = reinterpret_cast<usz>(addr);
+
+    if (guestFs != 0 && targetAddr >= guestFs - 4096 && targetAddr + size <= guestFs + 4096) {
+        return;
+    }
 
     // 0. Check thread-local cache
     if (state->id == tl_last_task_id) {
@@ -131,7 +230,10 @@ extern "C" void xi_sfi_bounds_check(void* addr, usz size) {
             TaskState* prev = xi_get_current_task();
             xi_set_current_task(nullptr);
             Task(state).stop(1);
-            fr.callback(fr.start, fr.end);
+            {
+                FsBaseGuard guard;
+                fr.callback(fr.start, fr.end);
+            }
             xi_set_current_task(prev);
             // Re-verify that the callback successfully mapped/allocated the region containing targetAddr
             for (usz j = 0; j < state->regions.size(); ++j) {
@@ -143,7 +245,38 @@ extern "C" void xi_sfi_bounds_check(void* addr, usz size) {
         }
     }
 
+    // 4. Check AOT JIT output pages: a RIP-relative instruction may reference
+    //    data within the JIT buffer itself (e.g. .rodata relocated adjacent to code).
+    for (usz i = 0; i < state->aotCache.size(); ++i) {
+        const AOTRegion& aot = state->aotCache[i];
+        if (aot.patchedCode) {
+            u8* jitBase = aot.patchedCode;
+            u8* jitEnd  = aot.patchedCode + aot.patchedSize;
+            if (target >= jitBase && target + size <= jitEnd) {
+                return; // Access within JIT output — allowed.
+            }
+        }
+    }
+
     // Out-of-bounds access: trap.
+    ::printf("[SFI DEBUG] Mapped regions for task %lu:\n", (unsigned long)state->id);
+    for (usz idx = 0; idx < state->regions.size(); ++idx) {
+        MemoryRegion& r = state->regions[idx];
+        ::printf("  Region %lu: base=0x%lx size=0x%lx physical=%p writable=%d executable=%d\n",
+                 (unsigned long)idx, (unsigned long)r.base, (unsigned long)r.size, r.physical, (int)r.writable, (int)r.executable);
+    }
+    if (state->stack) {
+        ::printf("  Stack: base=%p size=0x%lx\n", state->stack, (unsigned long)state->stackSize);
+    }
+    ::printf("[SFI DEBUG] AOT cache regions:\n");
+    for (usz idx = 0; idx < state->aotCache.size(); ++idx) {
+        const AOTRegion& aot = state->aotCache[idx];
+        ::printf("  AOT %lu: originalAddr=0x%lx originalSize=0x%lx patchedCode=%p patchedSize=0x%lx\n",
+                 (unsigned long)idx, (unsigned long)aot.originalAddr, (unsigned long)aot.originalSize, aot.patchedCode, (unsigned long)aot.patchedSize);
+    }
+    ::printf("[SFI] OOB read at addr=%p size=%lu jit_rip=0x%lx\n",
+             addr, (unsigned long)size, (unsigned long)xi_last_jit_rip);
+    ::fflush(stdout);
     __asm__ volatile("ud2");
 }
 
@@ -154,6 +287,9 @@ extern "C" void xi_sfi_bounds_check(void* addr, usz size) {
  * parent's read-only mappings) must not be written to.
  */
 extern "C" void xi_sfi_write_check(void* addr, usz size) {
+    usz guestFs = 0;
+    ::syscall(158, 0x1003, &guestFs);
+    FsBaseGuard guard;  // Restore host FS base before accessing host TLS!
     xi_last_jit_rip = reinterpret_cast<usz>(__builtin_return_address(0));
     if (addr == nullptr && size == 0) return;
     TaskState* state = xi_get_current_task();
@@ -161,6 +297,10 @@ extern "C" void xi_sfi_write_check(void* addr, usz size) {
 
     u8* target = static_cast<u8*>(addr);
     usz targetAddr = reinterpret_cast<usz>(addr);
+
+    if (guestFs != 0 && targetAddr >= guestFs - 4096 && targetAddr + size <= guestFs + 4096) {
+        return;
+    }
 
     // 0. Check thread-local write cache
     if (state->id == tl_last_task_id) {
@@ -185,6 +325,7 @@ extern "C" void xi_sfi_write_check(void* addr, usz size) {
                     r.writable = true;
                     r.cow = false;
                 } else {
+                    FsBaseGuard guard;
                     u8* newPhys = new u8[sz];
                     std::memcpy(newPhys, oldPhys, sz);
                     
@@ -237,7 +378,10 @@ extern "C" void xi_sfi_write_check(void* addr, usz size) {
             TaskState* prev = xi_get_current_task();
             xi_set_current_task(nullptr);
             Task(state).stop(1);
-            sr.callback(sr.start, sr.end);
+            {
+                FsBaseGuard guard;
+                sr.callback(sr.start, sr.end);
+            }
             xi_set_current_task(prev);
             // Re-verify that the callback successfully mapped/allocated the region and it is writable
             for (usz j = 0; j < state->regions.size(); ++j) {
@@ -256,7 +400,10 @@ extern "C" void xi_sfi_write_check(void* addr, usz size) {
             TaskState* prev = xi_get_current_task();
             xi_set_current_task(nullptr);
             Task(state).stop(1);
-            fr.callback(fr.start, fr.end);
+            {
+                FsBaseGuard guard;
+                fr.callback(fr.start, fr.end);
+            }
             xi_set_current_task(prev);
             // Re-verify that the callback successfully mapped/allocated the region and it is writable
             for (usz j = 0; j < state->regions.size(); ++j) {
@@ -269,6 +416,9 @@ extern "C" void xi_sfi_write_check(void* addr, usz size) {
     }
 
     // Write to non-writable region: trap.
+    ::printf("[SFI] OOB write at addr=%p size=%lu jit_rip=0x%lx\n",
+             addr, (unsigned long)size, (unsigned long)xi_last_jit_rip);
+    ::fflush(stdout);
     __asm__ volatile("ud2");
 }
 
@@ -280,6 +430,7 @@ extern "C" void xi_sfi_write_check(void* addr, usz size) {
  * a task can NEVER execute code outside its own executable regions.
  */
 extern "C" void xi_sfi_jump_check(void* target) {
+    FsBaseGuard guard;  // Restore host FS base before accessing host TLS!
     TaskState* state = xi_get_current_task();
     if (!state) return;
 
@@ -348,19 +499,38 @@ extern "C" void xi_sfi_jump_check(void* target) {
 }
 
 extern "C" void* xi_sfi_indirect_jump_resolver(void* target) {
+    FsBaseGuard guard;  // Must restore host FS base BEFORE accessing host TLS!
+
     TaskState* state = xi_get_current_task();
     if (!state) return target;
 
     usz targetAddr = reinterpret_cast<usz>(target);
 
-    // Print all regions for diagnostics
-    ::printf("[xi_sfi_indirect_jump_resolver] Resolving targetAddr=0x%lx. Regions:\n", (unsigned long)targetAddr);
-    for (usz i = 0; i < state->regions.size(); ++i) {
-        MemoryRegion& r = state->regions[i];
-        ::printf("  [%lu] base=0x%lx, size=0x%lx, physical=%p, exec=%d, owned=%d\n",
-                 (unsigned long)i, (unsigned long)r.base, (unsigned long)r.size, r.physical, (int)r.executable, (int)r.owned);
+    // If targetAddr is inside an inactive JIT region, redirect it to the guest physical address
+    // so the resolver can compile/use the active JIT region.
+    for (usz i = 0; i < state->aotCache.size(); ++i) {
+        AOTRegion& aot = state->aotCache[i];
+        if (aot.patchedCode && targetAddr >= reinterpret_cast<usz>(aot.patchedCode) &&
+            targetAddr < reinterpret_cast<usz>(aot.patchedCode) + aot.patchedSize) {
+            if ((aot.originalSize & 0x8000000000000000ULL) != 0) {
+                usz jitOffset = targetAddr - reinterpret_cast<usz>(aot.patchedCode);
+                usz realOriginalSize = aot.originalSize & ~0x8000000000000000ULL;
+                usz guestOffset = 0xFFFFFFFF;
+                if (aot.offsetMap) {
+                    for (usz o = 0; o < realOriginalSize; ++o) {
+                        if (aot.offsetMap[o] == jitOffset) {
+                            guestOffset = o;
+                            break;
+                        }
+                    }
+                }
+                if (guestOffset != 0xFFFFFFFF) {
+                    targetAddr = aot.originalAddr + guestOffset;
+                }
+            }
+            break;
+        }
     }
-    ::fflush(stdout);
 
     // 1. Find the memory region containing this target
     MemoryRegion* targetRegion = nullptr;
@@ -398,23 +568,12 @@ extern "C" void* xi_sfi_indirect_jump_resolver(void* target) {
                 fr.callback(fr.start, fr.end);
                 xi_set_current_task(prevTask);
 
-                ::printf("[xi_sfi_indirect_jump_resolver] Callback finished. New Regions list:\n");
-                for (usz j = 0; j < state->regions.size(); ++j) {
-                    MemoryRegion& r = state->regions[j];
-                    ::printf("  [%lu] base=0x%lx, size=0x%lx, physical=%p\n",
-                             (unsigned long)j, (unsigned long)r.base, (unsigned long)r.size, r.physical);
-                }
-                ::fflush(stdout);
-
                 // Re-verify if it's now mapped
                 for (usz j = 0; j < state->regions.size(); ++j) {
                     MemoryRegion& r = state->regions[j];
                     if (r.physical && targetAddr >= r.base && targetAddr < r.base + r.size) {
                         targetRegion = &r;
                         isVirtual = true;
-                        ::printf("[xi_sfi_indirect_jump_resolver] Re-verify MATCHED j=%lu (base=0x%lx, physical=%p), targetRegion=%p\n",
-                                 (unsigned long)j, (unsigned long)r.base, r.physical, (void*)targetRegion);
-                        ::fflush(stdout);
                         break;
                     }
                 }
@@ -432,12 +591,22 @@ extern "C" void* xi_sfi_indirect_jump_resolver(void* target) {
                 return target;
             }
         }
+        // Also check if it's the context entry trampoline!
+        u8* trampAddr = reinterpret_cast<u8*>(&xi_context_entry_trampoline);
+        if (targetAddr >= reinterpret_cast<usz>(trampAddr) &&
+            targetAddr < reinterpret_cast<usz>(trampAddr) + 1024) {
+            return target;
+        }
         // Also check if it's already a patched address in the AOT cache!
+        // If targetAddr falls inside a JIT output buffer, translate through the offset
+        // map to get the correct JIT entry point. Do NOT return `target` (the original
+        // guest address) — that would jump into unpatched task code.
         for (usz i = 0; i < state->aotCache.size(); ++i) {
             AOTRegion& aot = state->aotCache[i];
             if (aot.patchedCode && targetAddr >= reinterpret_cast<usz>(aot.patchedCode) &&
                 targetAddr < reinterpret_cast<usz>(aot.patchedCode) + aot.patchedSize) {
-                return target;
+                // targetAddr is already a JIT address — return it directly.
+                return reinterpret_cast<void*>(targetAddr);
             }
         }
         // Also check if it's a host runner (parent task 0) executable region!
@@ -461,22 +630,61 @@ extern "C" void* xi_sfi_indirect_jump_resolver(void* target) {
             }
         }
         // Invalid target: trap!
+        ::printf("[xi_sfi_indirect_jump_resolver] Trap: targetAddr=0x%lx\n", (unsigned long)targetAddr);
+        for (usz i = 0; i < state->regions.size(); ++i) {
+            MemoryRegion& r = state->regions[i];
+            ::printf("  Region %lu: base=0x%lx size=0x%lx physical=%p writable=%d executable=%d\n",
+                     (unsigned long)i, (unsigned long)r.base, (unsigned long)r.size, r.physical, (int)r.writable, (int)r.executable);
+        }
+        ::fflush(stdout);
         __asm__ volatile("ud2");
         return nullptr;
     }
 
     // 2. We found the region. Ensure it is AOT-compiled.
+    if (targetRegion->physical == state->stack) {
+        ::printf("[xi_sfi_indirect_jump_resolver] Trap (stack): targetAddr=0x%lx, stack=%p\n", (unsigned long)targetAddr, state->stack);
+        ::fflush(stdout);
+        __asm__ volatile("ud2");
+        return nullptr;
+    }
     targetRegion->lastAccessTicks = ++state->accessCounter;
     MemoryRegion targetRegionVal = *targetRegion;
     AOTRegion* cached = AOT::findCached(state->aotCache, reinterpret_cast<usz>(targetRegionVal.physical), targetRegionVal.size);
+    usz offset = isVirtual ? (targetAddr - targetRegionVal.base) : (targetAddr - reinterpret_cast<usz>(targetRegionVal.physical));
+
+    if (cached) {
+        // If the cached region does not map this offset, check if we have another cached region or compile a new one
+        usz startOff = cached->originalAddr - (cached->originalAddr & ~4095);
+        if (offset < startOff || (offset - startOff) >= cached->originalSize || cached->offsetMap[offset - startOff] == 0xFFFFFFFF) {
+            // Search cache for any other block that maps this offset
+            cached = nullptr;
+            for (usz i = state->aotCache.size(); i > 0; --i) {
+                AOTRegion& reg = state->aotCache[i - 1];
+                if (reg.originalSize > 0 && (reg.originalSize & 0x8000000000000000ULL) == 0 &&
+                    (reg.originalAddr & ~4095) == (reinterpret_cast<usz>(targetRegionVal.physical) & ~4095)) {
+                    usz regOffset = offset;
+                    usz sOff = reg.originalAddr - (reg.originalAddr & ~4095);
+                    if (regOffset >= sOff) {
+                        usz adjOffset = regOffset - sOff;
+                        if (adjOffset < reg.originalSize && reg.offsetMap[adjOffset] != 0xFFFFFFFF) {
+                            cached = &reg;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if (!cached) {
         // Run AOT compilation!
         targetRegion->executable = true; // Make sure it is marked executable
-        AOTResult res = AOT::rewrite(targetRegionVal.physical, targetRegionVal.size, state->regions, targetRegionVal.base);
+        AOTResult res = AOT::rewrite(targetRegionVal.physical, targetRegionVal.size, state->regions, targetRegionVal.base, state);
         if (res.success && res.patchedCode) {
             AOTRegion reg;
-            reg.originalAddr = reinterpret_cast<usz>(targetRegionVal.physical);
-            reg.originalSize = targetRegionVal.size;
+            reg.originalAddr = reinterpret_cast<usz>(targetRegionVal.physical) + (targetRegionVal.size - res.originalSize);
+            reg.originalSize = res.originalSize;
             reg.patchedCode = res.patchedCode;
             reg.patchedSize = res.patchedSize;
             reg.offsetMap = res.offsetMap;
@@ -486,22 +694,28 @@ extern "C" void* xi_sfi_indirect_jump_resolver(void* target) {
     }
 
     if (cached && cached->patchedCode && cached->offsetMap) {
-        usz offset = isVirtual ? (targetAddr - targetRegionVal.base) : (targetAddr - reinterpret_cast<usz>(targetRegionVal.physical));
-        if (offset < cached->originalSize && cached->offsetMap[offset] != 0xFFFFFFFF) {
-            return cached->patchedCode + cached->offsetMap[offset];
+        usz startOff = cached->originalAddr - (cached->originalAddr & ~4095);
+        usz adjOffset = offset - startOff;
+        if (adjOffset < cached->originalSize && cached->offsetMap[adjOffset] != 0xFFFFFFFF) {
+            void* result = cached->patchedCode + cached->offsetMap[adjOffset];
+            ::printf("[resolver] 0x%lx -> JIT %p (offset=0x%lx map=0x%x)\n",
+                     (unsigned long)targetAddr, result,
+                     (unsigned long)offset, cached->offsetMap[adjOffset]);
+            ::fflush(stdout);
+            return result;
         } else {
             ::printf("[xi_sfi_indirect_jump_resolver] Failed mapping check:\n"
                      "  targetAddr=0x%lx\n"
                      "  isVirtual=%d\n"
                      "  r.base=0x%lx, r.physical=%p, r.size=0x%lx\n"
-                     "  offset=%lu (0x%lx)\n"
+                     "  offset=%lu (0x%lx), adjOffset=%lu\n"
                      "  cached->originalSize=%lu\n"
                      "  mapVal=0x%x\n",
                      (unsigned long)targetAddr, (int)isVirtual,
                      (unsigned long)targetRegionVal.base, targetRegionVal.physical, (unsigned long)targetRegionVal.size,
-                     (unsigned long)offset, (unsigned long)offset,
+                     (unsigned long)offset, (unsigned long)offset, (unsigned long)adjOffset,
                      (unsigned long)cached->originalSize,
-                     cached->offsetMap ? cached->offsetMap[offset < cached->originalSize ? offset : 0] : 0);
+                     cached->offsetMap ? cached->offsetMap[adjOffset < cached->originalSize ? adjOffset : 0] : 0);
             ::fflush(stdout);
         }
     } else {
@@ -540,6 +754,7 @@ extern "C" void xi_sfi_stack_check(void* rsp_value) {
 extern "C" void xi_emulate_syscall(TaskState* state, GuestRegs* regs);
 
 extern "C" void xi_emulate_syscall_helper(void* statePtr, GuestRegs* regs) {
+    FsBaseGuard guard;
     if (regs) {
         xi_last_guest_rbx = regs->rbx;
         xi_guest_regs = regs;
@@ -551,6 +766,7 @@ extern "C" void xi_emulate_syscall_helper(void* statePtr, GuestRegs* regs) {
 }
 
 extern "C" void xi_run_instruction_callback(void* callbackPtr, GuestRegs* regs) {
+    FsBaseGuard guard;
     if (regs) {
         xi_last_guest_rbx = regs->rbx;
         xi_guest_regs = regs;
@@ -819,6 +1035,11 @@ static void emitUd2(u8*& outPtr) {
 }
 
 static void emitCallbackCall(u8*& outPtr, u64 callbackPtr, u64 helperAddr) {
+    // 1. Shift RSP to preserve the 128-byte AMD64 red zone
+    // sub rsp, 128 -> 48 81 EC 80 00 00 00
+    *outPtr++ = 0x48; *outPtr++ = 0x81; *outPtr++ = 0xEC;
+    *outPtr++ = 0x80; *outPtr++ = 0x00; *outPtr++ = 0x00; *outPtr++ = 0x00;
+
     // Save caller-saved registers and rbx
     *outPtr++ = 0x9C; // pushfq
     *outPtr++ = 0x50; // push rax
@@ -873,6 +1094,11 @@ static void emitCallbackCall(u8*& outPtr, u64 callbackPtr, u64 helperAddr) {
     *outPtr++ = 0x5B; // pop rbx
     *outPtr++ = 0x58; // pop rax
     *outPtr++ = 0x9D; // popfq
+
+    // Restore red zone shift
+    // add rsp, 128 -> 48 81 C4 80 00 00 00
+    *outPtr++ = 0x48; *outPtr++ = 0x81; *outPtr++ = 0xC4;
+    *outPtr++ = 0x80; *outPtr++ = 0x00; *outPtr++ = 0x00; *outPtr++ = 0x00;
 }
 
 // -------------------------------------------------------------------------
@@ -1148,6 +1374,15 @@ static usz xi_x86_insn_length(const u8* code, usz maxLen,
                 immSize = has67 ? 4 : 8; // Address size.
                 outHasMem = true;
                 break;
+
+            // --- String instructions (MOVS, CMPS, STOS, LODS, SCAS) ---
+            case 0xA4: case 0xA5: case 0xA6: case 0xA7:
+            case 0xAA: case 0xAB: case 0xAC: case 0xAD:
+            case 0xAE: case 0xAF:
+                hasModRM = false;
+                immSize = 0;
+                break;
+
 
             // --- TEST AL/AX/EAX, imm ---
             case 0xA8:
@@ -1463,6 +1698,19 @@ static void parseLayout(const u8* code, usz len, usz& prefixLen, bool& hasRex, u
     modrmPos = pos;
 }
 
+static bool hasSegmentOverride(const u8* code, usz len) {
+    usz prefixLen = 0, modrmPos = 0, opcodeLen = 0;
+    bool hasRex = false;
+    u8 rex = 0;
+    parseLayout(code, len, prefixLen, hasRex, rex, opcodeLen, modrmPos);
+    for (usz i = 0; i < prefixLen; ++i) {
+        if (code[i] == 0x64 || code[i] == 0x65) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool isStackRelativeAndSafe(const u8* code, usz len) {
     usz prefixLen = 0, modrmPos = 0, opcodeLen = 0;
     bool hasRex = false;
@@ -1529,25 +1777,54 @@ static usz getLeaSize(const u8* code, usz len, usz immSize) {
     bool hasRex = false;
     u8 rex = 0;
     parseLayout(code, len, prefixLen, hasRex, rex, opcodeLen, modrmPos);
+    usz copiedPrefixLen = 0;
+    for (usz i = 0; i < prefixLen; ++i) {
+        if (code[i] != 0xF0) copiedPrefixLen++;
+    }
     usz sibDispSize = (len - immSize) - (modrmPos + 1);
-    return prefixLen + 3 + sibDispSize;
+    return copiedPrefixLen + 3 + sibDispSize;
 }
 
-static usz buildLea(u8* out, const u8* insnSrc, usz instrLen, usz immSize) {
+static bool isRipRelativeInstruction(const u8* code, usz len);
+
+static usz getRipRelativeDispOffset(const u8* code, usz len) {
+    usz prefixLen = 0, modrmPos = 0, opcodeLen = 0;
+    bool hasRex = false;
+    u8 rex = 0;
+    parseLayout(code, len, prefixLen, hasRex, rex, opcodeLen, modrmPos);
+    if (modrmPos > 0 && modrmPos < len) {
+        u8 modrm = code[modrmPos];
+        u8 mod = (modrm >> 6) & 3;
+        u8 rm = modrm & 7;
+        if (mod == 0 && rm == 5) {
+            usz dispPos = modrmPos + 1;
+            if (dispPos + 4 <= len) {
+                return dispPos;
+            }
+        }
+    }
+    return 0;
+}
+
+static usz buildLea(u8* out, const u8* insnSrc, usz instrLen, usz immSize, bool isRipRel = false, usz targetAddr = 0) {
     usz pos = 0;
     usz outPos = 0;
     bool hasRex = false;
     u8 rex = 0;
     
-    // Copy legacy prefixes
-    for (;;) {
+    // Copy legacy prefixes (excluding 0xF0 LOCK)
+    while (pos < instrLen) {
         u8 b = insnSrc[pos];
-        if (b == 0x66 || b == 0x67 || b == 0xF0 || b == 0xF2 || b == 0xF3 ||
+        if (b == 0x66 || b == 0x67 || b == 0xF2 || b == 0xF3 ||
             b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 || b == 0x64 || b == 0x65) {
             out[outPos++] = b;
             pos++;
+        } else if (b == 0xF0) {
+            pos++; // Skip LOCK prefix for LEA
         } else break;
     }
+    
+    if (pos >= instrLen) return 0;
     
     // Check original REX prefix
     if ((insnSrc[pos] & 0xF0) == 0x40) {
@@ -1555,6 +1832,8 @@ static usz buildLea(u8* out, const u8* insnSrc, usz instrLen, usz immSize) {
         rex = insnSrc[pos];
         pos++;
     }
+    
+    if (pos >= instrLen) return 0;
     
     // Emit new REX prefix targeting RDI (reg 7) with 64-bit operand size
     u8 newRex = 0x48; // REX.W
@@ -1565,14 +1844,18 @@ static usz buildLea(u8* out, const u8* insnSrc, usz instrLen, usz immSize) {
     
     // Skip opcode
     if (insnSrc[pos] == 0x0F) {
-        if (pos + 1 < instrLen && (insnSrc[pos + 1] == 0x38 || insnSrc[pos + 1] == 0x3A)) {
+        if (pos + 2 < instrLen && (insnSrc[pos + 1] == 0x38 || insnSrc[pos + 1] == 0x3A)) {
             pos += 3;
-        } else {
+        } else if (pos + 1 < instrLen) {
             pos += 2;
+        } else {
+            return 0;
         }
     } else {
         pos += 1;
     }
+    
+    if (pos >= instrLen) return 0;
     
     // Emit LEA opcode (0x8D)
     out[outPos++] = 0x8D;
@@ -1583,9 +1866,17 @@ static usz buildLea(u8* out, const u8* insnSrc, usz instrLen, usz immSize) {
     out[outPos++] = newModrm;
     
     // Copy the remaining bytes (SIB, displacement) except immediate
+    if (pos + immSize > instrLen) return 0;
     usz rem = instrLen - pos - immSize;
     if (rem > 0) {
         std::memcpy(out + outPos, insnSrc + pos, rem);
+        if (isRipRel) {
+            usz leaLen = outPos + rem;
+            usz leaRip = reinterpret_cast<usz>(out) + leaLen;
+            i64 leaDisp64 = static_cast<i64>(targetAddr) - static_cast<i64>(leaRip);
+            i32 leaDisp = static_cast<i32>(leaDisp64);
+            std::memcpy(out + outPos, &leaDisp, 4);
+        }
         outPos += rem;
     }
     
@@ -1616,8 +1907,13 @@ static usz getMemAccessSize(const u8* code, usz len, bool rexW, bool has66) {
     return 4;
 }
 
-static void emitBoundsCheckStub(u8*& out, u64 stubAddr, const u8* insnSrc, usz instrLen, usz immSize, usz accessSize) {
-    // 1. Save all caller-saved registers and RFLAGS (10 registers = 80 bytes)
+static void emitBoundsCheckStub(u8*& out, u64 stubAddr, const u8* insnSrc, usz instrLen, usz immSize, usz accessSize, bool isRipRel = false, usz targetAddr = 0) {
+    // 1. Shift RSP to preserve the 128-byte AMD64 red zone
+    // sub rsp, 128 -> 48 81 EC 80 00 00 00
+    *out++ = 0x48; *out++ = 0x81; *out++ = 0xEC;
+    *out++ = 0x80; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
+
+    // 2. Save all caller-saved registers and RFLAGS (10 registers = 80 bytes)
     *out++ = 0x9C; // pushfq
     *out++ = 0x50; // push rax
     *out++ = 0x51; // push rcx
@@ -1629,26 +1925,28 @@ static void emitBoundsCheckStub(u8*& out, u64 stubAddr, const u8* insnSrc, usz i
     *out++ = 0x41; *out++ = 0x52; // push r10
     *out++ = 0x41; *out++ = 0x53; // push r11
 
-    // 2. Temporarily restore rsp so buildLea computes the correct address
-    // add rsp, 80 -> 48 83 C4 50
-    *out++ = 0x48; *out++ = 0x83; *out++ = 0xC4; *out++ = 0x50;
+    // 3. Temporarily restore rsp so buildLea computes the correct address
+    // add rsp, 80 + 128 = 208 -> 48 81 C4 D0 00 00 00
+    *out++ = 0x48; *out++ = 0x81; *out++ = 0xC4;
+    *out++ = 0xD0; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
 
-    // 3. Construct and emit the LEA instruction to compute the target address into rdi
-    usz leaLen = buildLea(out, insnSrc, instrLen, immSize);
+    // 4. Construct and emit the LEA instruction to compute the target address into rdi
+    usz leaLen = buildLea(out, insnSrc, instrLen, immSize, isRipRel, targetAddr);
     out += leaLen;
 
-    // 4. Restore the shifted rsp
-    // sub rsp, 80 -> 48 83 EC 50
-    *out++ = 0x48; *out++ = 0x83; *out++ = 0xEC; *out++ = 0x50;
+    // 5. Restore the shifted rsp
+    // sub rsp, 208 -> 48 81 EC D0 00 00 00
+    *out++ = 0x48; *out++ = 0x81; *out++ = 0xEC;
+    *out++ = 0xD0; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
 
-    // 5. Pass accessSize in rsi
+    // 6. Pass accessSize in rsi
     // push accessSize (imm8)
     *out++ = 0x6A;
     *out++ = static_cast<u8>(accessSize);
     // pop rsi
     *out++ = 0x5E;
 
-    // 6. Dynamically align the stack to 16 bytes before calling C++ helper
+    // 7. Dynamically align the stack to 16 bytes before calling C++ helper
     // push rbp -> 55
     *out++ = 0x55;
     // mov rbp, rsp -> 48 89 E5
@@ -1656,7 +1954,7 @@ static void emitBoundsCheckStub(u8*& out, u64 stubAddr, const u8* insnSrc, usz i
     // and rsp, -16 -> 48 83 E4 F0
     *out++ = 0x48; *out++ = 0x83; *out++ = 0xE4; *out++ = 0xF0;
 
-    // 7. Call the bounds check helper
+    // 8. Call the bounds check helper
     // movabs rax, stubAddr
     *out++ = 0x48;
     *out++ = 0xB8;
@@ -1667,11 +1965,11 @@ static void emitBoundsCheckStub(u8*& out, u64 stubAddr, const u8* insnSrc, usz i
     *out++ = 0xFF;
     *out++ = 0xD0;
 
-    // 8. Restore stack and unaligned rsp
+    // 9. Restore stack and unaligned rsp
     // leave -> C9 (mov rsp, rbp; pop rbp)
     *out++ = 0xC9;
 
-    // 9. Restore caller-saved registers
+    // 10. Restore caller-saved registers
     *out++ = 0x41; *out++ = 0x5B; // pop r11
     *out++ = 0x41; *out++ = 0x5A; // pop r10
     *out++ = 0x41; *out++ = 0x59; // pop r9
@@ -1682,10 +1980,166 @@ static void emitBoundsCheckStub(u8*& out, u64 stubAddr, const u8* insnSrc, usz i
     *out++ = 0x59; // pop rcx
     *out++ = 0x58; // pop rax
     *out++ = 0x9D; // popfq
+
+    // 11. Restore red zone shift
+    // add rsp, 128 -> 48 81 C4 80 00 00 00
+    *out++ = 0x48; *out++ = 0x81; *out++ = 0xC4;
+    *out++ = 0x80; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
+}
+
+static usz getStringInsnStubSize(const u8* insnSrc, usz instrLen) {
+    usz pos = 0;
+    bool hasRexW = false;
+    bool has66 = false;
+    bool hasRep = false;
+    for (usz i = 0; i < instrLen; ++i) {
+        u8 b = insnSrc[i];
+        if (b == 0x66) has66 = true;
+        if (b == 0xF2 || b == 0xF3) hasRep = true;
+        if ((b & 0xF0) == 0x40) {
+            hasRexW = (b & 0x08) != 0;
+            pos = i + 1;
+        }
+        if (b >= 0xA4 && b <= 0xAF) {
+            pos = i;
+        }
+    }
+    u8 op = insnSrc[pos];
+    bool checkRsi = (op == 0xA4 || op == 0xA5 || op == 0xA6 || op == 0xA7 || op == 0xAC || op == 0xAD);
+    bool checkRdi = (op == 0xA4 || op == 0xA5 || op == 0xA6 || op == 0xA7 || op == 0xAA || op == 0xAB || op == 0xAE || op == 0xAF);
+
+    usz numChecks = (checkRsi ? 1 : 0) + (checkRdi ? 1 : 0);
+    usz itemSize = 1;
+    if (op & 1) {
+        if (hasRexW) itemSize = 8;
+        else if (has66) itemSize = 2;
+        else itemSize = 4;
+    }
+
+    usz checkSize = 0;
+    if (hasRep) {
+        if (itemSize == 1) checkSize = 5;      // mov rsi, [rsp+56]
+        else if (itemSize == 2) checkSize = 8; // mov rsi, [rsp+56] + shl rsi, 1
+        else checkSize = 9;                    // mov rsi, [rsp+56] + shl rsi, 2/3
+    } else {
+        checkSize = 7;                         // mov rsi, itemSize
+    }
+    checkSize += 5; // mov rdi, [rsp + offset]
+    checkSize += 8; // align stack
+    checkSize += 12; // call helper
+    checkSize += 1; // leave
+
+    return 42 + checkSize * numChecks;
+}
+
+static void emitStringInsnBoundsCheckStub(u8*& out, u64 boundsCheckAddr, u64 writeCheckAddr, const u8* insnSrc, usz instrLen) {
+    usz pos = 0;
+    bool hasRexW = false;
+    bool has66 = false;
+    bool hasRep = false;
+    for (usz i = 0; i < instrLen; ++i) {
+        u8 b = insnSrc[i];
+        if (b == 0x66) has66 = true;
+        if (b == 0xF2 || b == 0xF3) hasRep = true;
+        if ((b & 0xF0) == 0x40) {
+            hasRexW = (b & 0x08) != 0;
+            pos = i + 1;
+        }
+        if (b >= 0xA4 && b <= 0xAF) {
+            pos = i;
+        }
+    }
+    u8 op = insnSrc[pos];
+    bool checkRsi = (op == 0xA4 || op == 0xA5 || op == 0xA6 || op == 0xA7 || op == 0xAC || op == 0xAD);
+    bool checkRdi = (op == 0xA4 || op == 0xA5 || op == 0xA6 || op == 0xA7 || op == 0xAA || op == 0xAB || op == 0xAE || op == 0xAF);
+    bool isWriteRdi = (op == 0xA4 || op == 0xA5 || op == 0xAA || op == 0xAB);
+
+    usz itemSize = 1;
+    if (op & 1) {
+        if (hasRexW) itemSize = 8;
+        else if (has66) itemSize = 2;
+        else itemSize = 4;
+    }
+
+    // 1. Shift RSP to preserve the 128-byte AMD64 red zone
+    // sub rsp, 128 -> 48 81 EC 80 00 00 00
+    *out++ = 0x48; *out++ = 0x81; *out++ = 0xEC;
+    *out++ = 0x80; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
+
+    // 2. Save all caller-saved registers and RFLAGS (10 registers = 80 bytes)
+    *out++ = 0x9C; // pushfq
+    *out++ = 0x50; // push rax
+    *out++ = 0x51; // push rcx
+    *out++ = 0x52; // push rdx
+    *out++ = 0x56; // push rsi
+    *out++ = 0x57; // push rdi
+    *out++ = 0x41; *out++ = 0x50; // push r8
+    *out++ = 0x41; *out++ = 0x51; // push r9
+    *out++ = 0x41; *out++ = 0x52; // push r10
+    *out++ = 0x41; *out++ = 0x53; // push r11
+
+    auto emitCheck = [&](bool isRdi, bool isWrite) {
+        if (hasRep) {
+            // mov rsi, [rsp + 56] -> 48 8B 74 24 38
+            *out++ = 0x48; *out++ = 0x8B; *out++ = 0x74; *out++ = 0x24; *out++ = 0x38;
+            if (itemSize == 2) {
+                *out++ = 0x48; *out++ = 0xD1; *out++ = 0xE6;
+            } else if (itemSize == 4) {
+                *out++ = 0x48; *out++ = 0xC1; *out++ = 0xE6; *out++ = 0x02;
+            } else if (itemSize == 8) {
+                *out++ = 0x48; *out++ = 0xC1; *out++ = 0xE6; *out++ = 0x03;
+            }
+        } else {
+            *out++ = 0x48; *out++ = 0xC7; *out++ = 0xC6;
+            u32 size32 = itemSize;
+            std::memcpy(out, &size32, 4);
+            out += 4;
+        }
+
+        if (isRdi) {
+            *out++ = 0x48; *out++ = 0x8B; *out++ = 0x7C; *out++ = 0x24; *out++ = 0x20;
+        } else {
+            *out++ = 0x48; *out++ = 0x8B; *out++ = 0x7C; *out++ = 0x24; *out++ = 0x28;
+        }
+
+        *out++ = 0x55; // push rbp
+        *out++ = 0x48; *out++ = 0x89; *out++ = 0xE5;
+        *out++ = 0x48; *out++ = 0x83; *out++ = 0xE4; *out++ = 0xF0;
+
+        u64 helperAddr = isWrite ? writeCheckAddr : boundsCheckAddr;
+        *out++ = 0x48; *out++ = 0xB8;
+        std::memcpy(out, &helperAddr, 8);
+        out += 8;
+        *out++ = 0xFF; *out++ = 0xD0;
+
+        *out++ = 0xC9; // leave
+    };
+
+    if (checkRsi) {
+        emitCheck(false, false);
+    }
+    if (checkRdi) {
+        emitCheck(true, isWriteRdi);
+    }
+
+    *out++ = 0x41; *out++ = 0x5B; // pop r11
+    *out++ = 0x41; *out++ = 0x5A; // pop r10
+    *out++ = 0x41; *out++ = 0x59; // pop r9
+    *out++ = 0x41; *out++ = 0x58; // pop r8
+    *out++ = 0x5F; // pop rdi
+    *out++ = 0x5E; // pop rsi
+    *out++ = 0x5A; // pop rdx
+    *out++ = 0x59; // pop rcx
+    *out++ = 0x58; // pop rax
+    *out++ = 0x9D; // popfq
+
+    *out++ = 0x48; *out++ = 0x81; *out++ = 0xC4;
+    *out++ = 0x80; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
 }
 
 /**
  * @brief Size of the indirect-jump validation stub.
+
  *
  * For indirect JMP/CALL (FF /2, FF /4), we replace them with:
  *   push rax                          ; 1 byte
@@ -1789,16 +2243,15 @@ static void emitRetCheckStub(u8*& out, u64 resolverAddr) {
     // call rax
     *out++ = 0xFF; *out++ = 0xD0;
     
-    // 6. Restore stack
+    // 6. Write target address in rax to 88(%rbp) (which corresponds to rsp_old)
+    // mov [rbp + 88], rax (48 89 45 58)
+    *out++ = 0x48; *out++ = 0x89; *out++ = 0x45; *out++ = 0x58;
+    
+    // 7. Restore stack
     *out++ = 0xC9; // leave
     
-    // 7. Restore all registers (save rax into r11 first!)
-    // mov r11, rax (49 89 C3)
-    *out++ = 0x49; *out++ = 0x89; *out++ = 0xC3;
-    
-    // add rsp, 8 (skip popped r11)
-    *out++ = 0x48; *out++ = 0x83; *out++ = 0xC4; *out++ = 0x08;
-    
+    // 8. Restore all registers (including r11!)
+    *out++ = 0x41; *out++ = 0x5B; // pop r11
     *out++ = 0x41; *out++ = 0x5A; // pop r10
     *out++ = 0x41; *out++ = 0x59; // pop r9
     *out++ = 0x41; *out++ = 0x58; // pop r8
@@ -1809,22 +2262,28 @@ static void emitRetCheckStub(u8*& out, u64 resolverAddr) {
     *out++ = 0x58; // pop rax
     *out++ = 0x5F; // pop rdi
     
-    // 8. Pop the return address off the stack (advance rsp by 8)
+    // 9. Pop the return address off the stack (advance rsp by 8)
     // add rsp, 8 (48 83 C4 08)
     *out++ = 0x48; *out++ = 0x83; *out++ = 0xC4; *out++ = 0x08;
     
-    // 9. Jump to r11 (41 FF E3)
-    *out++ = 0x41; *out++ = 0xFF; *out++ = 0xE3;
+    // 10. Jump to the resolved JIT return target stored at [rsp - 8]
+    *out++ = 0xFF; *out++ = 0x64; *out++ = 0x24; *out++ = 0xF8; // jmp qword ptr [rsp - 8]
 }
 
-static constexpr usz kIndirectJumpCheckStubSize = 58;
+
+static constexpr usz kIndirectJumpCheckStubSize = 92;
 
 static void emitIndirectJumpStub(u8*& out, const u8* insnSrc, usz instrLen, u64 resolverAddr) {
-    // 1. Save original rdi and rax to compute safely
+    // 1. Shift RSP to preserve the 128-byte AMD64 red zone
+    // sub rsp, 128 -> 48 81 EC 80 00 00 00
+    *out++ = 0x48; *out++ = 0x81; *out++ = 0xEC;
+    *out++ = 0x80; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
+
+    // 2. Save original rdi and rax to compute safely
     *out++ = 0x57; // push rdi
     *out++ = 0x50; // push rax
     
-    // 2. Execute the modified instruction (e.g. push [rbx]).
+    // 3. Execute the modified instruction (e.g. push [rbx]).
     // This pushes the TARGET address onto the stack.
     usz opcodePos = 0;
     while (opcodePos < instrLen) {
@@ -1842,9 +2301,126 @@ static void emitIndirectJumpStub(u8*& out, const u8* insnSrc, usz instrLen, u64 
     out[opcodePos + 1] = (modrm & 0xC7) | 0x30; // reg = 6 (push)
     out += instrLen;
     
-    // 3. Pop the target into rdi
+    // 4. Pop the target into rdi
     *out++ = 0x5F; // pop rdi
     
+    // 5. Save other caller-saved registers and RFLAGS (8 items = 64 bytes)
+    *out++ = 0x9C; // pushfq
+    *out++ = 0x51; // push rcx
+    *out++ = 0x52; // push rdx
+    *out++ = 0x56; // push rsi
+    *out++ = 0x41; *out++ = 0x50; // push r8
+    *out++ = 0x41; *out++ = 0x51; // push r9
+    *out++ = 0x41; *out++ = 0x52; // push r10
+    *out++ = 0x41; *out++ = 0x53; // push r11
+    
+    // 6. Align stack dynamically
+    *out++ = 0x55; // push rbp
+    *out++ = 0x48; *out++ = 0x89; *out++ = 0xE5; // mov rbp, rsp
+    *out++ = 0x48; *out++ = 0x83; *out++ = 0xE4; *out++ = 0xF0; // and rsp, -16
+    
+    // 7. Call the jump check helper
+    // movabs rax, resolverAddr
+    *out++ = 0x48; *out++ = 0xB8;
+    std::memcpy(out, &resolverAddr, 8);
+    out += 8;
+    // call rax
+    *out++ = 0xFF; *out++ = 0xD0;
+    
+    // 8. Restore stack and jump without clobbering registers
+    u8 reg = (modrm >> 3) & 7;
+    bool isCall = (reg == 2 || reg == 3);
+    if (isCall) {
+        // Write target address in rax to 200(%rbp)
+        // mov [rbp + 200], rax (48 89 85 C8 00 00 00)
+        *out++ = 0x48; *out++ = 0x89; *out++ = 0x85;
+        *out++ = 0xC8; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
+
+        // Write return address to 208(%rbp)
+        // mov dword ptr [rbp + 208], imm32_low (C7 85 D0 00 00 00 <low>)
+        // mov dword ptr [rbp + 212], imm32_high (C7 85 D4 00 00 00 <high>)
+        u64 retAddr = reinterpret_cast<u64>(out) + 43;
+        u32 retLow = static_cast<u32>(retAddr);
+        u32 retHigh = static_cast<u32>(retAddr >> 32);
+
+        *out++ = 0xC7; *out++ = 0x85; *out++ = 0xD0; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
+        std::memcpy(out, &retLow, 4);
+        out += 4;
+
+        *out++ = 0xC7; *out++ = 0x85; *out++ = 0xD4; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
+        std::memcpy(out, &retHigh, 4);
+        out += 4;
+
+        *out++ = 0xC9; // leave
+
+        // Pop registers (including r11 to restore it!)
+        *out++ = 0x41; *out++ = 0x5B; // pop r11 (41 5B)
+        *out++ = 0x41; *out++ = 0x5A; // pop r10
+        *out++ = 0x41; *out++ = 0x59; // pop r9
+        *out++ = 0x41; *out++ = 0x58; // pop r8
+        *out++ = 0x5E; // pop rsi
+        *out++ = 0x5A; // pop rdx
+        *out++ = 0x59; // pop rcx
+        *out++ = 0x9D; // popfq
+        *out++ = 0x58; // pop rax
+        *out++ = 0x5F; // pop rdi
+
+        // Restore red zone, set RSP to rsp_old - 8 (since return address is already pushed)
+        *out++ = 0x48; *out++ = 0x83; *out++ = 0xC4; *out++ = 0x78; // add rsp, 120
+
+        // Jump to target
+        *out++ = 0xFF; *out++ = 0x64; *out++ = 0x24; *out++ = 0xF8; // jmp qword ptr [rsp - 8]
+    } else {
+        // Write target address in rax to 208(%rbp)
+        // mov [rbp + 208], rax (48 89 85 D0 00 00 00)
+        *out++ = 0x48; *out++ = 0x89; *out++ = 0x85;
+        *out++ = 0xD0; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
+
+        *out++ = 0xC9; // leave
+
+        // Pop registers (including r11 to restore it!)
+        *out++ = 0x41; *out++ = 0x5B; // pop r11 (41 5B)
+        *out++ = 0x41; *out++ = 0x5A; // pop r10
+        *out++ = 0x41; *out++ = 0x59; // pop r9
+        *out++ = 0x41; *out++ = 0x58; // pop r8
+        *out++ = 0x5E; // pop rsi
+        *out++ = 0x5A; // pop rdx
+        *out++ = 0x59; // pop rcx
+        *out++ = 0x9D; // popfq
+        *out++ = 0x58; // pop rax
+        *out++ = 0x5F; // pop rdi
+
+        // Restore red zone, set RSP to rsp_old
+        *out++ = 0x48; *out++ = 0x81; *out++ = 0xC4;
+        *out++ = 0x80; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00; // add rsp, 128
+
+        // Jump to target
+        *out++ = 0xFF; *out++ = 0x64; *out++ = 0x24; *out++ = 0xF8; // jmp qword ptr [rsp - 8]
+
+        // Pad to match isCall size (17 bytes)
+        for (int i = 0; i < 17; ++i) {
+            *out++ = 0x90; // nop
+        }
+    }
+}
+
+static constexpr usz kDirectCrossPageStubSize = 101;
+
+static void emitDirectCrossPageStub(u8*& out, u64 targetGuestVirtualAddr, u64 resolverAddr, bool isCall) {
+    // 1. Shift RSP to preserve the 128-byte AMD64 red zone
+    // sub rsp, 128 -> 48 81 EC 80 00 00 00
+    *out++ = 0x48; *out++ = 0x81; *out++ = 0xEC;
+    *out++ = 0x80; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
+
+    // 2. Save original rdi and rax to compute safely
+    *out++ = 0x57; // push rdi
+    *out++ = 0x50; // push rax
+
+    // 3. Load targetGuestVirtualAddr into rdi
+    *out++ = 0x48; *out++ = 0xBF; // movabs rdi, targetGuestVirtualAddr
+    std::memcpy(out, &targetGuestVirtualAddr, 8);
+    out += 8;
+
     // 4. Save other caller-saved registers and RFLAGS (8 items = 64 bytes)
     *out++ = 0x9C; // pushfq
     *out++ = 0x51; // push rcx
@@ -1854,119 +2430,91 @@ static void emitIndirectJumpStub(u8*& out, const u8* insnSrc, usz instrLen, u64 
     *out++ = 0x41; *out++ = 0x51; // push r9
     *out++ = 0x41; *out++ = 0x52; // push r10
     *out++ = 0x41; *out++ = 0x53; // push r11
-    
+
     // 5. Align stack dynamically
     *out++ = 0x55; // push rbp
     *out++ = 0x48; *out++ = 0x89; *out++ = 0xE5; // mov rbp, rsp
     *out++ = 0x48; *out++ = 0x83; *out++ = 0xE4; *out++ = 0xF0; // and rsp, -16
-    
-    // 6. Call the jump check helper
-    // movabs rax, resolverAddr
-    *out++ = 0x48; *out++ = 0xB8;
-    std::memcpy(out, &resolverAddr, 8);
-    out += 8;
-    // call rax
-    *out++ = 0xFF; *out++ = 0xD0;
-    
-    // 7. Restore stack
-    *out++ = 0xC9; // leave
-    
-    // 8. Restore registers (save rax into r11 first!)
-    // mov r11, rax (49 89 C3)
-    *out++ = 0x49; *out++ = 0x89; *out++ = 0xC3;
-    
-    // pop the rest
-    // Actually, pop r11 would overwrite the resolved target!
-    // So we add 8 to rsp instead of popping r11!
-    // add rsp, 8 (48 83 C4 08)
-    *out++ = 0x48; *out++ = 0x83; *out++ = 0xC4; *out++ = 0x08;
-    
-    *out++ = 0x41; *out++ = 0x5A; // pop r10
-    *out++ = 0x41; *out++ = 0x59; // pop r9
-    *out++ = 0x41; *out++ = 0x58; // pop r8
-    *out++ = 0x5E; // pop rsi
-    *out++ = 0x5A; // pop rdx
-    *out++ = 0x59; // pop rcx
-    *out++ = 0x9D; // popfq
-    *out++ = 0x58; // pop rax
-    *out++ = 0x5F; // pop rdi
-    
-    // 9. Execute the jump/call using r11
-    u8 reg = (modrm >> 3) & 7;
-    bool isCall = (reg == 2 || reg == 3);
-    if (isCall) {
-        // call r11 (41 FF D3)
-        *out++ = 0x41; *out++ = 0xFF; *out++ = 0xD3;
-    } else {
-        // jmp r11 (41 FF E3)
-        *out++ = 0x41; *out++ = 0xFF; *out++ = 0xE3;
-    }
-}
 
-static constexpr usz kDirectCrossPageStubSize = 67;
-
-static void emitDirectCrossPageStub(u8*& out, u64 targetGuestVirtualAddr, u64 resolverAddr, bool isCall) {
-    u8* start = out;
-    // 1. Save original rdi and rax to compute safely
-    *out++ = 0x57; // push rdi
-    *out++ = 0x50; // push rax
-
-    // 2. Load targetGuestVirtualAddr into rdi
-    *out++ = 0x48; *out++ = 0xBF; // movabs rdi, targetGuestVirtualAddr
-    std::memcpy(out, &targetGuestVirtualAddr, 8);
-    out += 8;
-
-    // 3. Save other caller-saved registers and RFLAGS (8 items = 64 bytes)
-    *out++ = 0x9C; // pushfq
-    *out++ = 0x51; // push rcx
-    *out++ = 0x52; // push rdx
-    *out++ = 0x56; // push rsi
-    *out++ = 0x41; *out++ = 0x50; // push r8
-    *out++ = 0x41; *out++ = 0x51; // push r9
-    *out++ = 0x41; *out++ = 0x52; // push r10
-    *out++ = 0x41; *out++ = 0x53; // push r11
-
-    // 4. Align stack dynamically
-    *out++ = 0x55; // push rbp
-    *out++ = 0x48; *out++ = 0x89; *out++ = 0xE5; // mov rbp, rsp
-    *out++ = 0x48; *out++ = 0x83; *out++ = 0xE4; *out++ = 0xF0; // and rsp, -16
-
-    // 5. Call resolverAddr
+    // 6. Call resolverAddr
     *out++ = 0x48; *out++ = 0xB8; // movabs rax, resolverAddr
     std::memcpy(out, &resolverAddr, 8);
     out += 8;
     *out++ = 0xFF; *out++ = 0xD0; // call rax
 
-    // 6. Restore stack
-    *out++ = 0xC9; // leave
-
-    // 7. Restore registers (save rax into r11 first!)
-    *out++ = 0x49; *out++ = 0x89; *out++ = 0xC3; // mov r11, rax
-    *out++ = 0x48; *out++ = 0x83; *out++ = 0xC4; *out++ = 0x08; // add rsp, 8 (skip popped r11)
-    *out++ = 0x41; *out++ = 0x5A; // pop r10
-    *out++ = 0x41; *out++ = 0x59; // pop r9
-    *out++ = 0x41; *out++ = 0x58; // pop r8
-    *out++ = 0x5E; // pop rsi
-    *out++ = 0x5A; // pop rdx
-    *out++ = 0x59; // pop rcx
-    *out++ = 0x9D; // popfq
-    *out++ = 0x58; // pop rax
-    *out++ = 0x5F; // pop rdi
-
-    // 8. Execute call or jump
+    // 7. Restore stack and jump without clobbering registers
     if (isCall) {
-        *out++ = 0x41; *out++ = 0xFF; *out++ = 0xD3; // call r11
-    } else {
-        *out++ = 0x41; *out++ = 0xFF; *out++ = 0xE3; // jmp r11
-    }
+        // Write target address in rax to 200(%rbp)
+        // mov [rbp + 200], rax (48 89 85 C8 00 00 00)
+        *out++ = 0x48; *out++ = 0x89; *out++ = 0x85;
+        *out++ = 0xC8; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
 
-    ::printf("[emitDirectCrossPageStub] Generated stub for target=0x%lx (isCall=%d) at %p:\n  ",
-             (unsigned long)targetGuestVirtualAddr, (int)isCall, start);
-    for (u8* p = start; p < out; ++p) {
-        ::printf("%02x ", *p);
+        // Write return address to 208(%rbp)
+        // mov dword ptr [rbp + 208], imm32_low (C7 85 D0 00 00 00 <low>)
+        // mov dword ptr [rbp + 212], imm32_high (C7 85 D4 00 00 00 <high>)
+        u64 retAddr = reinterpret_cast<u64>(out) + 43;
+        u32 retLow = static_cast<u32>(retAddr);
+        u32 retHigh = static_cast<u32>(retAddr >> 32);
+
+        *out++ = 0xC7; *out++ = 0x85; *out++ = 0xD0; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
+        std::memcpy(out, &retLow, 4);
+        out += 4;
+
+        *out++ = 0xC7; *out++ = 0x85; *out++ = 0xD4; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
+        std::memcpy(out, &retHigh, 4);
+        out += 4;
+
+        *out++ = 0xC9; // leave
+
+        // Pop registers (including r11 to restore it!)
+        *out++ = 0x41; *out++ = 0x5B; // pop r11 (41 5B)
+        *out++ = 0x41; *out++ = 0x5A; // pop r10
+        *out++ = 0x41; *out++ = 0x59; // pop r9
+        *out++ = 0x41; *out++ = 0x58; // pop r8
+        *out++ = 0x5E; // pop rsi
+        *out++ = 0x5A; // pop rdx
+        *out++ = 0x59; // pop rcx
+        *out++ = 0x9D; // popfq
+        *out++ = 0x58; // pop rax
+        *out++ = 0x5F; // pop rdi
+
+        // Restore red zone, set RSP to rsp_old - 8 (since return address is already pushed)
+        *out++ = 0x48; *out++ = 0x83; *out++ = 0xC4; *out++ = 0x78; // add rsp, 120
+
+        // Jump to target
+        *out++ = 0xFF; *out++ = 0x64; *out++ = 0x24; *out++ = 0xF8; // jmp qword ptr [rsp - 8]
+    } else {
+        // Write target address in rax to 208(%rbp)
+        // mov [rbp + 208], rax (48 89 85 D0 00 00 00)
+        *out++ = 0x48; *out++ = 0x89; *out++ = 0x85;
+        *out++ = 0xD0; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
+
+        *out++ = 0xC9; // leave
+
+        // Pop registers (including r11 to restore it!)
+        *out++ = 0x41; *out++ = 0x5B; // pop r11 (41 5B)
+        *out++ = 0x41; *out++ = 0x5A; // pop r10
+        *out++ = 0x41; *out++ = 0x59; // pop r9
+        *out++ = 0x41; *out++ = 0x58; // pop r8
+        *out++ = 0x5E; // pop rsi
+        *out++ = 0x5A; // pop rdx
+        *out++ = 0x59; // pop rcx
+        *out++ = 0x9D; // popfq
+        *out++ = 0x58; // pop rax
+        *out++ = 0x5F; // pop rdi
+
+        // Restore red zone, set RSP to rsp_old
+        *out++ = 0x48; *out++ = 0x81; *out++ = 0xC4;
+        *out++ = 0x80; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00; // add rsp, 128
+
+        // Jump to target
+        *out++ = 0xFF; *out++ = 0x64; *out++ = 0x24; *out++ = 0xF8; // jmp qword ptr [rsp - 8]
+
+        // Pad to match isCall size (17 bytes)
+        for (int i = 0; i < 17; ++i) {
+            *out++ = 0x90; // nop
+        }
     }
-    ::printf("\n");
-    ::fflush(stdout);
 }
 
 static bool isTargetInPage(usz pos, usz len, usz relOffset, usz relSize, const u8* code, usz codeSize) {
@@ -1983,6 +2531,25 @@ static bool isTargetInPage(usz pos, usz len, usz relOffset, usz relSize, const u
     return origTarget >= 0 && origTarget < static_cast<i64>(codeSize);
 }
 
+static bool isRipRelativeInstruction(const u8* code, usz len) {
+    usz prefixLen = 0, modrmPos = 0, opcodeLen = 0;
+    bool hasRex = false;
+    u8 rex = 0;
+    parseLayout(code, len, prefixLen, hasRex, rex, opcodeLen, modrmPos);
+    if (modrmPos > 0 && modrmPos < len) {
+        u8 modrm = code[modrmPos];
+        u8 mod = (modrm >> 6) & 3;
+        u8 rm = modrm & 7;
+        if (mod == 0 && rm == 5) {
+            usz dispPos = modrmPos + 1;
+            if (dispPos + 4 <= len) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 
 /**
  * @brief Size of the stack-check stub.
@@ -1997,10 +2564,15 @@ static bool isTargetInPage(usz pos, usz len, usz relOffset, usz relSize, const u
  *   pop rax                           ; 1 byte
  *                                Total: 54 bytes
  */
-static constexpr usz kStackCheckStubSize = 54;
+static constexpr usz kStackCheckStubSize = 71;
 
 static void emitStackCheckStub(u8*& out, u64 stackCheckAddr) {
-    // 1. Save all caller-saved registers and RFLAGS (80 bytes of pushes)
+    // 1. Shift RSP to preserve the 128-byte AMD64 red zone
+    // sub rsp, 128 -> 48 81 EC 80 00 00 00
+    *out++ = 0x48; *out++ = 0x81; *out++ = 0xEC;
+    *out++ = 0x80; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
+
+    // 2. Save all caller-saved registers and RFLAGS (80 bytes of pushes)
     *out++ = 0x9C; // pushfq
     *out++ = 0x50; // push rax
     *out++ = 0x51; // push rcx
@@ -2012,24 +2584,26 @@ static void emitStackCheckStub(u8*& out, u64 stackCheckAddr) {
     *out++ = 0x41; *out++ = 0x52; // push r10
     *out++ = 0x41; *out++ = 0x53; // push r11
 
-    // 2. Compute the original RSP into rdi: lea rdi, [rsp + 80]
-    *out++ = 0x48; *out++ = 0x8D; *out++ = 0x7C; *out++ = 0x24; *out++ = 0x50;
+    // 3. Compute the original RSP into rdi: lea rdi, [rsp + 80 + 128]
+    // 208 = 0xD0
+    *out++ = 0x48; *out++ = 0x8D; *out++ = 0xBC; *out++ = 0x24;
+    *out++ = 0xD0; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
 
-    // 3. Align stack dynamically before call
+    // 4. Align stack dynamically before call
     *out++ = 0x55; // push rbp
     *out++ = 0x48; *out++ = 0x89; *out++ = 0xE5; // mov rbp, rsp
     *out++ = 0x48; *out++ = 0x83; *out++ = 0xE4; *out++ = 0xF0; // and rsp, -16
 
-    // 4. Call helper
+    // 5. Call helper
     *out++ = 0x48; *out++ = 0xB8; // movabs rax, imm64
     std::memcpy(out, &stackCheckAddr, 8);
     out += 8;
     *out++ = 0xFF; *out++ = 0xD0; // call rax
 
-    // 5. Restore stack
+    // 6. Restore stack
     *out++ = 0xC9; // leave
 
-    // 6. Restore caller-saved registers
+    // 7. Restore caller-saved registers
     *out++ = 0x41; *out++ = 0x5B; // pop r11
     *out++ = 0x41; *out++ = 0x5A; // pop r10
     *out++ = 0x41; *out++ = 0x59; // pop r9
@@ -2040,6 +2614,11 @@ static void emitStackCheckStub(u8*& out, u64 stackCheckAddr) {
     *out++ = 0x59; // pop rcx
     *out++ = 0x58; // pop rax
     *out++ = 0x9D; // popfq
+
+    // 8. Restore red zone shift
+    // add rsp, 128 -> 48 81 C4 80 00 00 00
+    *out++ = 0x48; *out++ = 0x81; *out++ = 0xC4;
+    *out++ = 0x80; *out++ = 0x00; *out++ = 0x00; *out++ = 0x00;
 }
 
 /**
@@ -2267,7 +2846,7 @@ static bool modifiesRbp(const u8* code, usz len, bool hasModRM, u8 modrm, u8 opc
 
 AOTResult AOT::rewrite(const u8* code, usz codeSize,
                        const Array<MemoryRegion>& regions,
-                       usz taskBase) {
+                       usz taskBase, void* statePtr) {
     AOTResult result;
     result.patchedCode = nullptr;
     result.patchedSize = 0;
@@ -2279,8 +2858,48 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         return result;
     }
 
+    usz startOffset = 0;
+    TaskState* state = statePtr ? static_cast<TaskState*>(statePtr) : xi_get_current_task();
+    if (state && taskBase > 0) {
+        MemoryRegion* prevRegion = nullptr;
+        for (usz r = 0; r < regions.size(); ++r) {
+            const MemoryRegion& reg = regions[r];
+            if (reg.physical && reg.executable && reg.base + reg.size == taskBase) {
+                prevRegion = const_cast<MemoryRegion*>(&reg);
+                break;
+            }
+        }
+        if (prevRegion) {
+            AOTRegion* cachedPrev = AOT::findCached(state->aotCache, reinterpret_cast<usz>(prevRegion->physical), prevRegion->size);
+            if (cachedPrev) {
+                usz prevPos = 0;
+                usz lastInsnOffset = 0;
+                usz lastInsnLen = 0;
+                while (prevPos < prevRegion->size) {
+                    bool dummy1, dummy2, dummy5;
+                    usz dummy3, dummy4, dummy6;
+                    usz maxLen = prevRegion->size - prevPos;
+                    if (maxLen < 15) {
+                        maxLen = 15;
+                    }
+                    usz len = xi_x86_insn_length(prevRegion->physical + prevPos, maxLen,
+                                                 dummy1, dummy2, dummy3, dummy4, dummy5, dummy6);
+                    if (len == 0) {
+                        len = 1;
+                    }
+                    lastInsnOffset = prevPos;
+                    lastInsnLen = len;
+                    prevPos += len;
+                }
+                if (lastInsnOffset + lastInsnLen > prevRegion->size) {
+                    startOffset = lastInsnOffset + lastInsnLen - prevRegion->size;
+                }
+            }
+        }
+    }
+
     usz outputSize = 0;
-    usz pos = 0;
+    usz pos = startOffset;
 
     struct InsnInfo {
         usz origOffset;    // Offset in original code.
@@ -2296,6 +2915,7 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         bool isBannedPrivileged; // Force trap (fails decoding).
         bool isIndirectJump;     // Indirect JMP/CALL — banned for containment.
         bool isRet;              // RET — rewritten with validation.
+        bool isStringInsn;       // String instruction (MOVS/CMPS/STOS/LODS/SCAS).
         bool isRspModifying;     // RSP modifying instruction.
         usz immSize;
         usz leaSize;
@@ -2332,7 +2952,7 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
 
         usz maxLen = codeSize - pos;
         if (maxLen < 15) {
-            TaskState* state = xi_get_current_task();
+            TaskState* state = statePtr ? static_cast<TaskState*>(statePtr) : xi_get_current_task();
             if (state) {
                 usz guestBase = 0;
                 for (usz r = 0; r < state->regions.size(); ++r) {
@@ -2374,7 +2994,7 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         usz len = xi_x86_insn_length(code + pos, maxLen,
                                       hasMem, isRelJmp, relOffset, relSize, isRspModifying, immSize);
 
-        if (hasMem && isStackRelativeAndSafe(code + pos, len)) {
+        if (hasMem && (isStackRelativeAndSafe(code + pos, len) || hasSegmentOverride(code + pos, len))) {
             hasMem = false;
         }
 
@@ -2409,6 +3029,24 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         bool isRet = false;
         detectIndirectControl(code + pos, len, isIndirectJump, isRet);
 
+        bool isStringInsn = false;
+        if (!isBannedPrivileged && !isHooked && !isIndirectJump && !isRet && !isRelJmp) {
+            usz opcodePos = pos;
+            while (opcodePos < pos + len) {
+                u8 b = code[opcodePos];
+                if (b == 0x66 || b == 0x67 || b == 0xF0 || b == 0xF2 || b == 0xF3 ||
+                    (b & 0xF0) == 0x40) {
+                    ++opcodePos;
+                } else break;
+            }
+            if (opcodePos < pos + len) {
+                u8 op = code[opcodePos];
+                if (op >= 0xA4 && op <= 0xAF) {
+                    isStringInsn = true;
+                }
+            }
+        }
+
         InsnInfo& info = insns[insnCount];
         info.origOffset = pos;
         info.instrLen = len;
@@ -2424,6 +3062,7 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         info.isBannedPrivileged = isBannedPrivileged;
         info.isIndirectJump = isIndirectJump;
         info.isRet = isRet;
+        info.isStringInsn = isStringInsn;
         info.isRspModifying = isRspModifying;
         info.immSize = immSize;
         info.isTranslate = isTranslate;
@@ -2461,11 +3100,13 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         } else if (isHooked && hookBanned && !callbackPtr) {
             insnOutputSize = 2; // ud2
         } else if (isHooked && callbackPtr) {
-            insnOutputSize = 64 + (hookBanned ? 0 : len);
+            insnOutputSize = 78 + (hookBanned ? 0 : len);
         } else if (isIndirectJump) {
             insnOutputSize = kIndirectJumpCheckStubSize + len; // Dynamic JIT target check & translation stub
         } else if (isRet) {
             insnOutputSize = kRetCheckStubSize;
+        } else if (isStringInsn) {
+            insnOutputSize = getStringInsnStubSize(code + pos, len) + len;
         } else if (isRelJmp) {
             bool inPage = isTargetInPage(pos, len, relOffset, relSize, code, codeSize);
             if (inPage) {
@@ -2501,7 +3142,7 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
                 }
             }
         } else if (hasMem) {
-            insnOutputSize = 60 + info.leaSize + len;
+            insnOutputSize = 80 + info.leaSize + len;
         } else {
             insnOutputSize = len;
         }
@@ -2509,10 +3150,59 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         if (isRspModifying && !isBannedPrivileged && !(isHooked && hookBanned) && !isIndirectJump && !isRet) {
             insnOutputSize += kStackCheckStubSize;
         }
+        if (pos + len >= codeSize) {
+            bool fallsThrough = true;
+            if (isBannedPrivileged) fallsThrough = false;
+            else if (isHooked && hookBanned && !callbackPtr) fallsThrough = false;
+            else if (isIndirectJump) fallsThrough = false;
+            else if (isRet) fallsThrough = false;
+            else if (isRelJmp) {
+                u8 op = code[pos + relOffset - 1];
+                if (op == 0xEB || op == 0xE9) {
+                    fallsThrough = false;
+                }
+            }
+            if (fallsThrough) {
+                insnOutputSize += kDirectCrossPageStubSize;
+            }
+        }
         outputSize += insnOutputSize;
 
         ++insnCount;
         pos += len;
+    }
+
+    if (state && taskBase > 0 && insnCount > 0) {
+        const InsnInfo& lastInsn = insns[insnCount - 1];
+        if (lastInsn.origOffset + lastInsn.instrLen > codeSize) {
+            usz nextPageBase = taskBase + codeSize;
+            usz nextPagePhys = 0;
+            usz nextPageSize = 0;
+            for (usz r = 0; r < regions.size(); ++r) {
+                const MemoryRegion& reg = regions[r];
+                if (reg.physical && nextPageBase >= reg.base && nextPageBase < reg.base + reg.size) {
+                    nextPagePhys = reinterpret_cast<usz>(reg.physical) + (nextPageBase - reg.base);
+                    nextPageSize = reg.size;
+                    break;
+                }
+            }
+            if (nextPagePhys != 0) {
+                AOT::invalidate(state->aotCache, nextPagePhys, nextPageSize);
+            }
+        }
+    }
+
+
+
+    // Patch aligned SSE moves (movaps/movapd) to unaligned (movups/movupd) in
+    // the ORIGINAL code bytes. This is critical: if any execution path reaches
+    // the raw guest page (bypassing AOT), the aligned moves would fault on a
+    // misaligned stack. Patching in-place makes the raw code safe too.
+    {
+        u8* mutableCode = const_cast<u8*>(code);
+        for (usz i = 0; i < insnCount; ++i) {
+            patchAlignedSSEMoves(mutableCode + insns[i].origOffset, insns[i].instrLen);
+        }
     }
 
     // 1. Identify branch targets to divide basic blocks.
@@ -2645,11 +3335,13 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         } else if (info.isHooked && info.banned && !info.callbackPtr) {
             insnOutputSize = 2; // ud2
         } else if (info.isHooked && info.callbackPtr) {
-            insnOutputSize = 64 + (info.banned ? 0 : info.instrLen);
+            insnOutputSize = 78 + (info.banned ? 0 : info.instrLen);
         } else if (info.isIndirectJump) {
             insnOutputSize = kIndirectJumpCheckStubSize + info.instrLen;
         } else if (info.isRet) {
             insnOutputSize = kRetCheckStubSize;
+        } else if (info.isStringInsn) {
+            insnOutputSize = getStringInsnStubSize(code + info.origOffset, info.instrLen) + info.instrLen;
         } else if (info.isRelJmp) {
             bool inPage = isTargetInPage(info.origOffset, info.instrLen, info.relOffset, info.relSize, code, codeSize);
             if (inPage) {
@@ -2685,13 +3377,29 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
                 }
             }
         } else if (info.hasMem) {
-            insnOutputSize = 60 + info.leaSize + info.instrLen;
+            insnOutputSize = 80 + info.leaSize + info.instrLen;
         } else {
             insnOutputSize = info.instrLen;
         }
 
         if (info.isRspModifying && !info.isBannedPrivileged && !(info.isHooked && info.banned) && !info.isIndirectJump && !info.isRet) {
             insnOutputSize += kStackCheckStubSize;
+        }
+        if (info.origOffset + info.instrLen >= codeSize) {
+            bool fallsThrough = true;
+            if (info.isBannedPrivileged) fallsThrough = false;
+            else if (info.isHooked && info.banned && !info.callbackPtr) fallsThrough = false;
+            else if (info.isIndirectJump) fallsThrough = false;
+            else if (info.isRet) fallsThrough = false;
+            else if (info.isRelJmp) {
+                u8 op = code[info.origOffset + info.relOffset - 1];
+                if (op == 0xEB || op == 0xE9) {
+                    fallsThrough = false;
+                }
+            }
+            if (fallsThrough) {
+                insnOutputSize += kDirectCrossPageStubSize;
+            }
         }
         currentOutputSize += insnOutputSize;
     }
@@ -2702,8 +3410,15 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
 #ifndef _WIN32
     usz mapSize = (outputSize + 4095) & ~4095;
     void* hint = nullptr;
-    if (taskBase != 0) {
-        hint = reinterpret_cast<void*>(taskBase + 0x10000000);
+    static std::atomic<usz> nextJitAddrLow(0x80000000ULL);
+    static std::atomic<usz> nextJitAddrHigh(0x700000000000ULL);
+
+    if (taskBase < 0x800000000000ULL) {
+        usz target = nextJitAddrLow.fetch_add(mapSize);
+        hint = reinterpret_cast<void*>(target);
+    } else {
+        usz target = nextJitAddrHigh.fetch_add(mapSize);
+        hint = reinterpret_cast<void*>(target);
     }
     output = static_cast<u8*>(::mmap(hint, mapSize, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0));
     if (output == MAP_FAILED) {
@@ -2770,17 +3485,25 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
             continue;
         }
 
+        if (info.isStringInsn) {
+            emitStringInsnBoundsCheckStub(outPtr, boundsCheckAddr, writeCheckAddr, insnSrc, info.instrLen);
+            std::memcpy(outPtr, insnSrc, info.instrLen);
+            outPtr += info.instrLen;
+            continue;
+        }
+
         if (info.isHooked && info.callbackPtr) {
             u64 callbackAddr = reinterpret_cast<u64>(info.callbackPtr);
             u64 helperAddr = reinterpret_cast<u64>(&xi_run_instruction_callback);
             if (info.callbackPtr == reinterpret_cast<void*>(1)) {
-                TaskState* curTask = xi_get_current_task();
+                TaskState* curTask = statePtr ? static_cast<TaskState*>(statePtr) : xi_get_current_task();
                 callbackAddr = reinterpret_cast<u64>(curTask);
                 helperAddr = reinterpret_cast<u64>(&xi_emulate_syscall_helper);
             }
             emitCallbackCall(outPtr, callbackAddr, helperAddr);
             if (!info.banned) {
                 std::memcpy(outPtr, insnSrc, info.instrLen);
+                patchAlignedSSEMoves(outPtr, info.instrLen);
                 outPtr += info.instrLen;
             }
             if (info.isRspModifying) {
@@ -2791,10 +3514,21 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         }
 
         if (info.hasMem) {
+            bool isRipRel = isRipRelativeInstruction(insnSrc, info.instrLen);
+            usz targetAddr = 0;
+            if (isRipRel) {
+                usz dispOffset = getRipRelativeDispOffset(insnSrc, info.instrLen);
+                if (dispOffset > 0) {
+                    i32 origDisp = 0;
+                    std::memcpy(&origDisp, insnSrc + dispOffset, 4);
+                    usz origRip = taskBase + info.origOffset + info.instrLen;
+                    targetAddr = origRip + static_cast<i64>(origDisp);
+                }
+            }
             if (isStoreInstruction(insnSrc, info.instrLen)) {
-                emitBoundsCheckStub(outPtr, writeCheckAddr, insnSrc, info.instrLen, info.immSize, info.accessSize);
+                emitBoundsCheckStub(outPtr, writeCheckAddr, insnSrc, info.instrLen, info.immSize, info.accessSize, isRipRel, targetAddr);
             } else {
-                emitBoundsCheckStub(outPtr, boundsCheckAddr, insnSrc, info.instrLen, info.immSize, info.accessSize);
+                emitBoundsCheckStub(outPtr, boundsCheckAddr, insnSrc, info.instrLen, info.immSize, info.accessSize, isRipRel, targetAddr);
             }
         }
 
@@ -2808,10 +3542,6 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
             } else if (info.relSize == 1) {
                 origDisp = static_cast<i8>(insnSrc[info.relOffset]);
             }
-            ::printf("[AOT Rewrite] Relative branch at offset 0x%lx: instrLen=%lu, relSize=%lu, inPage=%d, target=0x%lx\n",
-                     (unsigned long)info.origOffset, (unsigned long)info.instrLen, (unsigned long)info.relSize, (int)inPage,
-                     (unsigned long)(taskBase + info.origOffset + info.instrLen + origDisp));
-            ::fflush(stdout);
 
             if (inPage) {
                 if (info.relSize == 4) {
@@ -2844,7 +3574,7 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
 
                     usz curInsnOutputEnd = info.outputOffset + info.instrLen;
                     if (info.hasMem) {
-                        curInsnOutputEnd += 60 + info.leaSize;
+                        curInsnOutputEnd += 80 + info.leaSize;
                     }
 
                     i64 newDisp64 = static_cast<i64>(newTargetOffset) -
@@ -2939,37 +3669,37 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
                 }
             }
         } else {
-            usz prefixLen = 0, modrmPos = 0, opcodeLen = 0;
-            bool hasRex = false;
-            u8 rex = 0;
-            parseLayout(insnSrc, info.instrLen, prefixLen, hasRex, rex, opcodeLen, modrmPos);
-            bool isRipRel = false;
-            if (modrmPos > 0 && modrmPos < info.instrLen) {
-                u8 modrm = insnSrc[modrmPos];
-                u8 mod = (modrm >> 6) & 3;
-                u8 rm = modrm & 7;
-                if (mod == 0 && rm == 5) {
-                    usz dispPos = modrmPos + 1;
-                    if (dispPos + 4 <= info.instrLen) {
-                        i32 origDisp = 0;
-                        std::memcpy(&origDisp, insnSrc + dispPos, 4);
-                        
-                        usz origRip = taskBase + info.origOffset + info.instrLen;
-                        usz targetAddr = origRip + static_cast<i64>(origDisp);
-                        
-                        usz newRip = reinterpret_cast<usz>(outPtr) + info.instrLen;
-                        i64 newDisp64 = static_cast<i64>(targetAddr) - static_cast<i64>(newRip);
-                        i32 newDisp = static_cast<i32>(newDisp64);
-                        
-                        std::memcpy(outPtr, insnSrc, info.instrLen);
-                        std::memcpy(outPtr + dispPos, &newDisp, 4);
-                        outPtr += info.instrLen;
-                        isRipRel = true;
-                    }
+            bool isRipRel = isRipRelativeInstruction(insnSrc, info.instrLen);
+            if (isRipRel) {
+                usz prefixLen = 0, modrmPos = 0, opcodeLen = 0;
+                bool hasRex = false;
+                u8 rex = 0;
+                parseLayout(insnSrc, info.instrLen, prefixLen, hasRex, rex, opcodeLen, modrmPos);
+                usz dispPos = modrmPos + 1;
+                i32 origDisp = 0;
+                std::memcpy(&origDisp, insnSrc + dispPos, 4);
+
+                usz origRip = taskBase + info.origOffset + info.instrLen;
+                usz targetAddr = origRip + static_cast<i64>(origDisp);
+
+                usz newRip = reinterpret_cast<usz>(outPtr) + info.instrLen;
+                i64 newDisp64 = static_cast<i64>(targetAddr) - static_cast<i64>(newRip);
+
+                if (newDisp64 >= -0x7fffffff && newDisp64 <= 0x7fffffff) {
+                    i32 newDisp = static_cast<i32>(newDisp64);
+                    std::memcpy(outPtr, insnSrc, info.instrLen);
+                    std::memcpy(outPtr + dispPos, &newDisp, 4);
+                    patchAlignedSSEMoves(outPtr, info.instrLen);
+                    outPtr += info.instrLen;
+                } else {
+                    // Non-fatal: copy unchanged (likely data parsed as code)
+                    std::memcpy(outPtr, insnSrc, info.instrLen);
+                    patchAlignedSSEMoves(outPtr, info.instrLen);
+                    outPtr += info.instrLen;
                 }
-            }
-            if (!isRipRel) {
+            } else {
                 std::memcpy(outPtr, insnSrc, info.instrLen);
+                patchAlignedSSEMoves(outPtr, info.instrLen);
                 outPtr += info.instrLen;
             }
         }
@@ -2977,20 +3707,47 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
         if (info.isRspModifying) {
             emitStackCheckStub(outPtr, stackCheckAddr);
         }
+
+        if (info.origOffset + info.instrLen >= codeSize) {
+            bool fallsThrough = true;
+            if (info.isBannedPrivileged) fallsThrough = false;
+            else if (info.isHooked && info.banned && !info.callbackPtr) fallsThrough = false;
+            else if (info.isIndirectJump) fallsThrough = false;
+            else if (info.isRet) fallsThrough = false;
+            else if (info.isRelJmp) {
+                u8 op = code[info.origOffset + info.relOffset - 1];
+                if (op == 0xEB || op == 0xE9) {
+                    fallsThrough = false;
+                }
+            }
+            if (fallsThrough) {
+                u64 targetGuestVirtualAddr = taskBase + info.origOffset + info.instrLen;
+                emitDirectCrossPageStub(outPtr, targetGuestVirtualAddr, indirectResolverAddr, false);
+            }
+        }
     }
 
-    if (taskBase == 0x7006e000) {
-        ::printf("[AOT Debug] Page 0x7006e000 JIT disassembly/info:\n");
-        for (usz i = 0; i < insnCount; ++i) {
-            const InsnInfo& info = insns[i];
-            if (info.origOffset >= 0x930) {
-                ::printf("  Offset 0x%lx (Output 0x%lx, len %lu, relJmp=%d, ret=%d, mem=%d, rspMod=%d): ",
-                         (unsigned long)info.origOffset, (unsigned long)info.outputOffset, (unsigned long)info.instrLen,
-                         (int)info.isRelJmp, (int)info.isRet, (int)info.hasMem, (int)info.isRspModifying);
-                for (usz j = 0; j < info.instrLen; ++j) {
-                    ::printf("%02x ", code[info.origOffset + j]);
-                }
-                ::printf("\n");
+
+    // Post-rewrite scan: warn about any remaining movaps/vmovaps in the JIT output buffer.
+    {
+        usz jitSize = static_cast<usz>(outPtr - output);
+        for (usz bi = 0; bi + 1 < jitSize; ++bi) {
+            // Legacy / REX-prefixed movaps: look for 0F 28 or 0F 29
+            if (output[bi] == 0x0F && (output[bi + 1] == 0x28 || output[bi + 1] == 0x29)) {
+                ::printf("[AOT WARN] Unpatched movaps/movapd at JIT+0x%lx (page 0x%lx)\n",
+                         (unsigned long)bi, (unsigned long)taskBase);
+            }
+            // VEX 2-byte: C5 xx 28/29
+            if (output[bi] == 0xC5 && bi + 2 < jitSize &&
+                (output[bi + 2] == 0x28 || output[bi + 2] == 0x29)) {
+                ::printf("[AOT WARN] Unpatched vmovaps/vmovapd (VEX2) at JIT+0x%lx (page 0x%lx)\n",
+                         (unsigned long)bi, (unsigned long)taskBase);
+            }
+            // VEX 3-byte: C4 xx xx 28/29
+            if (output[bi] == 0xC4 && bi + 3 < jitSize &&
+                (output[bi + 3] == 0x28 || output[bi + 3] == 0x29)) {
+                ::printf("[AOT WARN] Unpatched vmovaps/vmovapd (VEX3) at JIT+0x%lx (page 0x%lx)\n",
+                         (unsigned long)bi, (unsigned long)taskBase);
             }
         }
         ::fflush(stdout);
@@ -3018,9 +3775,10 @@ AOTResult AOT::rewrite(const u8* code, usz codeSize,
 // -------------------------------------------------------------------------
 
 AOTRegion* AOT::findCached(Array<AOTRegion>& cache, usz addr, usz size) {
-    for (usz i = 0; i < cache.size(); ++i) {
-        AOTRegion& region = cache[i];
-        if (region.originalAddr == addr && region.originalSize == size) {
+    for (usz i = cache.size(); i > 0; --i) {
+        AOTRegion& region = cache[i - 1];
+        if (region.originalSize > 0 && (region.originalSize & 0x8000000000000000ULL) == 0 &&
+            (region.originalAddr & ~4095) == (addr & ~4095)) {
             return &region;
         }
     }
@@ -3040,26 +3798,19 @@ void AOT::freePatchedCode(u8* patchedCode, usz patchedSize) {
 void AOT::invalidate(Array<AOTRegion>& cache, usz addr, usz size) {
     usz end = addr + size;
 
-    // Walk backwards so removal doesn't invalidate indices.
-    for (usz i = cache.size(); i > 0; --i) {
-        usz idx = i - 1;
-        AOTRegion& region = cache[idx];
+    for (usz i = 0; i < cache.size(); ++i) {
+        AOTRegion& region = cache[i];
+        if (region.originalSize == 0 || (region.originalSize & 0x8000000000000000ULL) != 0) {
+            continue;
+        }
         usz regionEnd = region.originalAddr + region.originalSize;
 
         // Check for overlap: [addr, end) ∩ [originalAddr, regionEnd).
         if (region.originalAddr < end && regionEnd > addr) {
-            // Free the patched code buffer.
-            if (region.patchedCode) {
-                freePatchedCode(region.patchedCode, region.patchedSize);
-            }
-            if (region.offsetMap) {
-                delete[] region.offsetMap;
-            }
-            // Remove from cache by shifting elements.
-            for (usz j = idx; j + 1 < cache.size(); ++j) {
-                cache[j] = cache[j + 1];
-            }
-            cache.pop();
+            // Tag the region as inactive but do NOT unmap patchedCode
+            // or free/remove it from the array, to prevent crashes on return addresses
+            // that are still active on the call stack.
+            region.originalSize |= 0x8000000000000000ULL;
         }
     }
 }
@@ -3119,6 +3870,47 @@ bool AOT::verifyStubSizes() {
     if (stackCheckSize != kStackCheckStubSize) {
         ::printf("[AOT Verification] kStackCheckStubSize mismatch: expected %lu, got %lu\n",
                  (unsigned long)kStackCheckStubSize, (unsigned long)stackCheckSize);
+        return false;
+    }
+
+    // 5. Verify emitCallbackCall size
+    ptr = buffer;
+    emitCallbackCall(ptr, 0x1122334455667788ULL, 0x123456789ABCDEF0ULL);
+    usz callbackCallSize = ptr - buffer;
+    if (callbackCallSize != 78) {
+        ::printf("[AOT Verification] emitCallbackCall size mismatch: expected 78, got %lu\n",
+                 (unsigned long)callbackCallSize);
+        return false;
+    }
+
+    // 6. Verify string instruction stub size for rep stosq
+    u8 mockStosq[] = { 0xF3, 0x48, 0xAB };
+    ptr = buffer;
+    emitStringInsnBoundsCheckStub(ptr, 0x1122334455667788ULL, 0x123456789ABCDEF0ULL, mockStosq, 3);
+    usz stosqStubSize = ptr - buffer;
+    ::printf("[AOT Debug] Generated stub hex (%lu bytes): ", (unsigned long)stosqStubSize);
+    for (usz i = 0; i < stosqStubSize; ++i) {
+        ::printf("%02x ", buffer[i]);
+    }
+    ::printf("\n");
+    ::fflush(stdout);
+
+    usz expectedStosqStubSize = getStringInsnStubSize(mockStosq, 3);
+    if (stosqStubSize != expectedStosqStubSize) {
+        ::printf("[AOT Verification] string insn (rep stosq) stub size mismatch: expected %lu, got %lu\n",
+                 (unsigned long)expectedStosqStubSize, (unsigned long)stosqStubSize);
+        return false;
+    }
+
+    // 7. Verify string instruction stub size for rep movsq
+    u8 mockMovsq[] = { 0xF3, 0x48, 0xA5 };
+    ptr = buffer;
+    emitStringInsnBoundsCheckStub(ptr, 0x1122334455667788ULL, 0x123456789ABCDEF0ULL, mockMovsq, 3);
+    usz movsqStubSize = ptr - buffer;
+    usz expectedMovsqStubSize = getStringInsnStubSize(mockMovsq, 3);
+    if (movsqStubSize != expectedMovsqStubSize) {
+        ::printf("[AOT Verification] string insn (rep movsq) stub size mismatch: expected %lu, got %lu\n",
+                 (unsigned long)expectedMovsqStubSize, (unsigned long)movsqStubSize);
         return false;
     }
 

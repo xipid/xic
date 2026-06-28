@@ -15,7 +15,7 @@
 #include "Task/Task.hpp"
 
 using namespace Task;
-using TaskClass = Task::Task;
+using TaskClass = ::Task::Task;
 #define Task TaskClass
 using namespace Xi;
 using namespace Collection;

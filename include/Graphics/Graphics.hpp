@@ -191,6 +191,10 @@ struct XI_EXPORT SwapContext {
  */
 class XI_EXPORT GLFWDiligentRenderingDevice : public MemoryDevice {
 public:
+  Collection::String name;
+  bool outputIntended = false;
+  void* device = nullptr;
+
   GLFWDiligentRenderingDevice();
   virtual ~GLFWDiligentRenderingDevice() = default;
 

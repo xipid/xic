@@ -201,28 +201,38 @@ if(NOT TARGET Xi::Xi)
     add_library(Xi::Xi ALIAS Xi)
 endif()
 
-# Compile internal guest binary using musl-clang
-add_custom_command(
-    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/tests/task/internal"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/tests/task"
-    COMMAND musl-clang -x c -O2 -fPIE -pie -Wl,-Ttext-segment=0x50000000 -Wl,-Ttext=0x50001000 -Wl,-e,main -o "${CMAKE_CURRENT_BINARY_DIR}/tests/task/internal" "${CMAKE_CURRENT_SOURCE_DIR}/tests/task/internal.cpp"
-    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/task/internal.cpp"
-    COMMENT "Compiling guest binary internal using musl-clang"
-)
-add_custom_target(internal ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/tests/task/internal")
+option(XI_BUILD_TESTS "Build Xi tests" ON)
 
-# Build runner host executable (which loads the internal binary)
-add_executable(runner tests/task/runner.cpp)
-target_link_libraries(runner PRIVATE Xi::Xi)
-set_target_properties(runner PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
+if(XI_BUILD_TESTS)
+    # Compile internal guest binary using musl-clang
+    add_custom_command(
+        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/tests/task/internal"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/tests/task"
+        COMMAND musl-clang -x c -O2 -fPIE -pie -Wl,-Ttext-segment=0x50000000 -Wl,-Ttext=0x50001000 -Wl,-e,main -o "${CMAKE_CURRENT_BINARY_DIR}/tests/task/internal" "${CMAKE_CURRENT_SOURCE_DIR}/tests/task/internal.cpp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/task/internal.cpp"
+        COMMENT "Compiling guest binary internal using musl-clang"
+    )
+    add_custom_target(internal ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/tests/task/internal")
 
-# Build example (realistic developer use-case test)
-add_executable(example tests/task/example.cpp)
-target_link_libraries(example PRIVATE Xi::Xi)
-set_target_properties(example PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
+    # Build runner host executable (which loads the internal binary)
+    add_executable(runner tests/task/runner.cpp)
+    target_link_libraries(runner PRIVATE Xi::Xi)
+    set_target_properties(runner PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
 
-# Build main (functional unit test suite)
-add_executable(main tests/task/main.cpp)
-target_link_libraries(main PRIVATE Xi::Xi)
-set_target_properties(main PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
+    # Build example (realistic developer use-case test)
+    add_executable(example tests/task/example.cpp)
+    target_link_libraries(example PRIVATE Xi::Xi)
+    set_target_properties(example PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
+
+    # Build main (functional unit test suite)
+    add_executable(main tests/task/main.cpp)
+    target_link_libraries(main PRIVATE Xi::Xi)
+    set_target_properties(main PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
+
+    # Build router_feature_test
+    add_executable(router_feature_test tests/task/router_feature_test.cpp)
+    target_link_libraries(router_feature_test PRIVATE Xi::Xi)
+    set_target_properties(router_feature_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
+endif()
+
 

@@ -16,7 +16,7 @@
 #include "Task/Task.hpp"
 
 using namespace Task;
-using TaskClass = Task::Task;
+using TaskClass = ::Task::Task;
 
 namespace Task {
     extern void xi_set_current_task(TaskState* s);
@@ -1366,13 +1366,13 @@ void testSecurityHardening() {
     // Test XCHG RSP, RAX (\x48\x94)
     u8 xchgRsp[] = { 0x48, 0x94 };
     res = AOT::rewrite(xchgRsp, 2, regions, 0);
-    TEST("XCHG RSP includes stack check", res.patchedSize == 56);
+    TEST("XCHG RSP includes stack check", res.patchedSize == 73);
     AOT::freePatchedCode(res.patchedCode, res.patchedSize);
 
     // Test POPFQ (\x9D)
     u8 popfq[] = { 0x9D };
     res = AOT::rewrite(popfq, 1, regions, 0);
-    TEST("POPFQ includes stack check", res.patchedSize == 55);
+    TEST("POPFQ includes stack check", res.patchedSize == 72);
     AOT::freePatchedCode(res.patchedCode, res.patchedSize);
 #endif
 }

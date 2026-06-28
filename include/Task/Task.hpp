@@ -62,8 +62,8 @@ void xi_set_current_task(TaskState* s);
 bool xi_validate_context_before_switch(TaskState* state);
 bool xi_is_task_dead_recursive(usz tid);
 
-extern thread_local usz xi_last_guest_rbx;
-extern thread_local usz xi_last_jit_rip;
+extern usz xi_last_guest_rbx;
+extern usz xi_last_jit_rip;
 
 struct GuestRegs {
     u64 r11;
@@ -79,8 +79,8 @@ struct GuestRegs {
     u64 rflags;
 };
 
-extern thread_local GuestRegs* xi_guest_regs;
-extern thread_local usz tl_currently_rewriting_physical;
+extern GuestRegs* xi_guest_regs;
+extern usz tl_currently_rewriting_physical;
 
 
 // -------------------------------------------------------------------------

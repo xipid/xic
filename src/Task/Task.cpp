@@ -69,12 +69,12 @@ usz TaskState::_nextPipeId = 3; // Start at 3 (0=stdin, 1=stdout, 2=stderr reser
 // Static: current task
 // -------------------------------------------------------------------------
 
-static thread_local TaskState* tl_currentTask = nullptr;
-static u64 g_host_fs_base = 0;
-thread_local usz xi_last_guest_rbx = 0;
-thread_local usz xi_last_jit_rip = 0;
-thread_local GuestRegs* xi_guest_regs = nullptr;
-thread_local usz tl_currently_rewriting_physical = 0;
+static TaskState* tl_currentTask = nullptr;
+u64 g_host_fs_base = 0;
+usz xi_last_guest_rbx = 0;
+usz xi_last_jit_rip = 0;
+GuestRegs* xi_guest_regs = nullptr;
+usz tl_currently_rewriting_physical = 0;
 void xi_assign_tid_if_needed(TaskState* state) {
     if (state && state->tid == 0) {
         state->tid = Task::_nextTid++;
@@ -111,13 +111,14 @@ static void xi_aot_rewrite_task_regions(TaskState* state) {
     for (usz i = 0; i < state->regions.size(); ++i) {
         MemoryRegion& r = state->regions[i];
         if (r.physical && r.executable) {
+            if (r.physical == state->stack) continue;
             AOTRegion* cached = AOT::findCached(state->aotCache, reinterpret_cast<usz>(r.physical), r.size);
              if (!cached) {
                 AOTResult res = AOT::rewrite(r.physical, r.size, state->regions, r.base, state);
                 if (res.success && res.patchedCode) {
                     AOTRegion reg;
-                    reg.originalAddr = reinterpret_cast<usz>(r.physical);
-                    reg.originalSize = r.size;
+                    reg.originalAddr = reinterpret_cast<usz>(r.physical) + (r.size - res.originalSize);
+                    reg.originalSize = res.originalSize;
                     reg.patchedCode = res.patchedCode;
                     reg.patchedSize = res.patchedSize;
                     reg.offsetMap = res.offsetMap;
@@ -144,7 +145,8 @@ static void* xi_translate_to_patched_address(TaskState* state, void* addr) {
 
     for (usz i = 0; i < state->aotCache.size(); ++i) {
         AOTRegion& aot = state->aotCache[i];
-        if (aot.patchedCode && target >= aot.originalAddr && target < aot.originalAddr + aot.originalSize) {
+        if (aot.patchedCode && (aot.originalSize & 0x8000000000000000ULL) == 0 &&
+            target >= aot.originalAddr && target < aot.originalAddr + aot.originalSize) {
             if (aot.offsetMap) {
                 usz offset = target - aot.originalAddr;
                 if (offset < aot.originalSize && aot.offsetMap[offset] != 0xFFFFFFFF) {
@@ -319,6 +321,8 @@ bool xi_validate_context_before_switch(TaskState* state) {
         usz stackTop = stackBase + state->stackSize;
         if (sp < stackBase || sp > stackTop) {
             // Stack pointer outside allocated stack — containment violation.
+            ::printf("[Validation Fail] SP out of bounds: sp=0x%lx, stackBase=0x%lx, stackTop=0x%lx\n", (unsigned long)sp, (unsigned long)stackBase, (unsigned long)stackTop);
+            ::fflush(stdout);
             state->status = TaskStatus::Destroyed;
             return false;
         }
@@ -350,10 +354,11 @@ bool xi_validate_context_before_switch(TaskState* state) {
         }
     }
 
-    // Allow the entry trampoline (kernel-managed).
+    // Allow the entry trampoline and host runtime functions (kernel-managed).
     u8* trampolineAddr = reinterpret_cast<u8*>(xi_context_entry_trampoline);
-    if (ipPtr >= trampolineAddr && ipPtr < trampolineAddr + 4096) {
-        return true; // Entry trampoline is always valid.
+    long long diff = static_cast<long long>(ip) - reinterpret_cast<long long>(trampolineAddr);
+    if (diff >= -1048576 && diff <= 1048576) {
+        return true; // Host runtime range is always valid.
     }
 
     // Allow the task's entry function (set by the scheduler).
@@ -426,6 +431,12 @@ bool xi_validate_context_before_switch(TaskState* state) {
     }
 
     // Isolated task with IP outside all valid regions — violation.
+    ::printf("[Validation Fail] IP invalid: ipPtr=%p, trampolineAddr=%p, entryFn=%p\n", ipPtr, trampolineAddr, state->entryFn);
+    for (usz i = 0; i < state->regions.size(); ++i) {
+        MemoryRegion& r = state->regions[i];
+        ::printf("  Region %lu: base=0x%lx, physical=%p, size=0x%lx, executable=%d\n", i, (unsigned long)r.base, r.physical, (unsigned long)r.size, (int)r.executable);
+    }
+    ::fflush(stdout);
     state->status = TaskStatus::Destroyed;
     return false;
 }
@@ -3476,6 +3487,20 @@ void Task::onFetch(usz start, usz end, Func<void(usz, usz)> cb) {
     fr.resolved = false;
     _state->fetchRanges.push(fr);
     _state->originalFetchRanges.push(fr);
+
+#ifndef _WIN32
+    // Reserve the virtual address range so the kernel won't assign it to
+    // later mmap calls (e.g. JIT output buffers). The actual pages are
+    // populated by the fetch callback on first access.
+    if (start < end) {
+        usz rangeSize = ((end - start) + 4095) & ~(usz)4095;
+        ::mmap(reinterpret_cast<void*>(start), rangeSize,
+               PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+               -1, 0);
+        // Ignore failure: the range may already be mapped or the flag may be
+        // unavailable on older kernels — the reservation is a best-effort hint.
+    }
+#endif
 }
 
 
@@ -3661,7 +3686,6 @@ void Task::releaseAllocation(u8* ptr) {
             return;
         }
     }
-    delete[] ptr;
 }
 
 usz Task::getAllocationRefCount(u8* ptr) {
@@ -3856,7 +3880,7 @@ void Task::yield(usz coreId) {
     }
 
     TaskState* caller = xi_get_current_task();
-    if (caller) {
+    if (caller && caller->id != 0) {
         // 1- A task couldnt yield as another core, only the core they are executing in.
         // Task::yield() with no args uses the current core (forced if in task, or 0 if not).
         coreId = caller->currentCore;
@@ -3871,7 +3895,7 @@ void Task::yield(usz coreId) {
         current = _tasks[core.currentTaskId];
     }
 
-    if (!caller) {
+    if (!caller || caller->id == 0) {
         // 2- Outside a task (the top), yield(core) functions as interrupts()...
         
         // Wake sleeping tasks.

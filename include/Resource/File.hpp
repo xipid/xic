@@ -172,6 +172,8 @@ public:
  */
 Filesystem *requestFS();
 
+using FilesystemDevice = Filesystem;
+
 } // namespace Resource
 
 #endif // XI_CORE_FILE_HPP

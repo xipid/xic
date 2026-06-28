@@ -9,6 +9,7 @@
 
 #include "../Xi/Primitives.hpp"
 #include <cstring>
+#include <atomic>
 
 #if defined(AVR) || defined(ARDUINO)
 #define XI_ARRAY_MIN_CAP 4
@@ -36,7 +37,7 @@ public:
    * @brief Internal control block for memory management and reference counting.
    */
   struct Block {
-    usz useCount; ///< Number of InlineArray instances sharing this block.
+    std::atomic<usz> useCount; ///< Number of InlineArray instances sharing this block.
     usz capacity; ///< Total allocated capacity in elements.
     usz _length;  ///< Actually used length of the allocated memory.
 
@@ -743,6 +744,52 @@ public:
     dev->upload(result.block->deviceHandle, src.data(), byteSize);
     return result;
   }
+
+  bool includes(const T& val) const {
+      for (usz i = 0; i < size(); ++i) {
+          if (((InlineArray<T>*)this)->operator[](i) == val) return true;
+      }
+      return false;
+  }
+
+  InlineArray<T> intersect(const InlineArray<T>& o) const {
+      InlineArray<T> res;
+      for (usz i = 0; i < size(); ++i) {
+          T val = ((InlineArray<T>*)this)->operator[](i);
+          if (o.includes(val) && !res.includes(val)) {
+              res.push(val);
+          }
+      }
+      return res;
+  }
+
+  InlineArray<T> uni(const InlineArray<T>& o) const {
+      InlineArray<T> res;
+      for (usz i = 0; i < size(); ++i) {
+          T val = ((InlineArray<T>*)this)->operator[](i);
+          if (!res.includes(val)) res.push(val);
+      }
+      for (usz i = 0; i < o.size(); ++i) {
+          T val = ((InlineArray<T>&)o)[i];
+          if (!res.includes(val)) res.push(val);
+      }
+      return res;
+  }
+
+  InlineArray<T> difference(const InlineArray<T>& o) const {
+      InlineArray<T> res;
+      for (usz i = 0; i < size(); ++i) {
+          T val = ((InlineArray<T>*)this)->operator[](i);
+          if (!o.includes(val) && !res.includes(val)) {
+              res.push(val);
+          }
+      }
+      return res;
+  }
+
+  InlineArray<T> operator&(const InlineArray<T>& o) const { return intersect(o); }
+  InlineArray<T> operator|(const InlineArray<T>& o) const { return uni(o); }
+  InlineArray<T> operator-(const InlineArray<T>& o) const { return difference(o); }
 };
 
 #define XI_INLINE_ARRAY_BIN_OP(op)                                             \
