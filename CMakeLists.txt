@@ -229,10 +229,5 @@ if(XI_BUILD_TESTS)
     target_link_libraries(main PRIVATE Xi::Xi)
     set_target_properties(main PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
 
-    # Build router_feature_test
-    add_executable(router_feature_test tests/task/router_feature_test.cpp)
-    target_link_libraries(router_feature_test PRIVATE Xi::Xi)
-    set_target_properties(router_feature_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
+    # router_feature_test removed as resource router is deprecated
 endif()
-
-

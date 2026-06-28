@@ -8,6 +8,7 @@
 #define XI_SECURITY_CRYPTO_HPP
 
 #include "../Collection/String.hpp"
+#include "SHA256.hpp"
 
 using namespace Collection;
 using namespace Xi;
