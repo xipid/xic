@@ -95,6 +95,7 @@ public:
   // Numeric constructors
   String(int n);
   String(long long n);
+  String(usz n);
   String(u64 n);
   String(f64 n);
   String(f32 n);

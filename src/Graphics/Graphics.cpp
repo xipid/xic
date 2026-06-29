@@ -18,6 +18,31 @@ IEngineFactoryVk *GetEngineFactoryVk();
 
 namespace Graphics {
 
+static void DILIGENT_CALL_TYPE DiligentMessageCallback(Diligent::DEBUG_MESSAGE_SEVERITY Severity,
+                                                       const Diligent::Char*                 Message,
+                                                       const Diligent::Char*                 Function,
+                                                       const Diligent::Char*                 File,
+                                                       int                         Line) {
+    if (Message && strstr(Message, "Failed to strip reflection information") != nullptr) {
+        return;
+    }
+    const char* envVal = getenv("XIC_DILIGENT_LOGS");
+    bool showAll = envVal && (strcmp(envVal, "1") == 0 || strcmp(envVal, "true") == 0 || strcmp(envVal, "all") == 0);
+
+    if (showAll || Severity >= Diligent::DEBUG_MESSAGE_SEVERITY_ERROR) {
+        const char* prefix = "Info";
+        if (Severity == Diligent::DEBUG_MESSAGE_SEVERITY_WARNING) prefix = "Warning";
+        else if (Severity == Diligent::DEBUG_MESSAGE_SEVERITY_ERROR) prefix = "ERROR";
+        else if (Severity == Diligent::DEBUG_MESSAGE_SEVERITY_FATAL_ERROR) prefix = "FATAL ERROR";
+
+        if (Function && File) {
+            fprintf(stderr, "Diligent Engine: %s in %s() (%s, %d): %s\n", prefix, Function, File, Line, Message);
+        } else {
+            fprintf(stderr, "Diligent Engine: %s: %s\n", prefix, Message);
+        }
+    }
+}
+
 GraphicsContext gContext;
 
 void GraphicsContext::init() {
@@ -26,6 +51,7 @@ void GraphicsContext::init() {
 
   Diligent::EngineVkCreateInfo CI;
   auto *F = Diligent::GetEngineFactoryVk();
+  F->SetMessageCallback(DiligentMessageCallback);
 
   CI.NumDeferredContexts = 0;
 
@@ -76,6 +102,9 @@ void GraphicsContext::init() {
 
   PSOCreateInfo.pVS = pVS;
   PSOCreateInfo.pPS = pPS;
+
+  PSOCreateInfo.PSODesc.ResourceLayout.DefaultVariableType =
+      Diligent::SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC;
 
   Diligent::ShaderResourceVariableDesc Vars[] = {
       {Diligent::SHADER_TYPE_PIXEL, "g_Texture",

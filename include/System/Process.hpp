@@ -212,6 +212,8 @@ public:
   void wait() {
     if (_pid == -1)
       exec();
+    if (_pid == -1)
+      return;
 
     // We use poll to wait for events on the pipes efficiently
     struct pollfd fds[2];
@@ -230,12 +232,14 @@ public:
 
       int status;
       pid_t r = ::waitpid(_pid, &status, WNOHANG);
-      if (r == _pid) {
+      if (r == _pid || r == -1) {
         exited = true;
-        if (WIFEXITED(status))
-          exitCode = WEXITSTATUS(status);
-        else if (WIFSIGNALED(status))
-          exitCode = -WTERMSIG(status);
+        if (r == _pid) {
+          if (WIFEXITED(status))
+            exitCode = WEXITSTATUS(status);
+          else if (WIFSIGNALED(status))
+            exitCode = -WTERMSIG(status);
+        }
       }
     }
   }

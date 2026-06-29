@@ -1,7 +1,6 @@
 /**
  * @file Func.hpp
- * @brief Type-erased function wrapper with Small Object Optimization (SBO).
-
+ * @brief Zero-VTable type-erased function wrapper with SBO and unmapped-memory resilience.
  */
 
 #ifndef XI_CORE_FUNC_HPP
@@ -10,82 +9,87 @@
 #include "Primitives.hpp"
 #include <cstddef>
 
+#if defined(__linux__)
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <errno.h>
+#endif
+
 namespace Xi {
 
-/**
- * @class Func
- * @brief A type-erased function wrapper similar to std::function.
- *
- * Employs Small Object Optimization (SBO) to avoid heap allocations for
- * small callables (up to 128 bytes).
- *
- * @tparam T Function signature (e.g., R(Args...)).
- */
 template <typename T> class Func;
 
-/**
- * @brief Specialization for function signatures.
- */
 template <typename R, typename... Args> class XI_EXPORT Func<R(Args...)> {
 private:
   static constexpr usz SBO_Size = 128; ///< Threshold for SBO.
-
-  struct VTable {
-    R (*invoke)(void *, Args...);
-    void (*destroy)(void *);
-    void (*clone)(const void *, void *);
-  };
 
   union Storage {
     alignas(max_align_t) u8 local[SBO_Size];
     void *heap;
   } data;
 
-  const VTable *vptr;
+  // Direct function pointers for single-indirection execution (removes VTable completely)
+  R (*invoke_ptr)(void *, Args...);
+  void (*manager_ptr)(void *, void *, int); 
   bool is_heap;
 
-  // --- Implementation Helpers ---
-  template <typename Callable> static R invoke_fn(void *ptr, Args... args) {
-    Callable *func = static_cast<Callable *>(ptr);
-    return (*func)(args...);
-  }
-
-  template <typename Callable> static void destroy_fn(void *ptr) {
-    static_cast<Callable *>(ptr)->~Callable();
-  }
-
-  template <typename Callable>
-  static void clone_fn(const void *src, void *dst) {
-    const Callable *source = static_cast<const Callable *>(src);
-    if (sizeof(Callable) <= SBO_Size) {
-      new (dst) Callable(*source);
-    } else {
-      Callable *copy = (Callable *)::operator new(sizeof(Callable));
-      new (copy) Callable(*source);
-      *(void **)dst = (void *)copy;
+  // --- Safe Pointer Verification Helper ---
+  static inline bool isPointerReadable(const void* ptr) {
+    if (!ptr) return false;
+#if defined(__linux__)
+    // Try to write 1 byte from ptr to an invalid file descriptor (-1).
+    // If the pointer is invalid/unmapped, the kernel returns EFAULT.
+    // If the pointer is valid, the kernel returns EBADF.
+    long ret = ::syscall(SYS_write, -1, ptr, 1);
+    if (ret < 0 && errno == EFAULT) {
+        return false; // Pointer is unmapped/dangling (e.g. library unloaded)
     }
+#endif
+    return true; // Pointer is mapped and safe to dereference
+  }
+
+  // --- Unified Lifecycle Manager Operations ---
+  // op 0: destroy src
+  // op 1: clone src to dst
+  // op 2: move src to dst and destroy src
+  template <typename Callable>
+  static void manager_fn(void *src, void *dst, int op) {
+    using Decayed = typename Xi::Decay<Callable>::Type;
+    if (op == 0) {
+      static_cast<Decayed *>(src)->~Decayed();
+    } else if (op == 1) {
+      new (dst) Decayed(*static_cast<const Decayed *>(src));
+    } else if (op == 2) {
+      new (dst) Decayed(Xi::Move(*static_cast<Decayed *>(src)));
+      static_cast<Decayed *>(src)->~Decayed();
+    }
+  }
+
+  template <typename Callable> static R invoke_fn(void *ptr, Args... args) {
+    using Decayed = typename Xi::Decay<Callable>::Type;
+    return (*static_cast<Decayed *>(ptr))(args...);
   }
 
 public:
   /** @brief Constructs an empty (invalid) function. */
-  Func() : vptr(nullptr), is_heap(false) { data.heap = nullptr; }
+  Func() : invoke_ptr(nullptr), manager_ptr(nullptr), is_heap(false) {
+    data.heap = nullptr;
+  }
 
   /** @brief Constructs from a raw function pointer. */
   Func(R (*f)(Args...)) {
     using DecayedF = R (*)(Args...);
-    static const VTable vt = {invoke_fn<DecayedF>, destroy_fn<DecayedF>,
-                              clone_fn<DecayedF>};
-    vptr = &vt;
+    invoke_ptr = invoke_fn<DecayedF>;
+    manager_ptr = manager_fn<DecayedF>;
     new (data.local) DecayedF(f);
     is_heap = false;
   }
 
   /** @brief Constructs from any callable object (lambdas, functors). */
   template <typename Callable> Func(Callable f) {
-    using DecayedF = Callable;
-    static const VTable vt = {invoke_fn<DecayedF>, destroy_fn<DecayedF>,
-                              clone_fn<DecayedF>};
-    vptr = &vt;
+    using DecayedF = typename Xi::Decay<Callable>::Type;
+    invoke_ptr = invoke_fn<DecayedF>;
+    manager_ptr = manager_fn<DecayedF>;
 
     if (sizeof(DecayedF) <= SBO_Size) {
       new (data.local) DecayedF(Xi::Move(f));
@@ -99,32 +103,88 @@ public:
   }
 
   /** @brief Move constructor. */
-  Func(Func &&o) noexcept : vptr(o.vptr), is_heap(o.is_heap) {
-    if (is_heap) {
-      data.heap = o.data.heap;
-    } else {
-      for (usz i = 0; i < SBO_Size; ++i)
-        data.local[i] = o.data.local[i];
+  Func(Func &&o) noexcept : invoke_ptr(o.invoke_ptr), manager_ptr(o.manager_ptr), is_heap(o.is_heap) {
+    if (manager_ptr) {
+      if (is_heap) {
+        data.heap = o.data.heap;
+      } else {
+        if (isPointerReadable((const void*)manager_ptr)) {
+          manager_ptr((void *)o.data.local, (void *)data.local, 2); // op 2 = move + destroy
+        } else {
+          invoke_ptr = nullptr;
+          manager_ptr = nullptr;
+          is_heap = false;
+        }
+      }
+      o.invoke_ptr = nullptr;
+      o.manager_ptr = nullptr;
+      o.is_heap = false;
+      o.data.heap = nullptr;
     }
-    o.vptr = nullptr;
-    o.is_heap = false;
-    o.data.heap = nullptr;
   }
 
   /** @brief Copy constructor. */
-  Func(const Func &o) : vptr(o.vptr), is_heap(o.is_heap) {
-    if (vptr) {
-      const void *src = is_heap ? o.data.heap : (const void *)o.data.local;
-      vptr->clone(src, (void *)&data);
+  Func(const Func &o) : invoke_ptr(o.invoke_ptr), manager_ptr(o.manager_ptr), is_heap(o.is_heap) {
+    if (manager_ptr) {
+      if (isPointerReadable((const void*)manager_ptr)) {
+        const void *src = is_heap ? o.data.heap : (const void *)o.data.local;
+        manager_ptr((void *)src, (void *)&data, 1); // op 1 = clone
+      } else {
+        invoke_ptr = nullptr;
+        manager_ptr = nullptr;
+        is_heap = false;
+        data.heap = nullptr;
+      }
     }
   }
 
-  /** @brief Assignment operator with copy-and-swap idiom. */
-  Func &operator=(Func o) {
-    Xi::Swap(vptr, o.vptr);
-    Xi::Swap(is_heap, o.is_heap);
-    for (usz i = 0; i < SBO_Size; ++i)
-      Xi::Swap(data.local[i], o.data.local[i]);
+  /** @brief Copy Assignment operator. */
+  Func &operator=(const Func &o) {
+    if (this != &o) {
+      _clear();
+      invoke_ptr = o.invoke_ptr;
+      manager_ptr = o.manager_ptr;
+      is_heap = o.is_heap;
+      if (manager_ptr) {
+        if (isPointerReadable((const void*)manager_ptr)) {
+          const void *src = is_heap ? o.data.heap : (const void *)o.data.local;
+          manager_ptr((void *)src, (void *)&data, 1); // op 1 = clone
+        } else {
+          invoke_ptr = nullptr;
+          manager_ptr = nullptr;
+          is_heap = false;
+          data.heap = nullptr;
+        }
+      }
+    }
+    return *this;
+  }
+
+  /** @brief Move Assignment operator. */
+  Func &operator=(Func &&o) noexcept {
+    if (this != &o) {
+      _clear();
+      invoke_ptr = o.invoke_ptr;
+      manager_ptr = o.manager_ptr;
+      is_heap = o.is_heap;
+      if (manager_ptr) {
+        if (is_heap) {
+          data.heap = o.data.heap;
+        } else {
+          if (isPointerReadable((const void*)manager_ptr)) {
+            manager_ptr((void *)o.data.local, (void *)data.local, 2); // op 2 = move + destroy
+          } else {
+            invoke_ptr = nullptr;
+            manager_ptr = nullptr;
+            is_heap = false;
+          }
+        }
+        o.invoke_ptr = nullptr;
+        o.manager_ptr = nullptr;
+        o.is_heap = false;
+        o.data.heap = nullptr;
+      }
+    }
     return *this;
   }
 
@@ -133,25 +193,30 @@ public:
 
   /** @brief Clears the current function and releases resources. */
   void _clear() {
-    if (vptr) {
-      void *target = is_heap ? data.heap : (void *)data.local;
-      vptr->destroy(target);
-      if (is_heap)
+    if (manager_ptr) {
+      if (isPointerReadable((const void*)manager_ptr)) {
+        void *target = is_heap ? data.heap : (void *)data.local;
+        manager_ptr(target, nullptr, 0); // op 0 = destroy
+      }
+      if (is_heap) {
         ::operator delete(data.heap);
+      }
     }
-    vptr = nullptr;
+    invoke_ptr = nullptr;
+    manager_ptr = nullptr;
+    is_heap = false;
   }
 
   /** @brief Invokes the wrapped callable. */
   R operator()(Args... args) const {
-    if (!vptr)
+    if (!invoke_ptr || !isPointerReadable((const void*)invoke_ptr))
       return R();
     void *target = is_heap ? data.heap : (void *)data.local;
-    return vptr->invoke(target, args...);
+    return invoke_ptr(target, args...);
   }
 
   /** @brief Returns true if the function wrapper is valid. */
-  bool isValid() const { return vptr != nullptr; }
+  bool isValid() const { return invoke_ptr != nullptr && isPointerReadable((const void*)invoke_ptr); }
 
   /** @brief Explicit boolean conversion for validity check. */
   operator bool() const { return isValid(); }

@@ -111,6 +111,7 @@ private:
       if (psl > slotPSL) {
         Xi::Swap(toInsert, slot);
         psl = slotPSL;
+        h = toInsert.fnvHash;
       }
       idx = (idx + 1) & capMask;
       psl++;

@@ -145,6 +145,7 @@ void String::setFromRawAddress(unsigned long long ptrAddr, usz len) {
 
 String::String(int n) : InlineArray<u8>() { append_int(n); }
 String::String(long long n) : InlineArray<u8>() { append_int(n); }
+String::String(usz n) : InlineArray<u8>() { append_int(n); }
 String::String(u64 n) : InlineArray<u8>() { append_int(n); }
 String::String(f64 n) : InlineArray<u8>() { append_f32(n); }
 String::String(f32 n) : InlineArray<u8>() { append_f32((f64)n); }
