@@ -40,8 +40,6 @@ public:
   int tz = 0; ///< Timezone offset in seconds.
   i64 us;     ///< Microseconds since Unix epoch.
 
-  /** @brief Pauses the current thread for a specific duration. */
-  static void sleep(double seconds);
   /** @brief Checks if a year is a leap year. */
   static bool isLeap(int y) {
     return (y % 4 == 0) && (y % 100 != 0 || y % 400 == 0);
