@@ -65,6 +65,7 @@ public:
     other._rank = 1;
   }
 
+
   /**
    * @brief Copy assignment operator.
    */

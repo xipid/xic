@@ -7,7 +7,7 @@
 #ifndef XI_CORE_MAP_HPP
 #define XI_CORE_MAP_HPP
 
-#include "InlineArray.hpp"
+#include "Array.hpp"
 
 namespace Collection {
   
@@ -186,6 +186,34 @@ public:
   usz size() const { return count; }
   usz length() const { return count; }
   bool isEmpty() const { return count == 0; }
+
+  /**
+   * @brief Returns a flat array of all keys stored in the map.
+   */
+  Array<K> keys() const {
+    Array<K> res;
+    if (count == 0) return res;
+    for (usz i = 0; i < capacity; ++i) {
+      if (!buckets[i].isEmpty()) {
+        res.push(buckets[i].key);
+      }
+    }
+    return res;
+  }
+
+  /**
+   * @brief Returns a flat array of all values stored in the map.
+   */
+  Array<V> values() const {
+    Array<V> res;
+    if (count == 0) return res;
+    for (usz i = 0; i < capacity; ++i) {
+      if (!buckets[i].isEmpty()) {
+        res.push(buckets[i].value);
+      }
+    }
+    return res;
+  }
 
   /**
    * @brief Associates a key with a value (updates if key exists).

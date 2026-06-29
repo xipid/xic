@@ -60,7 +60,7 @@ struct XI_EXPORT Transform {
   Matrix4 getMatrix() const;
   void lookAt(Vector3 target, Vector3 up = {0, 0, 1});
 
-protected:
+
   Vector3 _position = {0, 0, 0};
   Vector3 _rotation = {0, 0, 0};
   Vector3 _scale = {1, 1, 1};
