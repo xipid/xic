@@ -21,7 +21,9 @@
 // -------------------------------------------------------------------------
 // GLFW availability check
 // -------------------------------------------------------------------------
-#ifdef __has_include
+#if defined(__wasi__) || defined(__EMSCRIPTEN__)
+#define GLFW_AVAILABLE 1
+#elif defined(__has_include)
 #if __has_include(<GLFW/glfw3.h>)
 #define GLFW_AVAILABLE 1
 #else
