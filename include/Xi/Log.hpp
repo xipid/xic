@@ -23,6 +23,8 @@
 
 namespace Xi {
 
+#undef None
+
 /**
  * @enum LogLevel
  * @brief Defines the severity levels for log messages.
@@ -68,7 +70,7 @@ private:
 
   void unlock() { __atomic_clear(&lock_val, __ATOMIC_RELEASE); }
 
-  void print_unlocked(const Xi::String &msg) {
+  void print_unlocked(const Collection::String &msg) {
 #if defined(__KERNEL__)
     printk(KERN_INFO "%s", msg.c_str());
 #elif defined(ARDUINO)
@@ -85,13 +87,13 @@ private:
   }
 
   template <typename T> void print_unlocked(const T &msg) {
-    if constexpr (Xi::IsSame<T, Xi::String>::Value) {
+    if constexpr (Xi::IsSame<T, Collection::String>::Value) {
       print_unlocked(msg);
     } else if constexpr (Xi::IsSame<T, const char *>::Value ||
                          Xi::IsSame<T, char *>::Value) {
-      print_unlocked(Xi::String(msg));
+      print_unlocked(Collection::String(msg));
     } else if constexpr (Xi::IsPrimitive<T>::Value) {
-      print_unlocked(Xi::String(msg));
+      print_unlocked(Collection::String(msg));
     } else if constexpr (Collection::HasToString<T>::value) {
       print_unlocked(msg.toString());
     } else {
@@ -124,7 +126,7 @@ public:
   static Log &getInstance() {
     alignas(4) static unsigned int init_lock = 0;
     static bool initialized = false;
-    static alignas(Log) char storage[sizeof(Log)];
+    static char storage[sizeof(Log)];
     if (!__atomic_load_n(&initialized, __ATOMIC_ACQUIRE)) {
       while (__atomic_test_and_set(&init_lock, __ATOMIC_ACQUIRE)) {
 #if defined(__x86_64__) || defined(__i386__)
@@ -144,7 +146,7 @@ public:
 
   void setLevel(LogLevel l) { currentLevel = l; }
 
-  void print(const Xi::String &msg) {
+  void print(const Collection::String &msg) {
     lock();
     print_unlocked(msg);
     unlock();
@@ -173,14 +175,14 @@ public:
       return;
 #if defined(__KERNEL__)
     // Convert generic T to string
-    Xi::String str_msg;
-    if constexpr (Xi::IsSame<T, Xi::String>::Value) {
+    Collection::String str_msg;
+    if constexpr (Xi::IsSame<T, Collection::String>::Value) {
       str_msg = msg;
     } else if constexpr (Xi::IsSame<T, const char *>::Value ||
                          Xi::IsSame<T, char *>::Value) {
-      str_msg = Xi::String(msg);
+      str_msg = Collection::String(msg);
     } else if constexpr (Xi::IsPrimitive<T>::Value) {
-      str_msg = Xi::String(msg);
+      str_msg = Collection::String(msg);
     } else if constexpr (Collection::HasToString<T>::value) {
       str_msg = msg.toString();
     } else {

@@ -372,6 +372,10 @@ template <typename T> struct Arity {
 
 namespace Xi {
 
+template <typename U> struct IsCharArray { static const bool Value = false; };
+template <usz N> struct IsCharArray<char[N]> { static const bool Value = true; };
+template <usz N> struct IsCharArray<const char[N]> { static const bool Value = true; };
+
 /**
  * @brief Generic serialization dispatcher.
  */
@@ -391,6 +395,8 @@ template <typename T, typename S> S serialize(const T &obj) {
     return s;
   } else if constexpr (IsSame<T, Collection::String>::Value) {
     return const_cast<Collection::String &>(obj).serialize();
+  } else if constexpr (IsCharArray<T>::Value) {
+    return Collection::String(obj).serialize();
   } else {
     S s;
     constexpr usz count = Collection::Arity<T>::Value;

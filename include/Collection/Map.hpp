@@ -10,6 +10,7 @@
 #include "InlineArray.hpp"
 
 namespace Collection {
+  
 class String;
 
 /**

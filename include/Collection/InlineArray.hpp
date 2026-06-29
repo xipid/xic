@@ -232,10 +232,8 @@ public:
    */
   void destroy() {
     if (block) {
-      if (block->useCount > 0) {
-        block->useCount--;
-        if (block->useCount == 0)
-          Block::destroy(block);
+      if (block->useCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        Block::destroy(block);
       }
       block = nullptr;
     }

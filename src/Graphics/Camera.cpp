@@ -6,6 +6,7 @@
 
 #include "../../include/Graphics/Camera.hpp"
 
+
 namespace Graphics {
 
 void *Camera3::getView() {

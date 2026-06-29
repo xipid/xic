@@ -390,6 +390,8 @@ public:
   virtual TreeItem *clone() const override { return new TreeItemT<T>(value); }
 };
 
+
+
 /**
  * @class TaggedTreeItemT
  * @brief A leaf node with metadata and a value.
