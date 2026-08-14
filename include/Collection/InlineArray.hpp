@@ -319,6 +319,7 @@ public:
   T *data() { return _data; }
   const T *data() const { return _data; }
   usz size() const { return _length; }
+  usz length() const { return _length; }
 
   T &operator[](usz idx) { return _data[idx]; }
   const T &operator[](usz idx) const { return _data[idx]; }

@@ -5,9 +5,7 @@
 
 #include "../../include/Security/Crypto.hpp"
 #include "../../include/Xi/Random.hpp"
-extern "C" {
-#include "../../packages/monocypher/monocypher.h"
-}
+#include <monocypher.h>
 
 namespace Security {
 

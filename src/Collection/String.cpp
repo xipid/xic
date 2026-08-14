@@ -5,6 +5,7 @@
  */
 
 #include "../../include/Collection/String.hpp"
+#include <cstdio>
 
 namespace Collection {
 
@@ -105,18 +106,10 @@ usz String::str_len(const char *s) {
 void String::append_raw(const u8 *b, usz c) { pushEach(b, c); }
 
 void String::append_f32(f64 n, int precision) {
-  if (n < 0) {
-    push('-');
-    n = -n;
-  }
-  append_int((long long)n);
-  push('.');
-  f64 frac = n - (long long)n;
-  for (int i = 0; i < precision; i++) {
-    frac *= 10;
-    int digit = (int)frac;
-    push(digit + '0');
-    frac -= digit;
+  char buf[64];
+  int len = ::snprintf(buf, sizeof(buf), "%.6f", n);
+  if (len > 0) {
+    append_raw((const u8*)buf, (usz)len);
   }
 }
 

@@ -31,7 +31,7 @@ struct YamlParser {
   usz i = 0;
   int currentIndent = 0;
   bool isNewLine = true;
-  Map<String, TreeItem *> anchors;
+  Map<String, NodeBase *> anchors;
 
   YamlParser(const String &s) : input(s) {}
 
@@ -57,7 +57,7 @@ struct YamlParser {
     }
   }
 
-  void skipComments(TreeBranch *node = nullptr) {
+  void skipComments(NodeBase *node = nullptr) {
     while (i < input.length()) {
       skipSpace();
       if (i + 1 < input.length()) {
@@ -70,28 +70,28 @@ struct YamlParser {
             comm += input.charAt(i++);
           }
           if (node) {
-            TaggedTreeItemT<String> *c =
-                new TaggedTreeItemT<String>(comm.trim());
+            NamedNode<String> *c =
+                new NamedNode<String>(comm.trim());
             c->name = "_comment";
             node->add(c);
           }
           isNewLine = true;
           currentIndent = 0;
-        } else if (c1 == '/' && c2 == '/') {
+        } else if (c1 == '/' && c2 == '/' && (i == 0 || input.charAt(i - 1) == ' ' || input.charAt(i - 1) == '\t' || input.charAt(i - 1) == '\n')) {
           i += 2;
           String comm;
           while (i < input.length() && input.charAt(i) != '\n') {
             comm += input.charAt(i++);
           }
           if (node) {
-            TaggedTreeItemT<String> *c =
-                new TaggedTreeItemT<String>(comm.trim());
+            NamedNode<String> *c =
+                new NamedNode<String>(comm.trim());
             c->name = "_comment";
             node->add(c);
           }
           isNewLine = true;
           currentIndent = 0;
-        } else if (c1 == '/' && c2 == '*') {
+        } else if (c1 == '/' && c2 == '*' && (i == 0 || input.charAt(i - 1) == ' ' || input.charAt(i - 1) == '\t' || input.charAt(i - 1) == '\n')) {
           i += 2;
           String comm;
           while (i + 1 < input.length() &&
@@ -100,14 +100,15 @@ struct YamlParser {
           }
           i += 2;
           if (node) {
-            TaggedTreeItemT<String> *c =
-                new TaggedTreeItemT<String>(comm.trim());
+            NamedNode<String> *c =
+                new NamedNode<String>(comm.trim());
             c->name = "_comment";
             node->add(c);
           }
         } else {
           break;
         }
+
       } else if (i < input.length() && input.charAt(i) == '#') {
         i++; // last char comment
         break;
@@ -159,7 +160,7 @@ struct YamlParser {
     return res;
   }
 
-  TreeItem *parseValue(int parentIndent, TreeBranch *parentBranch = nullptr) {
+  NodeBase *parseValue(int parentIndent, NodeBase *parentBranch = nullptr) {
     while (true) {
       skipComments(parentBranch);
       if (i >= input.length())
@@ -198,114 +199,131 @@ struct YamlParser {
              input.charAt(i) != '\n') {
         anchorName += input.charAt(i++);
       }
-      TreeItem *val = parseValue(parentIndent, parentBranch);
+      NodeBase *val = parseValue(parentIndent, parentBranch);
       if (val)
-        anchors.set(anchorName, val);
+        anchors.put(anchorName, val);
       return val;
     }
-
     if (input.charAt(i) == '*') {
       i++;
       String aliasName;
       while (i < input.length() && !isSpace(input.charAt(i)) &&
-             input.charAt(i) != '\n' && input.charAt(i) != ',' &&
-             input.charAt(i) != ']' && input.charAt(i) != '}') {
+             input.charAt(i) != '\n') {
         aliasName += input.charAt(i++);
       }
-      TreeItem **ptr = (TreeItem **)anchors.get(aliasName);
-      if (ptr && *ptr)
-        return (*ptr)->clone();
-      return new TaggedTreeItem(); // Fallback null
+      NodeBase **ref = anchors.get(aliasName);
+      if (ref && *ref)
+        return (*ref)->clone();
+      return nullptr;
     }
 
-    char c = input.charAt(i);
+    int blockIndent = currentIndent;
 
-    // Sequence (Block style)
-    if (c == '-' && (i + 1 >= input.length() || isSpace(input.charAt(i + 1)))) {
-      TaggedTreeArrayBranch<TreeItem> *arr =
-          new TaggedTreeArrayBranch<TreeItem>();
-      int blockIndent = currentIndent;
+    // Flow Style Sequence
+    if (input.charAt(i) == '[') {
+      i++;
+      NamedNode<void> *arr = new NamedNode<void>();
+      while (i < input.length()) {
+        skipComments(arr);
+        if (input.charAt(i) == ']') {
+          i++;
+          break;
+        }
+        NodeBase *val = parseValue(blockIndent, arr);
+        if (val)
+          arr->add(val);
+        skipSpace();
+        if (input.charAt(i) == ',') {
+          i++;
+        }
+      }
+      return arr;
+    }
+
+    // Flow Style Mapping
+    if (input.charAt(i) == '{') {
+      i++;
+      NamedNode<void> *mapNode = new NamedNode<void>();
+      while (i < input.length()) {
+        skipComments(mapNode);
+        if (input.charAt(i) == '}') {
+          i++;
+          break;
+        }
+        String k = parseString();
+        skipSpace();
+        if (input.charAt(i) == ':') {
+          i++;
+        }
+        NodeBase *val = parseValue(blockIndent, mapNode);
+        if (val) {
+          val->setName(k);
+          mapNode->add(val);
+        }
+        skipSpace();
+        if (input.charAt(i) == ',') {
+          i++;
+        }
+      }
+      return mapNode;
+    }
+
+    // Block Sequence
+    if (input.charAt(i) == '-' && (i + 1 < input.length() && isSpace(input.charAt(i + 1)))) {
+      NamedNode<void> *arr = new NamedNode<void>();
       while (i < input.length()) {
         skipComments(arr);
         if (currentIndent < blockIndent)
           break;
-        if (i < input.length() && input.charAt(i) == '-') {
-          i++;
-          TreeItem *item = parseValue(blockIndent + 1, arr);
-          if (item)
-            arr->add(item);
-        } else
+        if (input.charAt(i) != '-')
           break;
-      }
-      return arr;
-    }
-
-    // Sequence (Flow style / JSON)
-    if (c == '[') {
-      i++;
-      TaggedTreeArrayBranch<TreeItem> *arr =
-          new TaggedTreeArrayBranch<TreeItem>();
-      while (i < input.length()) {
-        skipComments(arr);
-        if (i < input.length() && input.charAt(i) == ']') {
-          i++;
-          break;
-        }
-        if (i < input.length() && input.charAt(i) == ',') {
-          i++;
-          continue;
-        }
-        TreeItem *item = parseValue(-1, arr);
-        if (item)
-          arr->add(item);
-      }
-      return arr;
-    }
-
-    // Map (Flow style / JSON)
-    if (c == '{') {
-      i++;
-      TaggedTreeBranch *obj = new TaggedTreeBranch();
-      while (i < input.length()) {
-        skipComments(obj);
-        if (i < input.length() && input.charAt(i) == '}') {
-          i++;
-          break;
-        }
-        if (i < input.length() && input.charAt(i) == ',') {
-          i++;
-          continue;
-        }
-        String key = parseString();
+        i++; // skip '-'
         skipSpace();
-        if (i < input.length() && input.charAt(i) == ':')
-          i++;
-        TreeItem *val = parseValue(-1, obj);
-        if (val) {
-          val->setName(key);
-          obj->add(val);
-        }
+        NodeBase *val = parseValue(blockIndent + 2, arr);
+        if (val)
+          arr->add(val);
+        skipComments(arr);
       }
-      return obj;
+      return arr;
     }
 
-    // Block Mapping or Literal
-    usz peek = i;
+
+    // Look ahead to check if this is a key-value mapping
     bool isKey = false;
-    int blockIndent = currentIndent;
-    
-    // Simple lookahead for a key
-    while (peek < input.length() && input.charAt(peek) != '\n' &&
-           input.charAt(peek) != '\r') {
-      if (input.charAt(peek) == ':') {
-        isKey = true;
-        break;
+    usz peek = i;
+    if (peek < input.length() && (input.charAt(peek) == '\"' || input.charAt(peek) == '\'')) {
+      char q = input.charAt(peek++);
+      while (peek < input.length()) {
+        if (input.charAt(peek) == '\\' && peek + 1 < input.length()) {
+          peek += 2;
+          continue;
+        }
+        if (input.charAt(peek) == q) {
+          peek++;
+          break;
+        }
+        peek++;
       }
-      peek++;
+      while (peek < input.length() && isSpace(input.charAt(peek))) peek++;
+      if (peek < input.length() && input.charAt(peek) == ':' &&
+          (peek + 1 >= input.length() || isSpace(input.charAt(peek + 1)) || input.charAt(peek + 1) == '\n' || input.charAt(peek + 1) == '\r')) {
+        isKey = true;
+      }
+    } else {
+      while (peek < input.length()) {
+        char cp = input.charAt(peek);
+        if (cp == '\n' || cp == '\r')
+          break;
+        if (cp == ':' && (peek + 1 >= input.length() || isSpace(input.charAt(peek + 1)) || input.charAt(peek + 1) == '\n' || input.charAt(peek + 1) == '\r')) {
+          isKey = true;
+          break;
+        }
+        peek++;
+      }
     }
 
     if (isKey) {
-      TaggedTreeBranch *branch = new TaggedTreeBranch();
+      NamedNode<void> *branch = new NamedNode<void>();
       while (i < input.length()) {
         skipComments(branch);
         if (currentIndent < blockIndent)
@@ -319,21 +337,32 @@ struct YamlParser {
 
         // Parse Key
         String k;
-        while (i < input.length() && input.charAt(i) != ':') {
-           char ck = input.charAt(i++);
-           if (ck == '\n') break; 
-           k += ck;
+        if (input.charAt(i) == '\"' || input.charAt(i) == '\'') {
+          k = parseString();
+          skipSpace();
+          if (i < input.length() && input.charAt(i) == ':') i++;
+        } else {
+          while (i < input.length()) {
+            char ck = input.charAt(i);
+            if (ck == '\n' || ck == '\r') break;
+            if (ck == ':' && (i + 1 >= input.length() || isSpace(input.charAt(i + 1)) || input.charAt(i + 1) == '\n' || input.charAt(i + 1) == '\r')) {
+              i++;
+              break;
+            }
+            k += ck;
+            i++;
+          }
         }
-        if (i < input.length() && input.charAt(i) == ':') i++;
         k = k.trim();
         if (k.isEmpty()) break;
 
         // Parse Value
-        TreeItem *v = parseValue(blockIndent, branch);
+        NodeBase *v = parseValue(blockIndent, branch);
         if (v) {
           v->setName(k);
           branch->add(v);
         }
+
 
         // After value, we must be on a new line or at EOF
         skipComments(branch);
@@ -345,11 +374,11 @@ struct YamlParser {
     // Scalar
     String s = parseString();
     if (s == "true")
-      return new TaggedTreeItemT<bool>(true);
+      return new NamedNode<bool>(true);
     if (s == "false")
-      return new TaggedTreeItemT<bool>(false);
+      return new NamedNode<bool>(false);
     if (s == "null" || s == "~")
-      return new TaggedTreeItem();
+      return new NamedNode<void>();
 
     bool isNum = true;
     int dotCount = 0;
@@ -363,31 +392,33 @@ struct YamlParser {
     }
     if (isNum && s.length() > 0 && s != "-" && dotCount <= 1) {
       if (dotCount == 1)
-        return new TaggedTreeItemT<f64>(s.toDouble());
-      return new TaggedTreeItemT<long long>(s.toInt());
+        return new NamedNode<f64>(s.toDouble());
+      return new NamedNode<long long>(s.toInt());
     }
-    return new TaggedTreeItemT<String>(s);
+    return new NamedNode<String>(s);
   }
 };
 
-bool YAML::parse(const String &yaml, TreeItem &outRoot) {
+bool YAML::parse(const String &yaml, NodeBase &outRoot) {
   YamlParser p(yaml);
-  TreeBranch *root = dynamic_cast<TreeBranch *>(&outRoot);
+  NodeBase *root = &outRoot;
   if (!root)
     return false;
 
   while (p.i < yaml.length()) {
-    TreeItem *res = p.parseValue(-1, root);
+    NodeBase *res = p.parseValue(-1, root);
     if (!res)
       break;
 
-    if (TreeBranch *b = dynamic_cast<TreeBranch *>(res)) {
-      for (usz i = 0; i < b->size(); ++i) {
-        root->add((*b)[i]->clone());
+    if (res) {
+      if (res->isContainer()) {
+        for (usz i = 0; i < res->size(); ++i) {
+          root->add((*res)[i]->clone());
+        }
+        delete res;
+      } else {
+        root->add(res);
       }
-      delete b;
-    } else {
-      root->add(res);
     }
     // ensure we advance or skip trailing space
     p.skipSpace();
@@ -395,11 +426,23 @@ bool YAML::parse(const String &yaml, TreeItem &outRoot) {
   return true;
 }
 
-static String emitValue(const TreeItem *node, int indentLevel, int indentSize, bool firstLineNoIndent = false) {
+static String emitValue(const NodeBase *node, int indentLevel, int indentSize, bool firstLineNoIndent = false) {
   if (!node)
     return "null";
 
-  if (auto branch = dynamic_cast<const TaggedTreeBranch *>(node)) {
+  if (!node->isContainer()) {
+    if (auto s = dynamic_cast<const Node<String> *>(node))
+      return s->value;
+    if (auto i = dynamic_cast<const Node<long long> *>(node))
+      return String(i->value);
+    if (auto b = dynamic_cast<const Node<bool> *>(node))
+      return b->value ? "true" : "false";
+    if (auto f = dynamic_cast<const Node<f64> *>(node))
+      return String(f->value);
+    return "null";
+  }
+
+  if (auto branch = dynamic_cast<const NamedNode<void> *>(node)) {
     String res;
     for (usz i = 0; i < branch->size(); ++i) {
       auto child = (*branch)[i];
@@ -407,63 +450,54 @@ static String emitValue(const TreeItem *node, int indentLevel, int indentSize, b
         if (!(i == 0 && firstLineNoIndent)) {
           emitIdent(res, (indentLevel)*indentSize);
         }
-        res += "# " + dynamic_cast<const TreeItemT<String> *>(child)->value +
+        res += "# " + dynamic_cast<const Node<String> *>(child)->value +
                "\n";
         continue;
       }
       if (!(i == 0 && firstLineNoIndent)) {
-        emitIdent(res, indentLevel * indentSize);
+        emitIdent(res, (indentLevel)*indentSize);
       }
-      res += child->getName() + ": ";
-      res += emitValue(child, indentLevel + 1, indentSize);
-      res += "\n";
+      res += child->getName() + ":";
+      if (child->size() > 0) {
+        res += "\n";
+        res += emitValue(child, indentLevel + 1, indentSize);
+      } else {
+        res += " " + emitValue(child, indentLevel, indentSize, true) + "\n";
+      }
     }
     return res;
   }
 
-  if (auto arr = dynamic_cast<const TreeBranch *>(node)) {
-    // Simple check for array vs map if needed
+  if (auto arr = node) {
     String res;
     bool first = true;
     for (usz i = 0; i < arr->size(); ++i) {
-      TreeItem *child = (*arr)[i];
+      NodeBase *child = (*arr)[i];
       if (child->getName() == "_comment") {
         if (!(first && firstLineNoIndent)) {
           emitIdent(res, (indentLevel)*indentSize);
         }
-        res += "# " + dynamic_cast<const TreeItemT<String> *>(child)->value +
+        res += "# " + dynamic_cast<const Node<String> *>(child)->value +
                "\n";
         continue;
       }
-      if (!first)
-        res += "\n";
       if (!(first && firstLineNoIndent)) {
-        emitIdent(res, indentLevel * indentSize);
+        emitIdent(res, (indentLevel)*indentSize);
       }
-      res += "- ";
-      res += emitValue(child, indentLevel + 1, indentSize, true);
       first = false;
+      res += "- " + emitValue(child, indentLevel + 1, indentSize, true) + "\n";
     }
     return res;
   }
 
-  if (auto s = dynamic_cast<const TreeItemT<String> *>(node))
-    return s->value;
-  if (auto i = dynamic_cast<const TreeItemT<long long> *>(node))
-    return String(i->value);
-  if (auto b = dynamic_cast<const TreeItemT<bool> *>(node))
-    return b->value ? "true" : "false";
-  if (auto f = dynamic_cast<const TreeItemT<f64> *>(node))
-    return String(f->value);
-
   return "null";
 }
 
-String YAML::toYAML(const TreeItem &root, int indent) {
+String YAML::toYAML(const NodeBase &root, int indent) {
   return emitValue(&root, 0, indent);
 }
 
-String YAML::toJSON(const TreeItem &root, int indent) {
+String YAML::toJSON(const NodeBase &root, int indent) {
   // For JSON, we can use a similar emitter that always uses flow style
   // For brevity, we'll use a placeholder until a full JSON emitter is needed
   return toYAML(root, indent); // Simplified

@@ -19,39 +19,13 @@ namespace Xi {
 struct XI_EXPORT Transform {
   virtual ~Transform() = default;
 
-  const Vector3 &getPosition() const { return _position; }
-  const Vector3 &getRotation() const { return _rotation; }
-  const Vector3 &getScale() const { return _scale; }
-
-  void setPosition(const Vector3 &p) {
-    _position = p;
-    touch();
-  }
-  void setRotation(const Vector3 &r) {
-    _rotation = r;
-    touch();
-  }
-  void setScale(const Vector3 &s) {
-    _scale = s;
-    touch();
-  }
-
-  Vector3 &position() {
-    touch();
-    return _position;
-  }
-  Vector3 &rotation() {
-    touch();
-    return _rotation;
-  }
-  Vector3 &scale() {
-    touch();
-    return _scale;
-  }
+  Vector3 position = {0, 0, 0};
+  Vector3 rotation = {0, 0, 0};
+  Vector3 scale = {1, 1, 1};
 
   u32 transformVersion = 1;
 
-  void touch() {
+  void update() {
     transformVersion++;
     if (transformVersion == 0)
       transformVersion = 1;
@@ -59,11 +33,6 @@ struct XI_EXPORT Transform {
 
   Matrix4 getMatrix() const;
   void lookAt(Vector3 target, Vector3 up = {0, 0, 1});
-
-
-  Vector3 _position = {0, 0, 0};
-  Vector3 _rotation = {0, 0, 0};
-  Vector3 _scale = {1, 1, 1};
 
   mutable Matrix4 _cachedMatrix = identity();
   mutable u32 _cachedVersion = 0;
@@ -95,16 +64,16 @@ public:
     f64 N = SphereConfig::WGS84_A /
             sqrt(1.0 - SphereConfig::WGS84_E2 * sinLat * sinLat);
 
-    _position.x = (f32)((N + alt) * cosLat * cos((f32)lon));
-    _position.y = (f32)((N + alt) * cosLat * sin((f32)lon));
-    _position.z = (f32)((N * (1.0 - SphereConfig::WGS84_E2) + alt) * sinLat);
-    touch();
+    position.x = (f32)((N + alt) * cosLat * cos((f32)lon));
+    position.y = (f32)((N + alt) * cosLat * sin((f32)lon));
+    position.z = (f32)((N * (1.0 - SphereConfig::WGS84_E2) + alt) * sinLat);
+    update();
   }
 
   Vector3 getGeoPosition() const {
-    f64 x = _position.x;
-    f64 y = _position.y;
-    f64 z = _position.z;
+    f64 x = position.x;
+    f64 y = position.y;
+    f64 z = position.z;
 
     f64 lon = atan2((f32)y, (f32)x);
     f64 p = sqrt(x * x + y * y);

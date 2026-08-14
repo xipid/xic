@@ -4,12 +4,8 @@ authors:
 - family-names: "Merzoug"
   given-names: "Abderrahmene"
   alias: "Xi"
-title: "XiC: Zero-Exception C++ Core Library and SFI Task Sandbox for Embedded Systems"
+title: "A zero exception C++ core library."
 version: "1.0.0"
 date-released: 2026-06-13
-url: "https://github.com/xipid/xic"
-repository-code: "https://github.com/xipid/xic"
-identifiers:
-  - type: url
-    value: "https://xipid.gitbook.io/xic/"
-    description: "XiC Official GitBook Documentation"
+url: "https://github.com/ksee6/xic"
+repository-code: "https://github.com/ksee6/xic"

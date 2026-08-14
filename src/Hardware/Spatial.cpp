@@ -137,12 +137,12 @@ void HardwareSpatial::fuseSensors(float deltaT) {
 
   // Convert to Euler for basic rotation field
   float sinr = 2 * (q0 * q1 + q2 * q3), cosr = 1 - 2 * (q1 * q1 + q2 * q2);
-  _rotation.x = Xi::atan2(sinr, cosr);
+  rotation.x = Xi::atan2(sinr, cosr);
   float sinp = 2 * (q0 * q2 - q3 * q1);
-  _rotation.y =
+  rotation.y =
       (Xi::abs(sinp) >= 1) ? (sinp > 0 ? 1.57f : -1.57f) : Xi::asin(sinp);
   float siny = 2 * (q0 * q3 + q1 * q2), cosy = 1 - 2 * (q2 * q2 + q3 * q3);
-  _rotation.z = Xi::atan2(siny, cosy);
+  rotation.z = Xi::atan2(siny, cosy);
 
   deltaRotation = activeMPU->gyro;
   angularVelocity = g; // Actual fused rad/s

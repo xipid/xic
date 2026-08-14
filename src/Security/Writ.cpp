@@ -1,8 +1,6 @@
 #include "../../include/Security/Writ.hpp"
 #include "../../include/Security/Crypto.hpp"
-extern "C" {
-#include "../../packages/monocypher/monocypher.h"
-}
+#include <monocypher.h>
 
 namespace Security {
 

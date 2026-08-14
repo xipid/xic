@@ -89,7 +89,7 @@ public:
       applyMahony(avgAcc, avgGyro, avgMag, dt);
 
       // 3. Update Rotation (WXYZ to Euler)
-      _rotation = quatToEuler(q);
+      rotation = quatToEuler(q);
     }
 
     // 4. GPS & Time Sync

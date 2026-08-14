@@ -127,6 +127,11 @@ public:
   u8 rank() const { return _rank; }
 
   /**
+   * @brief Returns the dimension shape array pointer.
+   */
+  const usz *dimensions() const { return _dims; }
+
+  /**
    * @brief Resizes the array to fit a specified total length.
    * @param len Target total length across all fragments.
    * @return true if successful.

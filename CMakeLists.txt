@@ -4,22 +4,39 @@ project(Xi VERSION 1.0.0 LANGUAGES C CXX ASM)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_compile_options(-fno-sanitize=all)
+find_package(OpenMP REQUIRED)
+
+add_compile_options(-O3 -march=native -ffast-math -mavx2 -mfma -fno-sanitize=all)
+if(OpenMP_CXX_FOUND)
+    add_compile_options(${OpenMP_CXX_FLAGS})
+    add_link_options(${OpenMP_CXX_FLAGS})
+endif()
 add_link_options(-fno-sanitize=all)
 
 # Options
-option(XI_BUILD_GRAPHICS "Build Graphics Support (Diligent Engine)" ON)
 option(XI_BUILD_HARDWARE "Build Hardware Support (DHT/MPU/GPS)" ON)
 option(XI_BUILD_TLS "Build TLS/HTTP Support (mbedTLS)" ON)
 option(XI_BUILD_DEFLATE "Build DEFLATE Compression (miniz)" ON)
 option(XI_BUILD_LZ4 "Build LZ4 Compression" ON)
 option(XI_BUILD_ZSTD "Build Zstandard Compression" ON)
 option(XI_BUILD_AS_OBJECTS "Build as an OBJECT library" ON)
+# When ON, excludes src/Task/ from Xi so the consumer (e.g. task project)
+# can provide its own Task implementation without duplicate symbols.
+option(XI_EXCLUDE_TASK "Exclude src/Task sources from Xi (consumer provides Task)" OFF)
+
+# --- Dependencies ---
+include(FetchContent)
+FetchContent_Declare(
+    monocypher
+    GIT_REPOSITORY https://github.com/LoupVaillant/Monocypher.git
+    GIT_TAG        4.0.2
+)
+FetchContent_MakeAvailable(monocypher)
 
 # --- Automatic Source Discovery ---
 # Core components that are always included
 file(GLOB_RECURSE CORE_SOURCES 
-    "packages/monocypher/monocypher.c"
+    "${monocypher_SOURCE_DIR}/src/monocypher.c"
     "src/Xi/*.cpp"
     "src/Collection/*.cpp"
     "src/Encoding/*.cpp"
@@ -42,6 +59,12 @@ list(FILTER CORE_SOURCES EXCLUDE REGEX "src/Resource/Zstd.cpp")
 
 set(XI_SOURCES ${CORE_SOURCES})
 
+# Exclude Task sources if the consumer provides its own implementation
+if(XI_EXCLUDE_TASK)
+    list(FILTER XI_SOURCES EXCLUDE REGEX "src/Task/.*")
+    message(STATUS "XI_EXCLUDE_TASK=ON: src/Task sources excluded from Xi")
+endif()
+
 # --- Main Target Definition ---
 if(XI_BUILD_AS_OBJECTS)
     add_library(Xi OBJECT ${XI_SOURCES})
@@ -57,52 +80,13 @@ target_include_directories(Xi PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 target_include_directories(Xi PRIVATE 
-    ${CMAKE_CURRENT_SOURCE_DIR}/packages/monocypher
+    ${monocypher_SOURCE_DIR}/src
 )
 
 # --- Fail-safe Dependency Handling ---
 
-# Graphics (Diligent Engine)
-if(XI_BUILD_GRAPHICS)
-    if(TARGET Diligent-GraphicsEngineVk-static OR TARGET Diligent-GraphicsEngineOpenGL-static)
-        set(XI_DILIGENT_FOUND TRUE)
-        if(DEFINED diligentcore_SOURCE_DIR)
-            target_include_directories(Xi PUBLIC ${diligentcore_SOURCE_DIR})
-        endif()
-    else()
-        find_path(DILIGENT_CORE_INTERFACE_DIR NAMES CommandList.h
-                  PATH_SUFFIXES DiligentCore/Graphics/GraphicsEngine/interface
-                                Graphics/GraphicsEngine/interface)
-        if(DILIGENT_CORE_INTERFACE_DIR)
-            set(XI_DILIGENT_FOUND TRUE)
-            get_filename_component(DILIGENT_CORE_ROOT "${DILIGENT_CORE_INTERFACE_DIR}/../../.." ABSOLUTE)
-            target_include_directories(Xi PUBLIC
-                ${DILIGENT_CORE_ROOT}
-                ${DILIGENT_CORE_ROOT}/Graphics/GraphicsEngine/interface
-                ${DILIGENT_CORE_ROOT}/Common/interface
-                ${DILIGENT_CORE_ROOT}/Primitives/interface
-                ${DILIGENT_CORE_ROOT}/Platforms/interface
-            )
-        endif()
-    endif()
-
-    if(XI_DILIGENT_FOUND)
-        file(GLOB GRAPHICS_SOURCES "src/Graphics/*.cpp")
-        target_sources(Xi PRIVATE ${GRAPHICS_SOURCES})
-        target_compile_definitions(Xi PUBLIC XI_GRAPHICS_ENABLED)
-        
-        if(TARGET glfw)
-            target_link_libraries(Xi PUBLIC glfw)
-        else()
-            find_package(glfw3 QUIET)
-            if(glfw3_FOUND)
-                target_link_libraries(Xi PUBLIC glfw)
-            endif()
-        endif()
-    else()
-        message(STATUS "Diligent Engine not found. Skipping Graphics.")
-    endif()
-endif()
+# Graphics (Vulkan & GLFW)
+# Graphics disabled in core xic (moved to ray)
 
 # TLS/HTTP (mbedTLS)
 if(XI_BUILD_TLS)
@@ -204,30 +188,9 @@ endif()
 option(XI_BUILD_TESTS "Build Xi tests" ON)
 
 if(XI_BUILD_TESTS)
-    # Compile internal guest binary using musl-clang
-    add_custom_command(
-        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/tests/task/internal"
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/tests/task"
-        COMMAND musl-clang -x c -O2 -fPIE -pie -Wl,-Ttext-segment=0x50000000 -Wl,-Ttext=0x50001000 -Wl,-e,main -o "${CMAKE_CURRENT_BINARY_DIR}/tests/task/internal" "${CMAKE_CURRENT_SOURCE_DIR}/tests/task/internal.cpp"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/task/internal.cpp"
-        COMMENT "Compiling guest binary internal using musl-clang"
-    )
-    add_custom_target(internal ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/tests/task/internal")
 
-    # Build runner host executable (which loads the internal binary)
-    add_executable(runner tests/task/runner.cpp)
-    target_link_libraries(runner PRIVATE Xi::Xi)
-    set_target_properties(runner PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
-
-    # Build example (realistic developer use-case test)
-    add_executable(example tests/task/example.cpp)
-    target_link_libraries(example PRIVATE Xi::Xi)
-    set_target_properties(example PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
-
-    # Build main (functional unit test suite)
-    add_executable(main tests/task/main.cpp)
-    target_link_libraries(main PRIVATE Xi::Xi)
-    set_target_properties(main PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests/task")
-
-    # router_feature_test removed as resource router is deprecated
+    # Build tree_yaml_test (unit verification of tree nodes & YAML)
+    add_executable(tree_yaml_test tests/tree_yaml_test.cpp)
+    target_link_libraries(tree_yaml_test PRIVATE Xi::Xi )
+    set_target_properties(tree_yaml_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
 endif()

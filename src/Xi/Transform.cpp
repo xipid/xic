@@ -12,21 +12,21 @@ namespace Xi {
 Matrix4 Transform::getMatrix() const {
   if (transformVersion != _cachedVersion) {
     _cachedMatrix =
-        multiply(multiply(rotateX(_rotation.x), rotateY(_rotation.y)),
-                 translate(_position.x, _position.y, _position.z));
+        multiply(multiply(multiply(rotateX(rotation.x), rotateY(rotation.y)), rotateZ(rotation.z)),
+                 translate(position.x, position.y, position.z));
     _cachedVersion = transformVersion;
   }
   return _cachedMatrix;
 }
 
 void Transform::lookAt(Vector3 target, Vector3 up) {
-  Vector3 direction = {target.x - _position.x, target.y - _position.y,
-                       target.z - _position.z};
+  Vector3 direction = {target.x - position.x, target.y - position.y,
+                       target.z - position.z};
   float horizontalDistance =
-      sqrt(direction.x * direction.x + direction.z * direction.z);
-  _rotation.x = -atan2(direction.y, horizontalDistance);
-  _rotation.y = atan2(direction.x, direction.z);
-  this->touch();
+      sqrt(direction.x * direction.x + direction.y * direction.y);
+  rotation.x = -atan2(direction.z, horizontalDistance);
+  rotation.y = atan2(direction.x, direction.y);
+  this->update();
 }
 
 // Geodesy implementation moved to header for performance (inline),
