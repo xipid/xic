@@ -148,9 +148,9 @@ String Box(const String &content, const String &title) {
   res += "┌─";
   if (!title.isEmpty()) {
     res += " " + Bold(title) + " ";
-    for (usz i = 0; i < maxLen - _visualLength(title); ++i) res += "─";
+    for (usz i = 0; i < maxLen + 1 - _visualLength(title); ++i) res += "─";
   } else {
-    for (usz i = 0; i < maxLen + 2; ++i) res += "─";
+    for (usz i = 0; i < maxLen + 3; ++i) res += "─";
   }
   res += "┐\n";
 

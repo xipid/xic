@@ -36,7 +36,7 @@ private:
   // --- Safe Pointer Verification Helper ---
   static inline bool isPointerReadable(const void* ptr) {
     if (!ptr) return false;
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__wasm__) && !defined(__EMSCRIPTEN__)
     // Try to write 1 byte from ptr to an invalid file descriptor (-1).
     // If the pointer is invalid/unmapped, the kernel returns EFAULT.
     // If the pointer is valid, the kernel returns EBADF.

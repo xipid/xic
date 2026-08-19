@@ -24,6 +24,10 @@
 
 namespace Xi {
 
+#if __cplusplus < 201703L && (!defined(_MSVC_LANG) || _MSVC_LANG < 201703L)
+i64 systemStartMicros = 0;
+#endif
+
 i64 epochMicros() { return systemStartMicros + micros(); }
 
 int getGMT() {

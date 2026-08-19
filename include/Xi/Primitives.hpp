@@ -492,9 +492,9 @@ i64 micros();
  *  @brief Global epoch offset for time synchronization.
  */
 #if __cplusplus >= 201703L || (defined(_MSVC_LANG) && _MSVC_LANG >= 201703L)
-static inline i64 systemStartMicros = 0;
+inline i64 systemStartMicros = 0;
 #else
-static i64 systemStartMicros = 0;
+extern i64 systemStartMicros;
 #endif
 
 // Specialized Hashers

@@ -144,12 +144,10 @@ String::String(f64 n) : InlineArray<u8>() { append_f32(n); }
 String::String(f32 n) : InlineArray<u8>() { append_f32((f64)n); }
 
 const char *String::c_str() {
-  if (size() == 0)
+  if (size() == 0 || !data())
     return "";
-  push(0);
-  char *ptr = (char *)data();
-  pop();
-  return ptr;
+  const_cast<u8 *>(data())[size()] = 0;
+  return (const char *)data();
 }
 
 void String::fill(u8 val) {
