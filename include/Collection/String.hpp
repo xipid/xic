@@ -16,6 +16,21 @@ class Regex;
 
 namespace Collection {
 
+namespace Detail {
+template <typename T, typename = void>
+struct IsStringViewLike {
+  static const bool Value = false;
+};
+
+template <typename T>
+struct IsStringViewLike<T, decltype((void)Xi::DeclVal<const T&>().data(), (void)Xi::DeclVal<const T&>().size())> {
+  static const bool Value = !Xi::IsSame<typename Xi::Decay<T>::Type, String>::Value &&
+                            !Xi::IsSame<typename Xi::Decay<T>::Type, InlineArray<u8>>::Value &&
+                            !Xi::IsSame<typename Xi::Decay<T>::Type, char*>::Value &&
+                            !Xi::IsSame<typename Xi::Decay<T>::Type, const char*>::Value;
+};
+}
+
 /**
  * @struct HasToString
  * @brief Compile-time check for toString() method availability.
@@ -81,9 +96,13 @@ private:
 
 public:
   using InlineArray<u8>::push;
+  using InlineArray<u8>::pushEach;
   using InlineArray<u8>::shift;
   using InlineArray<u8>::unshift;
   using InlineArray<u8>::allocate;
+
+  void append(const u8 *buf, usz len) { pushEach(buf, len); }
+  void append(const char *buf, usz len) { pushEach(reinterpret_cast<const u8*>(buf), len); }
 
   String() : InlineArray<u8>() {}
   String(const char *s);
@@ -99,6 +118,10 @@ public:
   String(u64 n);
   String(f64 n);
   String(f32 n);
+
+  // Generic string-like (std::string, std::string_view, etc.) interoperability without dragging in <string>
+  template <typename S, typename = typename Xi::EnableIf<Detail::IsStringViewLike<S>::Value>::Type>
+  String(const S &s) : String(reinterpret_cast<const u8*>(s.data()), (usz)s.size()) {}
 
   /**
    * @brief Replaces content with data from a raw memory address.
@@ -117,6 +140,32 @@ public:
   String &operator=(String &&o) noexcept {
     InlineArray<u8>::operator=(Xi::Move(o));
     return *this;
+  }
+  String &operator=(const char *s) {
+    clear();
+    if (s) append(s, str_len(s));
+    return *this;
+  }
+  template <typename S, typename = typename Xi::EnableIf<Detail::IsStringViewLike<S>::Value>::Type>
+  String &operator=(const S &s) {
+    clear();
+    append_raw(reinterpret_cast<const u8*>(s.data()), (usz)s.size());
+    return *this;
+  }
+
+  template <typename TargetString,
+            typename = typename Xi::EnableIf<!Xi::IsSame<typename Xi::Decay<TargetString>::Type, String>::Value>::Type,
+            typename = decltype(TargetString(Xi::DeclVal<const char*>(), Xi::DeclVal<usz>()))>
+  operator TargetString() const {
+    if (size() == 0) return TargetString();
+    return TargetString(reinterpret_cast<const char*>(data()), size());
+  }
+
+  template <typename TargetString,
+            typename = decltype(TargetString(Xi::DeclVal<const char*>(), Xi::DeclVal<usz>()))>
+  TargetString to() const {
+    if (size() == 0) return TargetString();
+    return TargetString(reinterpret_cast<const char*>(data()), size());
   }
 
   virtual ~String() = default;
@@ -189,6 +238,11 @@ public:
   String &operator+=(char c);
   String &operator+=(int n);
   String &operator+=(long long n);
+  template <typename S, typename = typename Xi::EnableIf<Detail::IsStringViewLike<S>::Value>::Type>
+  String &operator+=(const S &s) {
+    append_raw(reinterpret_cast<const u8*>(s.data()), (usz)s.size());
+    return *this;
+  }
 
   template <typename T>
   auto operator+=(const T &obj) -> decltype(obj.toString(), *this) {
@@ -198,9 +252,30 @@ public:
 
   bool operator==(const String &other) const;
   bool operator!=(const String &other) const { return !(*this == other); }
+
+  template <typename S, typename = typename Xi::EnableIf<Detail::IsStringViewLike<S>::Value>::Type>
+  bool operator==(const S &other) const {
+    if (size() != (usz)other.size()) return false;
+    if (size() == 0) return true;
+    return __builtin_memcmp(data(), other.data(), size()) == 0;
+  }
+
+  template <typename S, typename = typename Xi::EnableIf<Detail::IsStringViewLike<S>::Value>::Type>
+  bool operator!=(const S &other) const { return !(*this == other); }
+
   bool operator<(const String &other) const;
   bool operator==(const char *other) const;
   bool operator!=(const char *other) const { return !(*this == other); }
+
+  template <typename S, typename = typename Xi::EnableIf<Detail::IsStringViewLike<S>::Value>::Type>
+  friend bool operator==(const S &lhs, const String &rhs) {
+    return rhs == lhs;
+  }
+
+  template <typename S, typename = typename Xi::EnableIf<Detail::IsStringViewLike<S>::Value>::Type>
+  friend bool operator!=(const S &lhs, const String &rhs) {
+    return !(rhs == lhs);
+  }
 
   friend String operator+(const String &lhs, const String &rhs) {
     String s = lhs;
