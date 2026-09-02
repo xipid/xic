@@ -1,19 +1,45 @@
+# Build outputs and temporary directories
+build/
+bin/
+out/
+dev/
+.cache/
 deps/
 
+# Compiled objects and libraries
+*.o
+*.a
+*.so
+*.dylib
+*.bin
+*.elf
+*.hex
+*.dSYM/
 
-# NodeJS development things
+# Toolchains, downloads & archives
+.opt/
+*.tar
+*.tar.gz
+*.tar.xz
+*.tar.bz2
+*.zip
+
+# NodeJS / Python development
 node_modules/
-
-# Python development things
 .venv/
+venv/
 __pycache__/
-
-build/
-.cache/
-
+*.pyc
+*.pyo
 *.pyi
 
-dist/
-
-# Temporary files for development
-dev/
+# IDEs & OS metadata
+.vscode/
+.idea/
+.gemini/
+*.swp
+*.swo
+*~
+.DS_Store
+*.log
+*.tmp

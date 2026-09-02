@@ -52,26 +52,17 @@ lib_deps =
     xipid/xic
 ```
 
-### 1. Unified SFI Task Execution
+### 1. Memory-Deterministic String & Containers
 ```cpp
-#include <Task/Task.hpp>
+#include <Collection/String.hpp>
+#include <Collection/Array.hpp>
 #include <cstdio>
 
-using namespace Task;
-
-void task_payload(void* arg) {
-    std::printf("Hello from sandboxed task context!\n");
-}
+using namespace Collection;
 
 int main() {
-    Task root = Task::root();
-    Task child = root.spawn(task_payload, nullptr);
-    
-    // Enforce 5000 microsecond quota for starvation prevention
-    child.setQuota(5000);
-    child.resume();
-    
-    Task::yield();
+    String greeting = "Hello, XiC!";
+    std::printf("%s (length: %zu)\n", greeting.c_str(), greeting.size());
     return 0;
 }
 ```
@@ -102,10 +93,9 @@ int main(int argc, char** argv) {
 ├── include/            # Public headers
 │   ├── Collection/     # Memory-deterministic collections
 │   ├── Encoding/       # YAML, logging, and regex
-│   ├── Task/           # SFI Tasks and context switching
-│   ├── System/         # Child processes and system APIs
+│   ├── Security/       # Cryptographic primitives (Monocypher)
 │   ├── Hardware/       # Driver interfaces and spatial math
-│   ├── Graphics/       # Mesh and camera systems
+│   ├── Resource/       # Filesystem, compression, and networking
 │   └── Terminal/       # CLI and interactive prompting
 ├── src/                # Library source implementations
 ├── tests/              # Comprehensive test suites

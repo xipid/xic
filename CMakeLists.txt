@@ -20,9 +20,6 @@ option(XI_BUILD_DEFLATE "Build DEFLATE Compression (miniz)" ON)
 option(XI_BUILD_LZ4 "Build LZ4 Compression" ON)
 option(XI_BUILD_ZSTD "Build Zstandard Compression" ON)
 option(XI_BUILD_AS_OBJECTS "Build as an OBJECT library" ON)
-# When ON, excludes src/Task/ from Xi so the consumer (e.g. task project)
-# can provide its own Task implementation without duplicate symbols.
-option(XI_EXCLUDE_TASK "Exclude src/Task sources from Xi (consumer provides Task)" OFF)
 
 # --- Dependencies ---
 include(FetchContent)
@@ -40,8 +37,6 @@ file(GLOB_RECURSE CORE_SOURCES
     "src/Xi/*.cpp"
     "src/Collection/*.cpp"
     "src/Encoding/*.cpp"
-    "src/Task/*.cpp"
-    "src/Task/arch/*.S"
     "src/Security/*.cpp"
     "src/Resource/*.cpp"
     "src/Terminal/*.cpp"
@@ -58,12 +53,6 @@ list(FILTER CORE_SOURCES EXCLUDE REGEX "src/Resource/LZ4.cpp")
 list(FILTER CORE_SOURCES EXCLUDE REGEX "src/Resource/Zstd.cpp")
 
 set(XI_SOURCES ${CORE_SOURCES})
-
-# Exclude Task sources if the consumer provides its own implementation
-if(XI_EXCLUDE_TASK)
-    list(FILTER XI_SOURCES EXCLUDE REGEX "src/Task/.*")
-    message(STATUS "XI_EXCLUDE_TASK=ON: src/Task sources excluded from Xi")
-endif()
 
 # --- Main Target Definition ---
 if(XI_BUILD_AS_OBJECTS)
@@ -168,7 +157,7 @@ if(XI_BUILD_HARDWARE)
     target_sources(Xi PRIVATE ${HARDWARE_SOURCES})
 endif()
 
-# Task subsystem platform dependencies (Linux: pthread + rt for POSIX timers)
+# Platform dependencies (Linux: pthread + rt for POSIX timers)
 if(UNIX AND NOT APPLE AND NOT ESP_PLATFORM)
     find_library(PTHREAD_LIB pthread)
     find_library(RT_LIB rt)

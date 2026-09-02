@@ -10,10 +10,15 @@
 #include "Primitives.hpp"
 
 #if !defined(__KERNEL__) && !defined(XI_NO_STD)
-#ifndef ARDUINO
-#include <unistd.h>
-#else
-#include <Arduino.h>
+#if defined(__has_include)
+#  if __has_include(<unistd.h>)
+#    include <unistd.h>
+#  endif
+#elif !defined(ARDUINO)
+#  include <unistd.h>
+#endif
+#if defined(ARDUINO)
+#  include <Arduino.h>
 #endif
 #endif
 
@@ -29,18 +34,18 @@ namespace Xi {
  * @enum LogLevel
  * @brief Defines the severity levels for log messages.
  */
-enum class XI_EXPORT LogLevel {
-  Verbose = 0,  ///< Detailed diagnostic messages.
-  Info = 1,     ///< General informational messages.
-  Warning = 2,  ///< Potential issues that don't prevent execution.
-  Error = 3,    ///< Errors that might allow continued execution.
-  Critical = 4, ///< Fatal errors that require immediate attention.
-  None = 5      ///< Disables all logging.
+enum class LogLevel : u8 {
+  None = 0,
+  Verbose = 1,
+  Info = 2,
+  Warning = 3,
+  Error = 4,
+  Critical = 5
 };
 
 /**
  * @class Log
- * @brief Singleton logging class providing various output levels.
+ * @brief Multi-threaded, lock-free/spinlock-protected console logger.
  */
 class XI_EXPORT Log {
 private:
@@ -79,10 +84,16 @@ private:
     long ret;
     __asm__ volatile("syscall"
                      : "=a"(ret)
-                     : "a"(1), "D"(2), "S"(msg.data()), "d"(msg.length())
+                     : "a"(1), "D"(1), "S"(msg.data()), "d"(msg.length())
                      : "rcx", "r11", "memory");
+#elif defined(XI_NO_STD) && defined(__linux__) && defined(__riscv)
+    register long a0 __asm__("a0") = 1;
+    register long a1 __asm__("a1") = (long)msg.data();
+    register long a2 __asm__("a2") = (long)msg.length();
+    register long a7 __asm__("a7") = 64; // sys_write
+    __asm__ volatile("ecall" : "+r"(a0) : "r"(a1), "r"(a2), "r"(a7) : "memory");
 #else
-    ::write(2, msg.data(), msg.length());
+    ::write(1, msg.data(), msg.length());
 #endif
   }
 
@@ -110,10 +121,16 @@ private:
     long ret;
     __asm__ volatile("syscall"
                      : "=a"(ret)
-                     : "a"(1), "D"(2), "S"("\n"), "d"(1)
+                     : "a"(1), "D"(1), "S"("\n"), "d"(1)
                      : "rcx", "r11", "memory");
+#elif defined(XI_NO_STD) && defined(__linux__) && defined(__riscv)
+    register long a0 __asm__("a0") = 1;
+    register long a1 __asm__("a1") = (long)"\n";
+    register long a2 __asm__("a2") = 1;
+    register long a7 __asm__("a7") = 64; // sys_write
+    __asm__ volatile("ecall" : "+r"(a0) : "r"(a1), "r"(a2), "r"(a7) : "memory");
 #else
-    ::write(2, "\n", 1);
+    ::write(1, "\n", 1);
 #endif
   }
 

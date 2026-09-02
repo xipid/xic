@@ -29,6 +29,14 @@ i64 millis() {
   return ::millis();
 #elif defined(ESP_PLATFORM)
   return esp_timer_get_time() / 1000ULL;
+#elif defined(__XTENSA__)
+  unsigned ccount;
+  __asm__ volatile("rsr %0, ccount" : "=a"(ccount));
+  return (i64)(ccount / 240000);
+#elif defined(__riscv)
+  unsigned long cycles;
+  __asm__ volatile("rdcycle %0" : "=r"(cycles));
+  return (i64)(cycles / 160000);
 #elif defined(_WIN32)
   return ::GetTickCount();
 #elif defined(XI_NO_STD) && defined(__linux__)
@@ -63,6 +71,14 @@ i64 micros() {
   return ::micros();
 #elif defined(ESP_PLATFORM)
   return esp_timer_get_time();
+#elif defined(__XTENSA__)
+  unsigned ccount;
+  __asm__ volatile("rsr %0, ccount" : "=a"(ccount));
+  return (i64)(ccount / 240);
+#elif defined(__riscv)
+  unsigned long cycles;
+  __asm__ volatile("rdcycle %0" : "=r"(cycles));
+  return (i64)(cycles / 160);
 #elif defined(_WIN32)
   static long long freq = 0;
   if (freq == 0)

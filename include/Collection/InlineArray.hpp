@@ -8,8 +8,21 @@
 #define XI_CORE_INLINE_ARRAY_HPP
 
 #include "../Xi/Primitives.hpp"
-#include <cstring>
-#include <atomic>
+#if !defined(__KERNEL__) && !defined(XI_NO_STD) && !defined(MECA_EMBEDDED)
+#if defined(__has_include)
+#  if __has_include(<cstring>)
+#    include <cstring>
+#  endif
+#  if __has_include(<atomic>)
+#    include <atomic>
+#    define XI_HAS_STD_ATOMIC 1
+#  endif
+#else
+#  include <cstring>
+#  include <atomic>
+#  define XI_HAS_STD_ATOMIC 1
+#endif
+#endif
 
 #if defined(AVR) || defined(ARDUINO)
 #define XI_ARRAY_MIN_CAP 4
@@ -23,10 +36,7 @@ namespace Collection {
 
 /**
  * @class InlineArray
- * @brief A high-performance, reference-counted, contiguous dynamic array.
- *
- * Supports Copy-on-Write (CoW), slicing, and multi-dimensional views.
- * Can also represent data resident on hardware devices (GPU/DSP).
+ * @brief Dynamic contiguous container with reference counting and optional CoW.
  *
  * @tparam T Element type.
  */
@@ -37,7 +47,11 @@ public:
    * @brief Internal control block for memory management and reference counting.
    */
   struct Block {
+#if defined(XI_HAS_STD_ATOMIC)
     std::atomic<usz> useCount; ///< Number of InlineArray instances sharing this block.
+#else
+    usz useCount; ///< Number of InlineArray instances sharing this block.
+#endif
     usz capacity; ///< Total allocated capacity in elements.
     usz _length;  ///< Actually used length of the allocated memory.
 
@@ -114,7 +128,7 @@ public:
       }
       if (!b->device) {
         T *ptr = b->get_data();
-        for (usz i = 0; i <= b->_length; ++i)
+        for (usz i = 0; i < b->_length; ++i)
           ptr[i].~T();
       }
       ::operator delete(b);
@@ -163,6 +177,8 @@ public:
   InlineArray &operator=(const InlineArray &other) {
     if (this == &other)
       return *this;
+    if (other.block)
+      other.block->useCount++;
     destroy();
     if (_dims) {
       delete[] _dims;
@@ -178,7 +194,6 @@ public:
       for (u8 i = 0; i < _rank; i++)
         _dims[i] = other._dims[i];
     }
-    retain();
     return *this;
   }
 
@@ -232,7 +247,11 @@ public:
    */
   void destroy() {
     if (block) {
+#if defined(XI_HAS_STD_ATOMIC)
       if (block->useCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+#else
+      if (--block->useCount == 0) {
+#endif
         Block::destroy(block);
       }
       block = nullptr;
@@ -390,8 +409,42 @@ public:
   }
 
   void pushEach(const T *vals, usz count) {
-    for (usz i = 0; i < count; ++i)
-      push(vals[i]);
+    if (!vals || count == 0) return;
+    if (!block) {
+      usz cap = count < XI_ARRAY_MIN_CAP ? XI_ARRAY_MIN_CAP : count;
+      block = Block::allocate(cap);
+      _data = block->get_data();
+      _length = 0;
+      offset = 0;
+      new (&_data[0]) T();
+    }
+    if (block->useCount > 1 || _data != block->get_data() ||
+        (_data + _length) != (block->get_data() + block->_length) ||
+        (block->_length + count > block->capacity)) {
+      usz old_s = _length;
+      usz new_cap = old_s + count;
+      if (block && block->capacity < (1ULL << 30) && new_cap < block->capacity * 2) new_cap = block->capacity * 2;
+      if (new_cap < XI_ARRAY_MIN_CAP) new_cap = XI_ARRAY_MIN_CAP;
+      Block *nb = Block::allocate(new_cap);
+      T *dst = nb->get_data();
+      for (usz i = 0; i < old_s; ++i)
+        new (&dst[i]) T(Xi::Move(_data[i]));
+      for (usz i = 0; i < count; ++i)
+        new (&dst[old_s + i]) T(vals[i]);
+      nb->_length = old_s + count;
+      new (&dst[nb->_length]) T();
+      destroy();
+      block = nb;
+      _data = nb->get_data();
+      _length = nb->_length;
+      return;
+    }
+    for (usz i = 0; i < count; ++i) {
+      new (&_data[_length + i]) T(vals[i]);
+    }
+    _length += count;
+    block->_length = _length;
+    new (&_data[_length]) T();
   }
 
   void set(const T *vals, usz count) {

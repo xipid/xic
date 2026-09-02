@@ -16,6 +16,23 @@ Command::Command(const String &s) : Command() { parse(s); }
 
 Command::Command(int argc, char **argv) : Command() { parse(argc, argv); }
 
+Command::~Command() {
+  for (usz i = 0; i < definedCommands.size(); ++i) {
+    delete definedCommands[i];
+  }
+  definedCommands.clear();
+  _subcommands.clear();
+  for (usz i = 0; i < definedOptions.size(); ++i) {
+    delete definedOptions[i];
+  }
+  definedOptions.clear();
+  _optionObjs.clear();
+  for (auto it = _separatedObjs.begin(); it != _separatedObjs.end(); ++it) {
+    delete it->value;
+  }
+  _separatedObjs.clear();
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Parsing
 // ═══════════════════════════════════════════════════════════════════════
@@ -253,7 +270,10 @@ void Command::_applySeparators() {
   if (_separated || _separatorTokens.size() == 0) return;
   _separated = true;
 
-  separated.clear();
+  for (auto it = _separatedObjs.begin(); it != _separatedObjs.end(); ++it) {
+    delete it->value;
+  }
+  _separatedObjs.clear();
   Array<String> currentTokens;
   String currentSep = "";
 
@@ -262,7 +282,10 @@ void Command::_applySeparators() {
     for (usz j = 0; j < _separatorTokens.size(); ++j) {
       if (_tokens[i] == _separatorTokens[j]) {
         isSep = true;
-        separated[currentSep].parse(currentTokens);
+        if (!_separatedObjs.has(currentSep)) {
+          _separatedObjs[currentSep] = new Command();
+        }
+        _separatedObjs[currentSep]->parse(currentTokens);
         currentTokens.clear();
         currentSep = _tokens[i];
         break;
@@ -270,14 +293,17 @@ void Command::_applySeparators() {
     }
     if (!isSep) currentTokens.push(_tokens[i]);
   }
-  separated[currentSep].parse(currentTokens);
+  if (!_separatedObjs.has(currentSep)) {
+    _separatedObjs[currentSep] = new Command();
+  }
+  _separatedObjs[currentSep]->parse(currentTokens);
 
   // Update root value to pre-separator tokens only
-  if (separated.has("")) {
+  if (_separatedObjs.has("")) {
     value.clear();
-    Command &root = separated[""];
-    for (usz i = 0; i < root._positionals.size(); ++i)
-      value.push(root._positionals[i]);
+    Command *root = _separatedObjs[""];
+    for (usz i = 0; i < root->_positionals.size(); ++i)
+      value.push(root->_positionals[i]);
   }
 }
 
@@ -294,7 +320,10 @@ Command &Command::separate(const String &seps) {
   _applySeparators();
 
   String firstSep = sepList.size() > 0 ? sepList[0] : "";
-  return separated[firstSep];
+  if (!_separatedObjs.has(firstSep)) {
+    _separatedObjs[firstSep] = new Command();
+  }
+  return *_separatedObjs[firstSep];
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -340,7 +369,7 @@ void Command::_gatherOption(OptionDef &def) {
 Command &Command::option(const String &names) {
   // Idempotent: return cached result if same names string
   if (_optionObjs.has(names))
-    return _optionObjs[names];
+    return *_optionObjs[names];
 
   OptionDef def;
   Array<String> parts = _splitNames(names);
@@ -370,17 +399,18 @@ Command &Command::option(const String &names) {
 
   def.displayName = displayParts;
 
-  Command &opt = _optionObjs[names];
-  opt.name = displayParts;
-  opt.active = false;
-  def.result = &opt;
+  Command *opt = new Command();
+  opt->name = displayParts;
+  opt->active = false;
+  _optionObjs[names] = opt;
+  def.result = opt;
 
   _gatherOption(def);
 
   _optionDefs.push(def);
-  definedOptions.push(&opt);
+  definedOptions.push(opt);
 
-  return opt;
+  return *opt;
 }
 
 Command &Command::flag(const String &names) {
@@ -403,7 +433,7 @@ Command &Command::flag(const String &names) {
 
 Command &Command::command(const String &names) {
   if (_subcommands.has(names))
-    return _subcommands[names];
+    return *_subcommands[names];
 
   CommandDef def;
   Array<String> parts = _splitNames(names);
@@ -412,16 +442,17 @@ Command &Command::command(const String &names) {
   for (usz i = 0; i < parts.size(); ++i)
     def.aliases.push(parts[i]);
 
-  Command &cmd = _subcommands[names];
-  cmd.name = firstName;
-  cmd.active = false;
-  def.result = &cmd;
+  Command *cmd = new Command();
+  cmd->name = firstName;
+  cmd->active = false;
+  _subcommands[names] = cmd;
+  def.result = cmd;
 
   // Check if any alias matches the primary positional
   String prim = primary();
   for (usz i = 0; i < def.aliases.size(); ++i) {
     if (def.aliases[i] == prim) {
-      cmd.active = true;
+      cmd->active = true;
       // Collect all tokens AFTER the matched command token
       Array<String> subTokens;
       bool found = false;
@@ -432,15 +463,15 @@ Command &Command::command(const String &names) {
           found = true;
         }
       }
-      cmd.parse(subTokens);
+      cmd->parse(subTokens);
       break;
     }
   }
 
   _commandDefs.push(def);
-  definedCommands.push(&cmd);
+  definedCommands.push(cmd);
 
-  return cmd;
+  return *cmd;
 }
 
 // ═══════════════════════════════════════════════════════════════════════

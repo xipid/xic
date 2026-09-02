@@ -53,6 +53,12 @@ public:
   Command(const char *s);
   Command(const String &s);
   Command(int argc, char **argv);
+  ~Command();
+
+  Command(const Command &) = delete;
+  Command &operator=(const Command &) = delete;
+  Command(Command &&) = delete;
+  Command &operator=(Command &&) = delete;
 
   // ─── Parse ──────────────────────────────────────────────────────────
 
@@ -185,7 +191,7 @@ public:
   Array<Command *> definedCommands;   ///< All registered sub-commands.
   Array<Command *> definedOptions;    ///< All registered options.
 
-  Map<String, Command> separated;     ///< Separator-split sub-streams.
+  Map<String, Command *> _separatedObjs;     ///< Separator-split sub-streams.
 
 private:
   // ─── Internal types ────────────────────────────────────────────────
@@ -212,8 +218,8 @@ private:
   Array<CommandDef> _commandDefs;
   Array<String> _separatorTokens;
 
-  Map<String, Command> _subcommands;  // owned
-  Map<String, Command> _optionObjs;   // owned
+  Map<String, Command *> _subcommands;  // owned
+  Map<String, Command *> _optionObjs;   // owned
 
   String _version;
   String _usageStr;

@@ -148,7 +148,10 @@ String Box(const String &content, const String &title) {
   res += "┌─";
   if (!title.isEmpty()) {
     res += " " + Bold(title) + " ";
-    for (usz i = 0; i < maxLen + 1 - _visualLength(title); ++i) res += "─";
+    usz visTitle = _visualLength(title);
+    if (maxLen + 1 > visTitle) {
+      for (usz i = 0; i < maxLen + 1 - visTitle; ++i) res += "─";
+    }
   } else {
     for (usz i = 0; i < maxLen + 3; ++i) res += "─";
   }
@@ -157,7 +160,9 @@ String Box(const String &content, const String &title) {
   // Content
   for (usz i = 0; i < lines.size(); ++i) {
     usz vln = _visualLength(lines[i]);
-    res += "│  " + lines[i].padEnd(maxLen + (lines[i].length() - vln)) + "  │\n";
+    usz len = lines[i].length();
+    usz targetLen = (len >= vln) ? (maxLen + (len - vln)) : maxLen;
+    res += "│  " + lines[i].padEnd(targetLen) + "  │\n";
   }
 
   // Bottom border

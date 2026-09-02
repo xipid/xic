@@ -26,6 +26,9 @@ template <typename K, typename V> struct MapEntry {
 
   MapEntry() : key(), value(), fnvHash(0) {}
 
+  MapEntry(K &&k, V &&v, u32 h)
+      : key(Xi::Move(k)), value(Xi::Move(v)), fnvHash(h | 1) {}
+
   MapEntry(MapEntry &&o) noexcept
       : key(Xi::Move(o.key)), value(Xi::Move(o.value)), fnvHash(o.fnvHash) {
     o.fnvHash = 0;
@@ -74,7 +77,7 @@ private:
   }
 
   void allocate_buckets(usz newCap) {
-    buckets.allocate(newCap);
+    buckets.allocate(newCap, true);
     capacity = newCap;
     mask = newCap - 1;
     threshold = (newCap * 85) / 100;
@@ -90,10 +93,7 @@ private:
     usz idx = (usz)h & capMask;
     usz psl = 0;
 
-    MapEntry<K, V> toInsert;
-    toInsert.key = Xi::Move(key);
-    toInsert.value = Xi::Move(val);
-    toInsert.setHash(h);
+    MapEntry<K, V> toInsert(Xi::Move(key), Xi::Move(val), h);
 
     for (usz i = 0; i < cap; ++i) {
       MapEntry<K, V> &slot = slots[idx];

@@ -7,12 +7,13 @@
 #define XI_CORE_FUNC_HPP
 
 #include "Primitives.hpp"
+#if !defined(__KERNEL__) && !defined(XI_NO_STD) && !defined(MECA_EMBEDDED)
 #include <cstddef>
-
 #if defined(__linux__)
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <errno.h>
+#endif
 #endif
 
 namespace Xi {
@@ -24,7 +25,7 @@ private:
   static constexpr usz SBO_Size = 128; ///< Threshold for SBO.
 
   union Storage {
-    alignas(max_align_t) u8 local[SBO_Size];
+    alignas(16) u8 local[SBO_Size];
     void *heap;
   } data;
 
@@ -36,7 +37,7 @@ private:
   // --- Safe Pointer Verification Helper ---
   static inline bool isPointerReadable(const void* ptr) {
     if (!ptr) return false;
-#if defined(__linux__) && !defined(__wasm__) && !defined(__EMSCRIPTEN__)
+#if defined(__linux__) && !defined(__wasm__) && !defined(__EMSCRIPTEN__) && !defined(MECA_EMBEDDED) && !defined(XI_NO_STD)
     // Try to write 1 byte from ptr to an invalid file descriptor (-1).
     // If the pointer is invalid/unmapped, the kernel returns EFAULT.
     // If the pointer is valid, the kernel returns EBADF.

@@ -166,8 +166,9 @@ struct YamlParser {
       if (i >= input.length())
         return nullptr;
 
-      // Skip Directives (%YAML, %TAG)
-      if (input.charAt(i) == '%') {
+      // Skip Directives (%YAML, %TAG) at root level
+      if (currentIndent == 0 && input.charAt(i) == '%' &&
+          (input.indexOf("%YAML", i) == i || input.indexOf("%TAG", i) == i)) {
         while (i < input.length() && input.charAt(i) != '\n')
           i++;
         isNewLine = true;
@@ -271,15 +272,16 @@ struct YamlParser {
     // Block Sequence
     if (input.charAt(i) == '-' && (i + 1 < input.length() && isSpace(input.charAt(i + 1)))) {
       NamedNode<void> *arr = new NamedNode<void>();
+      int seqIndent = currentIndent;
       while (i < input.length()) {
         skipComments(arr);
-        if (currentIndent < blockIndent)
+        if (currentIndent < seqIndent)
           break;
         if (input.charAt(i) != '-')
           break;
         i++; // skip '-'
         skipSpace();
-        NodeBase *val = parseValue(blockIndent + 2, arr);
+        NodeBase *val = parseValue(seqIndent + 1, arr);
         if (val)
           arr->add(val);
         skipComments(arr);

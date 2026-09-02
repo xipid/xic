@@ -47,11 +47,19 @@ public:
    * @brief Copy constructor (deep copy of metadata).
    */
   Array(const Array &other)
-      : fragments(other.fragments), _dims(nullptr), _rank(other._rank) {
+      : _dims(nullptr), _rank(other._rank) {
     if (other._dims) {
       _dims = new usz[_rank];
       for (u8 i = 0; i < _rank; i++)
         _dims[i] = other._dims[i];
+    }
+    for (usz i = 0; i < other.fragments.size(); ++i) {
+      InlineArray<T> f;
+      f.offset = other.fragments[i].offset;
+      for (usz k = 0; k < other.fragments[i].size(); ++k) {
+        f.push(other.fragments[i][k]);
+      }
+      fragments.push(Xi::Move(f));
     }
   }
 
@@ -72,7 +80,7 @@ public:
   Array &operator=(const Array &other) {
     if (this == &other)
       return *this;
-    fragments = other.fragments;
+    fragments.destroy();
     if (_dims) {
       delete[] _dims;
       _dims = nullptr;
@@ -82,6 +90,14 @@ public:
       _dims = new usz[_rank];
       for (u8 i = 0; i < _rank; i++)
         _dims[i] = other._dims[i];
+    }
+    for (usz i = 0; i < other.fragments.size(); ++i) {
+      InlineArray<T> f;
+      f.offset = other.fragments[i].offset;
+      for (usz k = 0; k < other.fragments[i].size(); ++k) {
+        f.push(other.fragments[i][k]);
+      }
+      fragments.push(Xi::Move(f));
     }
     return *this;
   }
@@ -345,7 +361,7 @@ public:
   }
 
   usz size() const {
-    if (fragments.size() == 0)
+    if (fragments.size() == 0 || !fragments.data())
       return 0;
     const InlineArray<T> &last = fragments.data()[fragments.size() - 1];
     return last.offset + last.size();

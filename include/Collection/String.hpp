@@ -168,7 +168,7 @@ public:
     return TargetString(reinterpret_cast<const char*>(data()), size());
   }
 
-  virtual ~String() = default;
+  ~String() = default;
 
   /**
    * @brief Clears the string content.

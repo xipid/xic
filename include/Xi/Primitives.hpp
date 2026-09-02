@@ -12,7 +12,7 @@ namespace Collection {
 class String;
 }
 
-#if !defined(__KERNEL__) && !defined(XI_NO_STD)
+#if !defined(__KERNEL__) && !defined(XI_NO_STD) && !defined(MECA_EMBEDDED)
 #include <time.h>
 #endif
 
@@ -566,48 +566,20 @@ inline void sleepU(u64 us) {
       xDelay = 1;
     vTaskDelay(xDelay);
   #endif
+#elif defined(XI_NO_STD) || defined(MECA_EMBEDDED) || defined(__XTENSA__) || defined(__riscv)
+  i64 start = micros();
+  while (micros() - start < (i64)us) {
+    // busy wait
+  }
+#elif defined(__KERNEL__)
+  udelay(us);
 #elif defined(ARDUINO)
-  ::delay(static_cast<unsigned long>(us / 1000));
+  delayMicroseconds(us);
 #elif defined(_WIN32)
   ::Sleep(static_cast<DWORD>(us / 1000));
-#elif defined(XI_NO_STD) && defined(__linux__)
-  #if defined(__x86_64__)
-    struct {
-      long long tv_sec;
-      long long tv_nsec;
-    } ts;
-    ts.tv_sec = static_cast<long long>(us / 1000000);
-    ts.tv_nsec = static_cast<long long>((us % 1000000) * 1000);
-    long ret;
-    __asm__ volatile (
-      "syscall"
-      : "=a"(ret)
-      : "a"(35), "D"(&ts), "S"(nullptr)
-      : "rcx", "r11", "memory"
-    );
-  #elif defined(__i386__)
-    struct {
-      long tv_sec;
-      long tv_nsec;
-    } ts;
-    ts.tv_sec = static_cast<long>(us / 1000000);
-    ts.tv_nsec = static_cast<long>((us % 1000000) * 1000);
-    long ret;
-    __asm__ volatile (
-      "int $0x80"
-      : "=a"(ret)
-      : "a"(162), "b"(&ts), "c"(nullptr)
-      : "memory"
-    );
-  #else
-    i64 start = micros();
-    while (micros() - start < (i64)us) {
-      // busy wait
-    }
-  #endif
 #else
   struct timespec ts;
-  ts.tv_sec = static_cast<time_t>(us / 1000000);
+  ts.tv_sec = static_cast<long>(us / 1000000);
   ts.tv_nsec = static_cast<long>((us % 1000000) * 1000);
   nanosleep(&ts, nullptr);
 #endif
@@ -621,7 +593,7 @@ inline void sleepM(u64 ms) { sleepU(ms * 1000); }
 
 #ifndef __PLACEMENT_NEW_INLINE
 #define __PLACEMENT_NEW_INLINE
-inline void *operator new(usz, void *p) noexcept { return p; }
+inline void *operator new(Xi::usz, void *p) noexcept { return p; }
 inline void operator delete(void *, void *) noexcept {}
 #endif
 
